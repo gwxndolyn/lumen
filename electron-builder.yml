@@ -1,0 +1,19 @@
+appId: dev.lumen.assistant
+productName: Lumen
+directories:
+  output: release
+files:
+  - dist-electron/**
+  - dist-renderer/**
+  - package.json
+mac:
+  category: public.app-category.productivity
+  target: dmg
+  extendInfo:
+    NSMicrophoneUsageDescription: Lumen uses the microphone only while you are recording a live transcript.
+    NSScreenCaptureUsageDescription: Lumen captures your screen only when you ask it to, to answer questions about what you see.
+win:
+  target: nsis
+linux:
+  target: AppImage
+  category: Utility
