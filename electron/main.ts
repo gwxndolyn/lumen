@@ -16,22 +16,14 @@ import {
 import fs from "node:fs";
 import path from "node:path";
 import { z } from "zod";
-import { ChatService } from "../src/core/chatService";
-import { ContextStore } from "../src/core/context/contextStore";
-import { chunkText, normalizeText } from "../src/core/context/text";
-import { generateInsights } from "../src/core/meetingService";
-import { Metrics } from "../src/core/metrics";
-import { AnthropicProvider } from "../src/core/providers/anthropic";
-import { MockProvider } from "../src/core/providers/mock";
-import { ProviderError, type AIProvider } from "../src/core/providers/types";
+import { AppCore } from "../src/core/app";
+import { TesseractOcr } from "../src/core/ocr";
+import { SUPPORTED_DOC_EXTENSIONS, extractDocumentText } from "../src/core/knowledge";
 import { Store } from "../src/core/storage/db";
-import { DeepgramProvider } from "../src/core/transcription/deepgram";
-import { TranscriptSession } from "../src/core/transcription/session";
-import { DEFAULT_SHORTCUTS } from "../src/shared/defaults";
-import { applySettingsPatch, loadSettings } from "../src/shared/settingsSchema";
-import type { ChatEvent, Diagnostics, Settings, TranscriptEvent } from "../src/shared/types";
-import { CaptureService, permissionSettingsUrl, permissionStatus, requestMicrophone } from "./capture";
-import { extractDocumentText, SUPPORTED_DOC_EXTENSIONS } from "./documents";
+import type { AppEvent } from "../src/shared/api";
+import { loadSettings, modeEnum, styleEnum, toneEnum, effortEnum } from "../src/shared/settingsSchema";
+import type { AudioInputState, Diagnostics, Settings } from "../src/shared/types";
+import { CaptureService, IMAGE_EXTENSIONS, permissionSettingsUrl, permissionStatus, requestMicrophone } from "./capture";
 import { Logger } from "./logger";
 import { SecretStore } from "./secrets";
 import { isTrustedUrl, WindowManager } from "./windows";
@@ -46,42 +38,24 @@ if (!app.requestSingleInstanceLock()) {
 
 const userData = app.getPath("userData");
 const logger = new Logger(path.join(userData, "logs"));
+const secrets = new SecretStore(userData, safeStorage);
+const capture = new CaptureService();
+const shortcutStatus: Record<string, boolean> = {};
 let store: Store;
-let settings: Settings;
+let core: AppCore;
 let windows: WindowManager;
 let tray: Tray | null = null;
-const secrets = new SecretStore(userData, safeStorage);
-const context = new ContextStore();
-const metrics = new Metrics();
-const capture = new CaptureService();
-let liveSession: TranscriptSession | null = null;
-const shortcutStatus: Record<string, boolean> = {};
+/** Latest microphone/system-audio state reported by the overlay renderer (for diagnostics). */
+let audioState: AudioInputState | null = null;
+export const getAudioState = () => audioState;
 
-function persistSettings() {
-  store.setKv("settings", JSON.stringify(settings));
+function emitApp(e: AppEvent) {
+  windows?.broadcast("lumen:app", e);
+  if (e.type === "settings") {
+    windows?.applyOverlaySettings();
+    logger.level = e.settings.diagnostics.logLevel;
+  }
 }
-
-function getProvider(): AIProvider | null {
-  if (settings.provider.kind === "mock") return new MockProvider();
-  const key = secrets.get("anthropic");
-  return key ? new AnthropicProvider({ apiKey: key }) : null;
-}
-
-function emitChat(e: ChatEvent) {
-  windows.broadcast("lumen:chat", e);
-  if (e.type === "done" || e.type === "cancelled") windows.broadcast("lumen:app", { type: "history-changed" });
-}
-function emitTranscript(e: TranscriptEvent) {
-  windows.broadcast("lumen:transcript", e);
-  updateTray();
-}
-function emitApp(e: unknown) {
-  windows.broadcast("lumen:app", e);
-}
-
-let chat: ChatService;
-
-context.onChange(() => emitApp({ type: "context", items: context.summaries() }));
 
 // ---------------- shortcuts ----------------
 function registerShortcuts() {
@@ -89,10 +63,11 @@ function registerShortcuts() {
   const map: [keyof Settings["shortcuts"], () => void][] = [
     ["toggleOverlay", () => windows.toggleOverlay()],
     ["askAboutScreen", () => void askAboutScreen()],
+    ["askAboutSelection", () => void askAboutSelection()],
     ["openMainWindow", () => windows.openMain()],
   ];
   for (const [name, fn] of map) {
-    const acc = settings.shortcuts[name];
+    const acc = core.settings.shortcuts[name];
     let ok = false;
     try {
       ok = globalShortcut.register(acc, fn);
@@ -104,42 +79,72 @@ function registerShortcuts() {
   }
 }
 
+function toast(level: "info" | "error", message: string) {
+  emitApp({ type: "toast", level, message });
+}
+
+async function captureAndAttach(sourceId: string | null, region: null = null) {
+  const wasVisible = windows.overlay?.isVisible();
+  windows.hideOverlay(); // never capture our own panel
+  await new Promise((r) => setTimeout(r, 150));
+  try {
+    const held = sourceId ? await capture.capture(sourceId) : await capture.captureCursorDisplay();
+    const f = capture.finalize(held.captureId, region);
+    return core.addCapture({ title: `Screen — ${f.title}`, sourceId: f.sourceId, vision: f.vision, ocrPng: f.ocrPng, thumbnailDataUrl: f.thumbnailDataUrl }).record;
+  } finally {
+    if (wasVisible !== false) windows.showOverlay();
+  }
+}
+
 async function askAboutScreen() {
-  if (!settings.consent.screen) {
+  if (!core.settings.consent.screen) {
     windows.openMain("/main/permissions");
-    emitApp({ type: "toast", level: "info", message: "Enable screen context in Permissions first." });
+    toast("info", "Enable screen context in Permissions first.");
     return;
   }
   try {
-    const wasVisible = windows.overlay?.isVisible();
-    windows.hideOverlay(); // never capture our own panel
-    await new Promise((r) => setTimeout(r, 120));
-    const id = await capture.captureCursorDisplay();
-    const img = capture.finalize(id, null);
-    context.add({ kind: "screenshot", title: `Screen — ${img.title}`, text: "", image: { mediaType: img.mediaType, data: img.data } });
+    await captureAndAttach(null);
     windows.showOverlay();
-    if (!wasVisible) logger.info("screen captured via shortcut");
   } catch (err) {
     windows.showOverlay();
-    emitApp({ type: "toast", level: "error", message: (err as Error).message });
+    toast("error", (err as Error).message);
   }
+}
+
+/**
+ * Attach the user's current text selection. There is no cross-platform API to read another app's
+ * selection, so this uses the documented copy convention: the user copies (⌘/Ctrl+C) and Lumen
+ * reads the clipboard only at that moment, at the user's request.
+ */
+async function askAboutSelection() {
+  const text = (await clipboard.readText()).slice(0, 200_000);
+  if (!text.trim()) {
+    windows.showOverlay();
+    toast("info", "Copy the text you want to ask about (⌘/Ctrl+C), then press the shortcut again.");
+    return;
+  }
+  core.addText("selected_text", `Selection — ${text.replace(/\s+/g, " ").slice(0, 40)}`, text);
+  windows.showOverlay();
 }
 
 // ---------------- tray ----------------
 function updateTray() {
   if (!tray) return;
-  const recording = liveSession && (liveSession.status === "recording" || liveSession.status === "reconnecting");
-  tray.setToolTip(recording ? "Lumen — recording transcript" : "Lumen");
-  if (process.platform === "darwin") tray.setTitle(recording ? " ● REC" : "");
+  const live = core.live;
+  const recording = !!live && ["recording", "reconnecting", "connecting", "paused"].includes(live.status);
+  const screenLive = core.liveScreenState.active;
+  tray.setToolTip(recording ? "Lumen — recording transcript" : screenLive ? "Lumen — live screen context on" : "Lumen");
+  if (process.platform === "darwin") tray.setTitle(recording ? (live!.status === "paused" ? " ❚❚ REC" : " ● REC") : screenLive ? " ▣ LIVE" : "");
   tray.setContextMenu(
     Menu.buildFromTemplate([
-      { label: "Show / hide assistant", accelerator: settings.shortcuts.toggleOverlay, click: () => windows.toggleOverlay() },
+      { label: "Show / hide assistant", accelerator: core.settings.shortcuts.toggleOverlay, click: () => windows.toggleOverlay() },
       { label: "Open Lumen", click: () => windows.openMain() },
       { type: "separator" },
       recording
-        ? { label: "Stop recording", click: () => stopTranscript() }
+        ? { label: "Stop recording", click: () => core.stopTranscript() }
         : { label: "Live transcript…", click: () => windows.openMain("/main/transcript") },
-      { label: "Clear session context", click: () => context.clear() },
+      ...(screenLive ? [{ label: "Stop live screen context", click: () => core.stopLiveScreen() }] : []),
+      { label: "Clear session context", click: () => core.engine.clear(core.activeSessionId) },
       { type: "separator" },
       { label: "Settings", click: () => windows.openMain("/main/settings") },
       { label: "Quit Lumen", role: "quit" },
@@ -156,38 +161,6 @@ function createTray() {
   updateTray();
 }
 
-// ---------------- transcript ----------------
-function startTranscript(title: string) {
-  if (liveSession && liveSession.status !== "stopped" && liveSession.status !== "error") return;
-  if (!settings.consent.microphone) throw new ProviderError("Enable microphone access for Lumen in Permissions first.", "bad_request", false);
-  if (settings.transcription.kind === "none") throw new ProviderError("Choose a transcription provider in Settings first.", "bad_request", false);
-  const key = secrets.get("deepgram");
-  if (!key) throw new ProviderError("Add a Deepgram API key in Settings → Transcription to record a live transcript.", "missing_credentials", false);
-  liveSession = new TranscriptSession(
-    new DeepgramProvider(key),
-    store,
-    emitTranscript,
-    { language: settings.transcription.language, diarize: true, title: title.trim().slice(0, 120) || `Meeting ${new Date().toLocaleString()}` },
-    (ms) => metrics.recordTranscriptionLatency(ms),
-  );
-  emitApp({
-    type: "audio-command",
-    command: "start",
-    micDeviceId: settings.transcription.microphoneDeviceId,
-    systemAudio: settings.transcription.captureSystemAudio && settings.consent.systemAudio,
-  });
-  logger.info("transcript started", { sessionId: liveSession.id });
-}
-
-function stopTranscript() {
-  emitApp({ type: "audio-command", command: "stop", micDeviceId: null, systemAudio: false });
-  if (liveSession) {
-    liveSession.stop();
-    logger.info("transcript stopped", { sessionId: liveSession.id });
-  }
-  updateTray();
-}
-
 // ---------------- IPC ----------------
 type Handler = (event: IpcMainInvokeEvent, ...args: unknown[]) => unknown;
 
@@ -199,218 +172,377 @@ function handle(channel: string, fn: Handler) {
     try {
       return await fn(event, ...args);
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Unexpected error";
+      const message = err instanceof z.ZodError ? "Invalid request." : err instanceof Error ? err.message : "Unexpected error";
       logger.warn("ipc error", { channel, message });
-      throw new Error(message);
+      // Only the sanitized message crosses to the renderer; the original is logged above.
+      throw new Error(message, { cause: err });
     }
   });
 }
 
 const str = (max: number) => z.string().max(max);
 const id = z.string().min(1).max(100);
+const secretName = z.enum(["anthropic", "deepgram", "openai_compat"]);
 
-async function readClipboardText(): Promise<string> {
-  return (await clipboard.readText()).slice(0, 200_000);
+function winOf(e: IpcMainInvokeEvent) {
+  return BrowserWindow.fromWebContents(e.sender) ?? windows.main ?? windows.overlay!;
+}
+
+/** Reject access to records that belong to a session other than the active one. */
+function assertConversationInActive(convId: string) {
+  const c = store.getConversation(convId);
+  if (!c) throw new Error("Conversation not found.");
+  if (c.sessionId !== core.activeSessionId) throw new Error("That conversation belongs to another session.");
+  return c;
+}
+function assertTranscriptInActive(tid: string) {
+  if (tid.startsWith("mem-")) {
+    if (core.live?.id !== tid) throw new Error("This in-memory transcript has been discarded.");
+    return;
+  }
+  const t = store.getTranscriptSession(tid);
+  if (!t) throw new Error("Transcript not found.");
+  if (t.sessionId !== core.activeSessionId) throw new Error("That transcript belongs to another session.");
 }
 
 function registerIpc() {
-  handle("settings:get", () => settings);
+  // ---- settings ----
+  handle("settings:get", () => core.settings);
   handle("settings:update", (_e, patch) => {
-    const prev = settings;
-    settings = applySettingsPatch(settings, patch);
-    persistSettings();
-    if (JSON.stringify(prev.shortcuts) !== JSON.stringify(settings.shortcuts)) registerShortcuts();
-    windows.applyOverlaySettings();
-    if (!settings.consent.microphone && liveSession) stopTranscript();
-    if (!settings.consent.screen) context.clear("screenshot");
-    emitApp({ type: "settings", settings });
+    const prev = core.settings;
+    const next = core.updateSettings(patch);
+    if (JSON.stringify(prev.shortcuts) !== JSON.stringify(next.shortcuts)) registerShortcuts();
+    if (prev.overlay.position !== next.overlay.position) windows.applyPosition(next);
+    if (prev.consent.screen && !next.consent.screen) capture.clearAll();
     updateTray();
-    return settings;
+    return next;
   });
   handle("settings:resetShortcuts", () => {
-    settings = applySettingsPatch(settings, { shortcuts: DEFAULT_SHORTCUTS });
-    persistSettings();
+    const s = core.resetShortcuts();
     registerShortcuts();
-    emitApp({ type: "settings", settings });
-    return settings;
+    return s;
   });
   handle("settings:shortcutStatus", () => shortcutStatus);
 
+  // ---- secrets & providers ----
   const secretsStatus = () => ({
     anthropic: secrets.has("anthropic"),
     deepgram: secrets.has("deepgram"),
+    openai_compat: secrets.has("openai_compat"),
     encryptionAvailable: secrets.encryptionAvailable,
   });
-  const secretName = z.enum(["anthropic", "deepgram"]);
   handle("secrets:status", secretsStatus);
   handle("secrets:set", (_e, name, value) => {
     secrets.set(secretName.parse(name), str(512).parse(value));
+    core.updateSettings({}); // refresh provider health
     return secretsStatus();
   });
   handle("secrets:clear", (_e, name) => {
     secrets.clear(secretName.parse(name));
+    core.updateSettings({});
     return secretsStatus();
   });
-  handle("provider:test", async () => {
-    const p = getProvider();
-    if (!p) return { ok: false, message: "No Anthropic API key is configured.", latencyMs: null };
-    return p.test(settings.provider.model);
+  handle("provider:test", () => core.testProvider());
+  handle("provider:health", () => core.health);
+
+  // ---- sessions ----
+  const sessionInput = z.object({
+    title: str(120),
+    type: modeEnum,
+    notes: str(50_000).optional(),
+    contextTtlMinutes: z.number().int().min(0).max(100_000).nullable().optional(),
+    ai: z.object({ model: z.string().regex(/^[a-z0-9.-]{3,64}$/).optional(), effort: effortEnum.optional(), style: styleEnum.optional() }).optional(),
+  });
+  handle("sessions:list", () => store.listSessions());
+  handle("sessions:active", () => core.ensureActiveSession());
+  handle("sessions:create", (_e, input) => core.createSession(sessionInput.parse(input)));
+  handle("sessions:update", (_e, sid, patch) => core.updateSession(id.parse(sid), sessionInput.partial().parse(patch)));
+  handle("sessions:switch", (_e, sid) => core.switchSession(id.parse(sid)));
+  handle("sessions:delete", (_e, sid) => core.deleteSession(id.parse(sid)));
+  handle("sessions:export", async (e, sid) => {
+    const data = store.exportSession(id.parse(sid));
+    if (!data) throw new Error("Session not found.");
+    const res = await dialog.showSaveDialog(winOf(e), {
+      defaultPath: `lumen-session-${data.session.title.replace(/[^\w-]+/g, "-").slice(0, 40)}.json`,
+      filters: [{ name: "JSON", extensions: ["json"] }],
+    });
+    if (res.canceled || !res.filePath) return null;
+    fs.writeFileSync(res.filePath, JSON.stringify(data, null, 2), { mode: 0o600 });
+    return res.filePath;
   });
 
+  // ---- chat ----
   const chatReq = z.object({
     requestId: id,
+    sessionId: id.optional(),
     conversationId: id.nullable(),
     text: str(20_000),
-    mode: z.enum(["general", "meeting", "interview", "technical", "coding"]),
-    length: z.enum(["short", "detailed"]),
-    tone: z.enum(["neutral", "friendly", "formal", "confident"]),
+    style: styleEnum,
+    tone: toneEnum,
     includeLiveTranscript: z.boolean(),
     retryOfMessageId: id.optional(),
   });
   handle("chat:send", (_e, req) => {
-    void chat.send(chatReq.parse(req));
+    const r = chatReq.parse(req);
+    // Requests are always bound to the active session; a stale renderer cannot target another one.
+    void core.send({ ...r, sessionId: core.activeSessionId });
   });
-  handle("chat:cancel", (_e, rid) => chat.cancel(id.parse(rid)));
-  handle("history:list", () => store.listConversations());
-  handle("history:messages", (_e, cid) => store.listMessages(id.parse(cid)));
-  handle("history:rename", (_e, cid, title) => store.renameConversation(id.parse(cid), str(200).parse(title)));
+  handle("chat:cancel", (_e, rid) => core.chat.cancel(id.parse(rid)));
+  handle("history:list", () => store.listConversations(core.activeSessionId));
+  handle("history:messages", (_e, cid) => {
+    assertConversationInActive(id.parse(cid));
+    return store.listMessages(String(cid));
+  });
+  handle("history:rename", (_e, cid, title) => {
+    assertConversationInActive(id.parse(cid));
+    store.renameConversation(String(cid), str(200).parse(title));
+  });
   handle("history:delete", (_e, cid) => {
-    store.deleteConversation(id.parse(cid));
+    assertConversationInActive(id.parse(cid));
+    store.deleteConversation(String(cid));
+    emitApp({ type: "history-changed" });
   });
-  handle("history:search", (_e, q) => store.search(str(500).parse(q)));
+  handle("history:search", (_e, q, scope) => store.search(str(500).parse(q), z.enum(["session", "all"]).parse(scope) === "all" ? null : core.activeSessionId));
 
-  handle("context:list", () => context.summaries());
+  // ---- context ----
+  const summaries = () => core.engine.summaries(core.activeSessionId);
+  handle("context:list", summaries);
   handle("context:addNote", (_e, title, text) => {
-    context.add({ kind: "note", title: str(200).parse(title) || "Note", text: str(200_000).parse(text), pinned: true });
-    return context.summaries();
+    core.addText("note", str(200).parse(title) || "Note", str(200_000).parse(text), { pinned: true });
+    return summaries();
   });
   handle("context:addClipboard", async () => {
-    const text = await readClipboardText();
+    const text = (await clipboard.readText()).slice(0, 200_000);
     if (!text.trim()) throw new Error("The clipboard has no text.");
-    context.add({ kind: "clipboard", title: `Clipboard — ${normalizeText(text).slice(0, 40)}`, text });
-    return context.summaries();
+    core.addText("clipboard", `Clipboard — ${text.replace(/\s+/g, " ").slice(0, 40)}`, text);
+    return summaries();
+  });
+  handle("context:addSelection", async () => {
+    await askAboutSelection();
+    return summaries();
   });
   handle("context:addDocuments", async (e) => {
-    const win = BrowserWindow.fromWebContents(e.sender) ?? undefined;
-    const res = await dialog.showOpenDialog(win!, {
-      properties: ["openFile", "multiSelections"],
-      filters: [{ name: "Documents", extensions: SUPPORTED_DOC_EXTENSIONS }],
-    });
+    const res = await dialog.showOpenDialog(winOf(e), { properties: ["openFile", "multiSelections"], filters: [{ name: "Documents", extensions: SUPPORTED_DOC_EXTENSIONS }] });
+    const failed: { file: string; reason: string }[] = [];
     for (const file of res.filePaths.slice(0, 10)) {
-      const text = await extractDocumentText(file);
-      context.add({ kind: "document", title: path.basename(file), text });
+      try {
+        core.addText("document", path.basename(file), await extractDocumentText(file), { sourceId: file });
+      } catch (err) {
+        failed.push({ file: path.basename(file), reason: (err as Error).message });
+      }
     }
-    return context.summaries();
+    return { items: summaries(), failed };
   });
+  const ownItem = (cid: string) => {
+    const r = core.engine.get(cid);
+    if (!r || r.sessionId !== core.activeSessionId) throw new Error("Context item not found.");
+    return r;
+  };
   handle("context:update", (_e, cid, patch) => {
-    context.update(id.parse(cid), z.object({ enabled: z.boolean().optional(), pinned: z.boolean().optional() }).parse(patch));
-    return context.summaries();
+    ownItem(id.parse(cid));
+    core.engine.update(String(cid), z.object({ enabled: z.boolean().optional(), pinned: z.boolean().optional() }).parse(patch));
+    return summaries();
+  });
+  handle("context:confirm", (_e, cid) => {
+    ownItem(id.parse(cid));
+    core.engine.confirm(String(cid));
+    return summaries();
   });
   handle("context:remove", (_e, cid) => {
-    context.remove(id.parse(cid));
-    return context.summaries();
+    ownItem(id.parse(cid));
+    core.engine.remove(String(cid));
+    return summaries();
   });
-  handle("context:clear", (_e, kind) => {
-    context.clear(kind ? z.enum(["note", "clipboard", "document", "screenshot"]).parse(kind) : undefined);
-    if (!kind) capture.clearAll();
-    return context.summaries();
+  handle("context:clear", (_e, which) => {
+    const w = which ? z.enum(["screen", "notes", "documents"]).parse(which) : undefined;
+    const sources = w === "screen" ? (["screenshot", "ocr"] as const) : w === "notes" ? (["note", "clipboard", "selected_text"] as const) : w === "documents" ? (["document"] as const) : undefined;
+    core.engine.clear(core.activeSessionId, sources ? [...sources] : undefined);
+    if (!w || w === "screen") {
+      capture.clearAll();
+      if (core.liveScreenState.active) core.stopLiveScreen();
+    }
+    return summaries();
   });
 
+  // ---- capture ----
   const requireScreen = () => {
-    if (!settings.consent.screen) throw new Error("Screen context is off. Enable it in Permissions.");
+    if (!core.settings.consent.screen) throw new Error("Screen context is off. Enable it in Permissions.");
   };
-  handle("capture:sources", async () => {
+  handle("capture:capabilities", () => capture.capabilities());
+  handle("capture:sources", () => {
     requireScreen();
     return capture.listSources();
   });
   handle("capture:source", async (_e, sid) => {
     requireScreen();
-    return capture.capture(str(200).parse(sid));
+    const isScreen = String(sid).startsWith("screen:");
+    if (isScreen) windows.hideOverlay();
+    try {
+      return await capture.capture(str(200).parse(sid));
+    } finally {
+      if (isScreen) windows.overlay?.showInactive();
+    }
+  });
+  handle("capture:importImage", async (e) => {
+    requireScreen();
+    const res = await dialog.showOpenDialog(winOf(e), { properties: ["openFile"], filters: [{ name: "Images", extensions: IMAGE_EXTENSIONS }] });
+    if (!res.filePaths[0]) return null;
+    return capture.importImage(res.filePaths[0]);
   });
   handle("capture:attach", (_e, cid, region, title) => {
     requireScreen();
     const r = z.object({ x: z.number(), y: z.number(), width: z.number(), height: z.number() }).nullable().parse(region);
-    const img = capture.finalize(id.parse(cid), r);
-    context.add({
-      kind: "screenshot",
-      title: str(120).parse(title) || `${r ? "Region of " : ""}${img.title}`,
-      text: "",
-      image: { mediaType: img.mediaType, data: img.data },
-    });
-    return context.summaries();
+    const f = capture.finalize(id.parse(cid), r);
+    // The user already reviewed this capture in the picker, so it is attached as confirmed.
+    core.addCapture(
+      { title: str(120).parse(title) || `${r ? "Region of " : ""}${f.title}`, sourceId: f.sourceId, vision: f.vision, ocrPng: f.ocrPng, thumbnailDataUrl: f.thumbnailDataUrl },
+      { pending: false },
+    );
+    return summaries();
   });
   handle("capture:discard", (_e, cid) => capture.discard(id.parse(cid)));
   handle("capture:quick", async () => {
     requireScreen();
-    await askAboutScreen();
-    return context.summaries();
+    await captureAndAttach(null);
+    return summaries();
   });
+  handle("capture:live", (_e, action) => {
+    const a = z.enum(["start", "pause", "resume", "stop"]).parse(action);
+    if (a === "start") {
+      requireScreen();
+      core.startLiveScreen();
+    } else if (a === "pause") core.liveScreen.pause();
+    else if (a === "resume") core.liveScreen.resume();
+    else core.stopLiveScreen();
+    updateTray();
+    return core.liveScreenState;
+  });
+  handle("capture:liveState", () => core.liveScreenState);
 
-  handle("kb:list", () => store.listKnowledgeDocs());
-  handle("kb:import", async (e) => {
-    const win = BrowserWindow.fromWebContents(e.sender) ?? undefined;
-    const res = await dialog.showOpenDialog(win!, {
-      properties: ["openFile", "multiSelections"],
-      filters: [{ name: "Documents", extensions: SUPPORTED_DOC_EXTENSIONS }],
+  // ---- knowledge ----
+  const scopeEnum = z.enum(["global", "session"]);
+  handle("kb:list", () => store.listKnowledgeDocs(core.activeSessionId));
+  handle("kb:import", async (e, kind, scope) => {
+    const k = z.enum(["files", "folder"]).parse(kind);
+    const res = await dialog.showOpenDialog(winOf(e), {
+      properties: k === "folder" ? ["openDirectory"] : ["openFile", "multiSelections"],
+      filters: k === "folder" ? undefined : [{ name: "Documents", extensions: SUPPORTED_DOC_EXTENSIONS }],
     });
-    for (const file of res.filePaths.slice(0, 20)) {
-      const text = normalizeText(await extractDocumentText(file));
-      if (text) store.addKnowledgeDoc(path.basename(file), file, chunkText(text));
-    }
-    return store.listKnowledgeDocs();
+    if (!res.filePaths.length) return { imported: [], failed: [], skipped: 0, docs: store.listKnowledgeDocs(core.activeSessionId) };
+    const result = await core.importKnowledge(res.filePaths, scopeEnum.parse(scope));
+    logger.info("knowledge import", { imported: result.imported.length, failed: result.failed.length, skipped: result.skipped });
+    return { ...result, docs: store.listKnowledgeDocs(core.activeSessionId) };
   });
-  handle("kb:addText", (_e, title, text) => {
-    const t = normalizeText(str(500_000).parse(text));
-    if (!t) throw new Error("The note is empty.");
-    store.addKnowledgeDoc(str(200).parse(title) || "Untitled note", "manual", chunkText(t));
-    return store.listKnowledgeDocs();
+  handle("kb:addText", (_e, title, text, scope) => {
+    core.addKnowledgeText(str(200).parse(title), str(500_000).parse(text), scopeEnum.parse(scope));
+    return store.listKnowledgeDocs(core.activeSessionId);
   });
   handle("kb:delete", (_e, did) => {
-    store.deleteKnowledgeDoc(id.parse(did));
-    return store.listKnowledgeDocs();
+    const doc = store.listKnowledgeDocs(core.activeSessionId).find((d) => d.id === id.parse(did));
+    if (!doc) throw new Error("Document not found.");
+    store.deleteKnowledgeDoc(doc.id);
+    return store.listKnowledgeDocs(core.activeSessionId);
   });
+  handle("kb:search", (_e, q) => store.searchKnowledge(str(500).parse(q), core.activeSessionId, 20));
 
-  handle("transcript:start", (_e, title) => startTranscript(str(200).parse(title)));
-  handle("transcript:pause", () => liveSession?.pause());
-  handle("transcript:resume", () => liveSession?.resume());
-  handle("transcript:stop", () => stopTranscript());
-  handle("transcript:state", () => ({
-    sessionId: liveSession?.id ?? null,
-    status: liveSession?.status ?? "idle",
-    title: liveSession?.title ?? null,
-  }));
-  handle("transcript:list", () => store.listTranscriptSessions());
-  handle("transcript:segments", (_e, sid) => store.listSegments(id.parse(sid)));
-  handle("transcript:updateSegment", (_e, segId, text, speaker) =>
-    store.updateSegment(id.parse(segId), str(10_000).parse(text), str(60).nullable().parse(speaker)),
-  );
+  // ---- transcription ----
+  handle("transcript:start", (_e, title) => {
+    core.startTranscript(str(200).parse(title));
+    updateTray();
+  });
+  handle("transcript:pause", () => {
+    core.pauseTranscript();
+    updateTray();
+  });
+  handle("transcript:resume", () => {
+    core.resumeTranscript();
+    updateTray();
+  });
+  handle("transcript:stop", () => {
+    core.stopTranscript();
+    updateTray();
+  });
+  handle("transcript:state", () => {
+    const l = core.live;
+    const visible = l && l.workspaceSessionId === core.activeSessionId;
+    return {
+      sessionId: visible ? l.id : null,
+      workspaceSessionId: l?.workspaceSessionId ?? null,
+      status: visible ? l.status : l && ["recording", "paused", "reconnecting", "connecting"].includes(l.status) ? l.status : "idle",
+      title: l?.title ?? null,
+      persisted: l?.persisted ?? true,
+      channels: l?.channels ?? 1,
+      segments: visible ? l.liveSegments() : [],
+    };
+  });
+  handle("transcript:list", () => {
+    const list = store.listTranscriptSessions(core.activeSessionId);
+    const l = core.live;
+    if (l && !l.persisted && l.workspaceSessionId === core.activeSessionId && l.status !== "stopped" && l.status !== "error") {
+      list.unshift({ id: l.id, sessionId: l.workspaceSessionId, title: `${l.title} (not saved)`, startedAt: l.started, endedAt: null, segmentCount: l.liveSegments().length, provider: "deepgram", persisted: false });
+    }
+    return list;
+  });
+  handle("transcript:segments", (_e, tid) => {
+    assertTranscriptInActive(id.parse(tid));
+    return core.liveSegments(String(tid)) ?? store.listSegments(String(tid));
+  });
+  handle("transcript:updateSegment", (_e, segId, text, speaker) => store.updateSegment(id.parse(segId), str(10_000).parse(text), str(60).nullable().parse(speaker)));
   handle("transcript:deleteSegment", (_e, segId) => store.deleteSegment(id.parse(segId)));
-  handle("transcript:rename", (_e, sid, title) => store.renameTranscriptSession(id.parse(sid), str(200).parse(title)));
-  handle("transcript:delete", (_e, sid) => {
-    const s = id.parse(sid);
-    if (liveSession?.id === s) stopTranscript();
-    store.deleteTranscriptSession(s);
+  handle("transcript:rename", (_e, tid, title) => {
+    assertTranscriptInActive(id.parse(tid));
+    store.renameTranscriptSession(String(tid), str(200).parse(title));
   });
-  handle("transcript:insights", async (_e, sid) => {
-    const p = getProvider();
-    if (!p) throw new Error("No Anthropic API key is configured.");
-    return generateInsights(p, store, settings, id.parse(sid), new AbortController().signal);
+  handle("transcript:delete", (_e, tid) => {
+    const t = id.parse(tid);
+    assertTranscriptInActive(t);
+    if (core.live?.id === t) core.stopTranscript();
+    store.deleteTranscriptSession(t);
+    emitApp({ type: "history-changed" });
   });
-  handle("transcript:getInsights", (_e, sid) => store.getInsights(id.parse(sid)));
+  handle("transcript:insights", (_e, tid) => {
+    assertTranscriptInActive(id.parse(tid));
+    return core.generateInsights(String(tid), new AbortController().signal);
+  });
+  handle("transcript:getInsights", (_e, tid) => {
+    assertTranscriptInActive(id.parse(tid));
+    return store.getInsights(String(tid));
+  });
 
   // Audio frames arrive at ~10 Hz; validate size and only accept from our renderer.
   ipcMain.on("transcript:audio", (event, pcm: unknown) => {
     if (!isTrustedUrl(event.senderFrame?.url ?? "")) return;
-    if (!(pcm instanceof Uint8Array) || pcm.byteLength > 64_000) return;
-    liveSession?.pushAudio(pcm);
+    if (!(pcm instanceof Uint8Array) || pcm.byteLength > 128_000) return;
+    core.pushAudio(pcm);
   });
-  ipcMain.on("transcript:captureFailed", (event, message: unknown) => {
+  const audioStateSchema = z.object({
+    micLabel: str(200).nullable(),
+    systemAudio: z.enum(["off", "active", "unavailable", "denied"]),
+    micLevel: z.number().min(0).max(1),
+    systemLevel: z.number().min(0).max(1),
+    silentForMs: z.number().min(0),
+  });
+  ipcMain.on("transcript:audioState", (event, state: unknown) => {
     if (!isTrustedUrl(event.senderFrame?.url ?? "")) return;
-    logger.warn("audio capture failed", { message: String(message).slice(0, 300) });
-    if (liveSession) liveSession.stop();
-    emitApp({ type: "toast", level: "error", message: `Audio capture failed: ${String(message).slice(0, 200)}` });
+    const parsed = audioStateSchema.safeParse(state);
+    if (!parsed.success) return;
+    audioState = parsed.data;
+    windows.broadcast("lumen:transcript", { type: "audio", state: parsed.data });
+  });
+  ipcMain.on("transcript:captureFailed", (event, message: unknown, kind: unknown) => {
+    if (!isTrustedUrl(event.senderFrame?.url ?? "")) return;
+    const msg = String(message).slice(0, 300);
+    logger.warn("audio capture failed", { message: msg, kind: String(kind) });
+    if (kind === "system") {
+      toast("error", `System audio unavailable: ${msg}. Continuing with the microphone only.`);
+      return;
+    }
+    if (core.live) core.live.stop();
+    toast("error", `Microphone capture failed: ${msg}`);
+    updateTray();
   });
 
+  // ---- permissions ----
   handle("permissions:get", () => permissionStatus());
   handle("permissions:requestMic", () => requestMicrophone());
   handle("permissions:open", async (_e, kind) => {
@@ -418,23 +550,17 @@ function registerIpc() {
     if (url) await shell.openExternal(url);
   });
 
+  // ---- data ----
   handle("data:export", async (e) => {
-    const win = BrowserWindow.fromWebContents(e.sender) ?? undefined;
-    const res = await dialog.showSaveDialog(win!, {
-      defaultPath: `lumen-export-${new Date().toISOString().slice(0, 10)}.json`,
-      filters: [{ name: "JSON", extensions: ["json"] }],
-    });
+    const res = await dialog.showSaveDialog(winOf(e), { defaultPath: `lumen-export-${new Date().toISOString().slice(0, 10)}.json`, filters: [{ name: "JSON", extensions: ["json"] }] });
     if (res.canceled || !res.filePath) return null;
     fs.writeFileSync(res.filePath, JSON.stringify(store.exportAll(), null, 2), { mode: 0o600 });
     return res.filePath;
   });
   handle("data:deleteAll", () => {
-    stopTranscript();
-    chat.cancelAll();
-    store.deleteAll();
-    context.clear();
     capture.clearAll();
-    emitApp({ type: "history-changed" });
+    core.deleteAll();
+    updateTray();
     logger.info("all user data deleted");
   });
   handle("diagnostics:get", () => diagnostics());
@@ -442,17 +568,19 @@ function registerIpc() {
     await shell.openPath(path.dirname(logger.file));
   });
 
+  // ---- window / misc ----
   handle("app:copy", (_e, text) => clipboard.writeText(str(500_000).parse(text)));
   handle("app:openExternal", async (_e, url) => {
     const u = str(2000).parse(url);
     if (/^https:\/\//.test(u)) await shell.openExternal(u);
   });
   handle("overlay:action", (_e, action) => {
-    const a = z.enum(["hide", "toggle", "expand", "compact"]).parse(action);
+    const a = z.enum(["hide", "toggle", "expand", "compact", "reset-position"]).parse(action);
     if (a === "hide") windows.hideOverlay();
     else if (a === "toggle") windows.toggleOverlay();
-    else if (a === "expand") windows.setOverlaySize(Math.max(windows.overlay?.getBounds().width ?? 560, 640), 640);
-    else windows.setOverlaySize(windows.overlay?.getBounds().width ?? 560, 180);
+    else if (a === "expand") windows.setMode("expanded");
+    else if (a === "compact") windows.setMode("compact");
+    else windows.resetPosition();
   });
   handle("overlay:setSize", (_e, w, h) => windows.setOverlaySize(z.number().parse(w), z.number().parse(h)));
   handle("app:openMain", (_e, route) => {
@@ -478,15 +606,14 @@ function diagnostics(): Diagnostics {
     userDataPath: userData,
     dbPath: store.path,
     logPath: logger.file,
-    provider: { kind: settings.provider.kind, model: settings.provider.model, configured: settings.provider.kind === "mock" || secrets.has("anthropic") },
-    transcription: { kind: settings.transcription.kind, configured: secrets.has("deepgram") },
+    logLevel: core.settings.diagnostics.logLevel,
+    provider: core.health,
+    transcription: { kind: core.settings.transcription.kind, configured: secrets.has("deepgram") },
     permissions: permissionStatus(),
+    capture: capture.capabilities(),
     shortcutsRegistered: { ...shortcutStatus },
-    metrics: metrics.snapshot(),
-    process: {
-      memoryMb: Math.round(allMem),
-      cpuPercent: elapsed > 0 ? Math.round(((cpu.user + cpu.system) / elapsed) * 1000) / 10 : 0,
-    },
+    metrics: core.metrics.snapshot(),
+    process: { memoryMb: Math.round(allMem), cpuPercent: elapsed > 0 ? Math.round(((cpu.user + cpu.system) / elapsed) * 1000) / 10 : 0 },
     storage: store.counts(),
   };
 }
@@ -506,13 +633,23 @@ function applyCsp() {
   session.defaultSession.setPermissionRequestHandler((wc, permission, cb, details) => {
     const trusted = isTrustedUrl(details.requestingUrl ?? wc.getURL());
     if (!trusted) return cb(false);
-    if (permission === "media") return cb(settings.consent.microphone);
+    if (permission === "media") {
+      const types = (details as { mediaTypes?: string[] }).mediaTypes ?? [];
+      // Microphone needs microphone consent; display capture (system-audio loopback) needs system-audio consent.
+      if (types.includes("video")) return cb(core.settings.consent.systemAudio);
+      return cb(core.settings.consent.microphone);
+    }
     if (permission === "clipboard-sanitized-write") return cb(true);
     cb(false);
   });
+  session.defaultSession.setPermissionCheckHandler((_wc, permission, origin) => {
+    if (!isTrustedUrl(origin + "/dist-renderer/index.html") && !isTrustedUrl(origin)) return false;
+    if (permission === "media") return core.settings.consent.microphone;
+    return permission === "clipboard-sanitized-write";
+  });
   // System audio loopback for the transcript, gated on explicit consent.
   session.defaultSession.setDisplayMediaRequestHandler(async (_req, cb) => {
-    if (!settings.consent.systemAudio) return cb({});
+    if (!core.settings.consent.systemAudio) return cb({});
     const { desktopCapturer } = await import("electron");
     const [screenSource] = await desktopCapturer.getSources({ types: ["screen"] });
     if (!screenSource) return cb({});
@@ -523,7 +660,9 @@ function applyCsp() {
 app.on("second-instance", () => windows?.showOverlay());
 app.on("will-quit", () => {
   globalShortcut.unregisterAll();
-  liveSession?.stop();
+  core?.stopTranscript();
+  core?.stopLiveScreen();
+  void ocr.dispose();
   store?.close();
 });
 app.on("window-all-closed", () => {
@@ -534,127 +673,58 @@ app.on("activate", () => windows.openMain());
 process.on("uncaughtException", (err) => logger.error("uncaught exception", { message: err.message, stack: err.stack }));
 process.on("unhandledRejection", (err) => logger.error("unhandled rejection", { message: String(err) }));
 
+const ocr = new TesseractOcr({ timeoutMs: 30_000 });
+
 void app.whenReady().then(() => {
   store = new Store(path.join(userData, "lumen.db"));
   const raw = store.getKv("settings");
-  settings = loadSettings(raw ? JSON.parse(raw) : null);
-  persistSettings();
-  const purged = store.applyRetention(settings.privacy.conversationRetentionDays, settings.privacy.transcriptRetentionDays);
-  logger.info("app ready", { version: app.getVersion(), platform: process.platform, purged });
-  setInterval(
-    () => store.applyRetention(settings.privacy.conversationRetentionDays, settings.privacy.transcriptRetentionDays),
-    60 * 60_000,
-  ).unref();
-  setInterval(() => context.expire(), 60_000).unref();
+  const settings = loadSettings(raw ? JSON.parse(raw) : null);
+  logger.level = settings.diagnostics.logLevel;
+
+  core = new AppCore(
+    {
+      store,
+      secrets,
+      ocr,
+      emitChat: (e) => windows?.broadcast("lumen:chat", e),
+      emitTranscript: (e) => {
+        windows?.broadcast("lumen:transcript", e);
+        if (e.type === "status") updateTray();
+      },
+      emitApp: (e) => {
+        emitApp(e);
+        if (e.type === "live-screen") updateTray();
+      },
+      log: (level, msg, data) => logger.log(level, msg, data),
+      liveScreenCapture: async () => {
+        // Live sampling captures the display under the cursor. The overlay is a normal window, so
+        // it may appear in the frame; that is visible to the user and harmless.
+        const held = await capture.captureCursorDisplay();
+        const f = capture.finalize(held.captureId, null);
+        return { title: f.title, sourceId: f.sourceId, vision: f.vision, ocrPng: f.ocrPng, thumbnailDataUrl: f.thumbnailDataUrl };
+      },
+    },
+    settings,
+    (s) => store.setKv("settings", JSON.stringify(s)),
+  );
+  store.setKv("settings", JSON.stringify(core.settings));
+  const purged = core.sweep();
+  logger.info("app ready", { version: app.getVersion(), platform: process.platform, purged, schema: store.schemaVersion() });
+  setInterval(() => core.sweep(), 60_000).unref();
 
   windows = new WindowManager(
-    () => settings,
-    (bounds) => {
-      settings = applySettingsPatch(settings, { overlay: { bounds } });
-      persistSettings();
-    },
+    () => core.settings,
+    (bounds, patch) => core.updateSettings({ overlay: { bounds, ...patch } }),
+    (mode) => emitApp({ type: "overlay-mode", mode }),
   );
-  chat = new ChatService({
-    store,
-    context,
-    metrics,
-    getSettings: () => settings,
-    getProvider,
-    getLiveTranscript: () =>
-      liveSession && liveSession.status !== "error" && liveSession.status !== "stopped"
-        ? { title: liveSession.title, text: liveSession.recentTranscript(), startedAt: liveSession.started }
-        : null,
-    emit: emitChat,
-    log: (level, msg, data) => logger.log(level, msg, data),
-  });
   applyCsp();
   registerIpc();
   registerShortcuts();
   createTray();
   if (process.platform === "darwin") app.dock?.hide();
   windows.createOverlay();
-  if (!settings.onboardingComplete) windows.openMain("/main/onboarding");
+  if (!core.settings.onboardingComplete) windows.openMain("/main/onboarding");
   else windows.showOverlay();
 
-  if (process.env.LUMEN_SMOKE_TEST) void runSmokeTest();
+  if (process.env.LUMEN_SMOKE_TEST) void import("./smoke.js").then((m) => m.runSmokeTest({ app, core, store, windows, capture, shortcutStatus }));
 });
-
-/**
- * Automated smoke/UI test (LUMEN_SMOKE_TEST=1). Boots the real app, verifies renderer isolation,
- * then drives a full chat through the overlay UI using the labelled mock provider, checks it was
- * persisted and searchable, and saves screenshots to LUMEN_SMOKE_SHOTS if set.
- */
-async function runSmokeTest() {
-  const result: Record<string, unknown> = {};
-  const shots = process.env.LUMEN_SMOKE_SHOTS;
-  const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
-  const shot = async (win: BrowserWindow, name: string) => {
-    if (!shots) return;
-    fs.mkdirSync(shots, { recursive: true });
-    fs.writeFileSync(path.join(shots, `${name}.png`), (await win.webContents.capturePage()).toPNG());
-  };
-  try {
-    const win = windows.openMain("/main/onboarding");
-    await new Promise<void>((resolve) => win.webContents.once("did-finish-load", () => resolve()));
-    await wait(600);
-    await shot(win, "01-onboarding");
-    const js = (code: string) => win.webContents.executeJavaScript(code);
-    result.bridge = await js("window.lumen.role");
-    result.nodeInRenderer = await js("typeof require + '/' + typeof process");
-    result.shortcuts = { ...shortcutStatus };
-    result.schemaVersion = store.schemaVersion();
-    await js("window.lumen.updateSettings({ provider: { kind: 'mock' }, onboardingComplete: true })");
-
-    // Drive the overlay like a user: type a question and press Enter.
-    const ov = windows.overlay!;
-    windows.showOverlay();
-    await wait(500);
-    context.add({ kind: "note", title: "Release plan", text: "Version 2 ships on Friday after QA sign-off." });
-    await wait(200);
-    const ojs = (code: string) => ov.webContents.executeJavaScript(code);
-    await ojs(`(() => {
-      const ta = document.querySelector('textarea');
-      const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
-      setter.call(ta, 'When does version 2 ship?');
-      ta.dispatchEvent(new Event('input', { bubbles: true }));
-      ta.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
-    })()`);
-    let answered = false;
-    for (let i = 0; i < 50 && !answered; i++) {
-      await wait(100);
-      answered = await ojs("document.body.innerText.includes('Context sources received') && !document.querySelector('.cursor-blink')");
-    }
-    result.overlayChatAnswered = answered;
-    result.mockLabelVisible = await ojs("document.body.innerText.includes('Development mode')");
-    result.overlayIdleAfterAnswer = await ojs("!document.body.innerText.includes('Thinking') && document.body.innerText.includes('Ask ↵')");
-    await wait(600);
-    await shot(ov, "02-overlay-answer");
-    result.persisted = store.counts().messages;
-    result.searchHits = store.search("version").length;
-
-    // Visit each main screen to make sure none crash on render.
-    const routes = ["assistant", "transcript", "history", "knowledge", "capture", "settings", "provider", "shortcuts", "permissions", "privacy", "diagnostics"];
-    const broken: string[] = [];
-    for (const r of routes) {
-      await js(`location.hash = '/main/${r}'`);
-      await wait(250);
-      const ok = await js("document.querySelector('.page-header h1') !== null");
-      if (!ok) broken.push(r);
-      if (["history", "transcript", "provider", "diagnostics", "permissions"].includes(r)) await shot(win, `03-${r}`);
-    }
-    result.brokenScreens = broken;
-    const ok =
-      result.bridge === "main" &&
-      result.nodeInRenderer === "undefined/undefined" &&
-      answered &&
-      result.mockLabelVisible === true &&
-      Number(result.persisted) >= 2 &&
-      Number(result.searchHits) >= 1 &&
-      broken.length === 0;
-    console.log(`SMOKE ${ok ? "PASS" : "FAIL"} ${JSON.stringify(result)}`);
-    app.exit(ok ? 0 : 1);
-  } catch (err) {
-    console.log(`SMOKE FAIL ${(err as Error).message} ${JSON.stringify(result)}`);
-    app.exit(1);
-  }
-}

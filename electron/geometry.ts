@@ -68,3 +68,51 @@ export function moveToDisplay(rect: Rect, from: Rect, to: Rect): Rect {
     to,
   );
 }
+
+export type Preset = "top-center" | "top-right" | "bottom-right" | "bottom-center";
+
+/** Place a rect of the given size at a named position inside a work area (with a margin). */
+export function presetRect(area: Rect, preset: Preset, width: number, height: number, margin = 24): Rect {
+  const w = Math.min(width, area.width - margin * 2);
+  const h = Math.min(height, area.height - margin * 2);
+  const cx = area.x + Math.round((area.width - w) / 2);
+  const right = area.x + area.width - w - margin;
+  const top = area.y + margin;
+  const bottom = area.y + area.height - h - margin;
+  const pos: Record<Preset, { x: number; y: number }> = {
+    "top-center": { x: cx, y: top },
+    "top-right": { x: right, y: top },
+    "bottom-right": { x: right, y: bottom },
+    "bottom-center": { x: cx, y: bottom },
+  };
+  return clampToArea({ ...pos[preset], width: w, height: h }, area);
+}
+
+/**
+ * Resize while keeping the edge nearest the screen edge anchored, so a bottom-docked panel grows
+ * upward instead of running off-screen.
+ */
+export function resizeAnchored(rect: Rect, area: Rect, width: number, height: number): Rect {
+  const bottomGap = area.y + area.height - (rect.y + rect.height);
+  const topGap = rect.y - area.y;
+  const y = bottomGap < topGap ? rect.y + rect.height - height : rect.y;
+  return clampToArea({ x: rect.x, y, width, height }, area);
+}
+
+/** True when an image is (almost) a single flat colour — what blocked/protected captures look like. */
+export function isBlankBitmap(bitmap: Uint8Array, width: number, height: number): boolean {
+  if (!width || !height || bitmap.length < 4) return true;
+  const step = Math.max(1, Math.floor((width * height) / 4000));
+  const r0 = bitmap[0]!;
+  const g0 = bitmap[1]!;
+  const b0 = bitmap[2]!;
+  let differing = 0;
+  let samples = 0;
+  for (let px = 0; px < width * height; px += step) {
+    const i = px * 4;
+    if (i + 2 >= bitmap.length) break;
+    samples++;
+    if (Math.abs(bitmap[i]! - r0) + Math.abs(bitmap[i + 1]! - g0) + Math.abs(bitmap[i + 2]! - b0) > 24) differing++;
+  }
+  return samples > 0 && differing / samples < 0.002;
+}

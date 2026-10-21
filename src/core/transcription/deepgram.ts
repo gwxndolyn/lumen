@@ -1,4 +1,5 @@
 import type {
+  OpenOptions,
   RecognitionResult,
   SocketFactory,
   SocketLike,
@@ -9,12 +10,12 @@ import type {
 
 const OPEN = 1;
 
-export const defaultSocketFactory: SocketFactory = (url, protocols) =>
-  new WebSocket(url, protocols) as unknown as SocketLike;
+export const defaultSocketFactory: SocketFactory = (url, protocols) => new WebSocket(url, protocols) as unknown as SocketLike;
 
 /**
  * Deepgram live streaming speech-to-text (wss://api.deepgram.com/v1/listen).
  * Auth uses the documented `token` WebSocket subprotocol so the key never appears in a URL.
+ * With two channels, mic and system audio are recognized independently (`multichannel=true`).
  */
 export class DeepgramProvider implements TranscriptionProvider {
   readonly id = "deepgram";
@@ -24,29 +25,35 @@ export class DeepgramProvider implements TranscriptionProvider {
     private readonly apiKey: string,
     private readonly socketFactory: SocketFactory = defaultSocketFactory,
     private readonly model = "nova-3",
+    private readonly baseUrl = "wss://api.deepgram.com/v1/listen",
   ) {}
 
-  buildUrl(language: string, diarize: boolean): string {
+  buildUrl(opts: OpenOptions): string {
     const p = new URLSearchParams({
       model: this.model,
       encoding: "linear16",
       sample_rate: String(this.sampleRate),
-      channels: "1",
+      channels: String(opts.channels),
       interim_results: "true",
       punctuate: "true",
       smart_format: "true",
       endpointing: "300",
-      language,
-      diarize: String(diarize),
+      language: opts.language,
+      diarize: String(opts.diarize),
     });
-    return `wss://api.deepgram.com/v1/listen?${p}`;
+    if (opts.channels === 2) p.set("multichannel", "true");
+    return `${this.baseUrl}?${p}`;
   }
 
-  open(opts: { language: string; diarize: boolean }, h: TranscriptionStreamHandlers): TranscriptionStream {
-    const ws = this.socketFactory(this.buildUrl(opts.language, opts.diarize), ["token", this.apiKey]);
+  open(opts: OpenOptions, h: TranscriptionStreamHandlers): TranscriptionStream {
+    const ws = this.socketFactory(this.buildUrl(opts), ["token", this.apiKey]);
     ws.binaryType = "arraybuffer";
     let closedByUs = false;
-    ws.onopen = () => h.onOpen();
+    let opened = false;
+    ws.onopen = () => {
+      opened = true;
+      h.onOpen();
+    };
     ws.onmessage = (ev) => {
       if (typeof ev.data !== "string") return;
       const r = parseDeepgramMessage(ev.data);
@@ -54,11 +61,11 @@ export class DeepgramProvider implements TranscriptionProvider {
     };
     ws.onerror = () => h.onError("Transcription connection error.");
     ws.onclose = (ev) => {
-      const reason =
-        ev.code === 1008 || ev.code === 4001 || /auth|credential|401/i.test(ev.reason)
-          ? "Deepgram rejected the API key."
-          : ev.reason || `closed (${ev.code})`;
-      h.onClose(!closedByUs, reason);
+      // A handshake rejection (bad key) closes before open; 1008/4001/4008 are policy/auth closes.
+      const auth = ev.code === 1008 || ev.code === 4001 || ev.code === 4008 || /auth|credential|401|403/i.test(ev.reason);
+      const fatal = auth || (!opened && ev.code === 1002);
+      const reason = auth ? "Deepgram rejected the API key." : ev.reason || `connection closed (code ${ev.code})`;
+      h.onClose(!closedByUs, reason, fatal);
     };
     return {
       sendAudio(pcm) {
@@ -88,7 +95,8 @@ interface DgResults {
   is_final?: boolean;
   start?: number;
   duration?: number;
-  channel?: { alternatives?: { transcript?: string; words?: DgWord[] }[] };
+  channel_index?: number[];
+  channel?: { alternatives?: { transcript?: string; confidence?: number; words?: DgWord[] }[] };
 }
 
 export function parseDeepgramMessage(raw: string): RecognitionResult | null {
@@ -111,5 +119,13 @@ export function parseDeepgramMessage(raw: string): RecognitionResult | null {
     speaker = `Speaker ${top[0] + 1}`;
   }
   const start = msg.start ?? 0;
-  return { text, isFinal: !!msg.is_final, startSec: start, endSec: start + (msg.duration ?? 0), speaker };
+  return {
+    text,
+    isFinal: !!msg.is_final,
+    startSec: start,
+    endSec: start + (msg.duration ?? 0),
+    speaker,
+    channel: Array.isArray(msg.channel_index) && typeof msg.channel_index[0] === "number" ? msg.channel_index[0] : null,
+    confidence: typeof alt?.confidence === "number" ? alt.confidence : null,
+  };
 }

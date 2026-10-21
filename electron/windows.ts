@@ -1,9 +1,12 @@
 import { BrowserWindow, screen, shell, type Rectangle } from "electron";
 import path from "node:path";
 import type { Settings, WindowRole } from "../src/shared/types";
-import { defaultOverlayRect, moveToDisplay, resolveBounds } from "./geometry";
+import { defaultOverlayRect, moveToDisplay, presetRect, resizeAnchored, resolveBounds } from "./geometry";
 
 const DEV_URL = process.env.LUMEN_DEV_URL;
+export const COMPACT_HEIGHT = 176;
+const MIN_WIDTH = 380;
+const MIN_HEIGHT = 140;
 
 export function rendererUrl(route: string): string {
   if (DEV_URL) return `${DEV_URL}#${route}`;
@@ -41,14 +44,22 @@ function webPreferences(role: WindowRole): Electron.WebPreferences {
   };
 }
 
+/**
+ * Owns the floating overlay and the main window. Uses only standard, documented window behaviour:
+ * the overlay is a normal frameless window that appears in screen shares and the window list.
+ */
 export class WindowManager {
   overlay: BrowserWindow | null = null;
   main: BrowserWindow | null = null;
+  mode: "compact" | "expanded" = "compact";
   private saveTimer: NodeJS.Timeout | null = null;
+  /** Ignore move/resize events we caused ourselves when deciding whether the user customized position. */
+  private programmatic = false;
 
   constructor(
     private readonly getSettings: () => Settings,
-    private readonly saveBounds: (b: Settings["overlay"]["bounds"]) => void,
+    private readonly saveBounds: (b: Settings["overlay"]["bounds"], patch?: Partial<Settings["overlay"]>) => void,
+    private readonly onModeChange: (mode: "compact" | "expanded") => void = () => undefined,
   ) {
     const relayout = () => this.ensureOverlayVisible();
     screen.on("display-removed", relayout);
@@ -60,16 +71,33 @@ export class WindowManager {
     return screen.getAllDisplays().map((d) => ({ id: d.id, workArea: d.workArea }));
   }
 
+  private primary() {
+    const p = screen.getPrimaryDisplay();
+    return { id: p.id, workArea: p.workArea };
+  }
+
+  private setBounds(rect: Rectangle) {
+    const w = this.overlay;
+    if (!w || w.isDestroyed()) return;
+    this.programmatic = true;
+    w.setBounds(rect);
+    setTimeout(() => (this.programmatic = false), 50);
+  }
+
+  private initialRect(s: Settings): Rectangle {
+    const width = s.overlay.bounds?.width ?? 560;
+    if (s.overlay.position !== "custom") return presetRect(this.primary().workArea, s.overlay.position, width, COMPACT_HEIGHT);
+    return s.overlay.bounds
+      ? resolveBounds({ ...s.overlay.bounds, height: COMPACT_HEIGHT }, this.displays(), this.primary())
+      : defaultOverlayRect(this.primary().workArea, width, COMPACT_HEIGHT);
+  }
+
   createOverlay(): BrowserWindow {
     const s = this.getSettings();
-    const primary = screen.getPrimaryDisplay();
-    const rect = s.overlay.bounds
-      ? resolveBounds(s.overlay.bounds, this.displays(), { id: primary.id, workArea: primary.workArea })
-      : defaultOverlayRect(primary.workArea);
     const win = new BrowserWindow({
-      ...rect,
-      minWidth: 360,
-      minHeight: 120,
+      ...this.initialRect(s),
+      minWidth: MIN_WIDTH,
+      minHeight: MIN_HEIGHT,
       show: false,
       frame: false,
       transparent: true,
@@ -85,8 +113,8 @@ export class WindowManager {
     });
     hardenWebContents(win);
     this.applyOverlaySettings(win, s);
-    win.on("moved", () => this.scheduleSave());
-    win.on("resized", () => this.scheduleSave());
+    win.on("moved", () => this.scheduleSave("move"));
+    win.on("resized", () => this.scheduleSave("resize"));
     win.on("closed", () => {
       this.overlay = null;
     });
@@ -96,37 +124,46 @@ export class WindowManager {
   }
 
   applyOverlaySettings(win: BrowserWindow | null = this.overlay, s: Settings = this.getSettings()) {
-    if (!win) return;
+    if (!win || win.isDestroyed()) return;
     win.setOpacity(s.overlay.opacity);
     // "floating" keeps the panel above normal windows without covering system UI.
     win.setAlwaysOnTop(s.overlay.alwaysOnTop, "floating");
     if (process.platform === "darwin") win.setVisibleOnAllWorkspaces(s.overlay.alwaysOnTop, { visibleOnFullScreen: true });
   }
 
-  private scheduleSave() {
+  /** Apply a preset position (or reset) immediately on the overlay's current display. */
+  applyPosition(s: Settings = this.getSettings()) {
+    const w = this.overlay;
+    if (!w || w.isDestroyed() || s.overlay.position === "custom") return;
+    const b = w.getBounds();
+    const area = screen.getDisplayMatching(b).workArea;
+    this.setBounds(presetRect(area, s.overlay.position, b.width, b.height));
+  }
+
+  private scheduleSave(kind: "move" | "resize") {
+    if (this.programmatic) return;
     if (this.saveTimer) clearTimeout(this.saveTimer);
     this.saveTimer = setTimeout(() => {
       const w = this.overlay;
       if (!w || w.isDestroyed()) return;
       const b = w.getBounds();
       const d = screen.getDisplayMatching(b);
-      this.saveBounds({ ...b, displayId: d.id });
+      const patch: Partial<Settings["overlay"]> = {};
+      // A user drag makes the position custom; a user resize in expanded mode remembers the height.
+      if (kind === "move") patch.position = "custom";
+      if (kind === "resize" && this.mode === "expanded") patch.expandedHeight = Math.max(240, Math.min(2000, b.height));
+      this.saveBounds({ ...b, height: Math.max(MIN_HEIGHT, b.height), displayId: d.id }, patch);
     }, 400);
   }
 
-  /** Re-clamp the overlay after a monitor is unplugged or rearranged. */
+  /** Re-clamp the overlay after a monitor is unplugged, added or rearranged. */
   ensureOverlayVisible() {
     const w = this.overlay;
     if (!w || w.isDestroyed()) return;
-    const primary = screen.getPrimaryDisplay();
     const b = w.getBounds();
-    const next = resolveBounds(
-      { ...b, displayId: screen.getDisplayMatching(b).id },
-      this.displays(),
-      { id: primary.id, workArea: primary.workArea },
-    );
+    const next = resolveBounds({ ...b, displayId: screen.getDisplayMatching(b).id }, this.displays(), this.primary());
     if (next.x !== b.x || next.y !== b.y || next.width !== b.width || next.height !== b.height) {
-      w.setBounds({ x: next.x, y: next.y, width: next.width, height: next.height });
+      this.setBounds({ x: next.x, y: next.y, width: next.width, height: next.height });
     }
   }
 
@@ -137,7 +174,13 @@ export class WindowManager {
       const cursorDisplay = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
       const b = w.getBounds();
       const current = screen.getDisplayMatching(b);
-      if (current.id !== cursorDisplay.id) w.setBounds(moveToDisplay(b, current.workArea, cursorDisplay.workArea) as Rectangle);
+      if (current.id !== cursorDisplay.id) {
+        this.setBounds(
+          s.overlay.position === "custom"
+            ? (moveToDisplay(b, current.workArea, cursorDisplay.workArea) as Rectangle)
+            : presetRect(cursorDisplay.workArea, s.overlay.position, b.width, b.height),
+        );
+      }
     }
     this.ensureOverlayVisible();
     if (w.webContents.isLoading()) w.once("ready-to-show", () => w.show());
@@ -155,13 +198,30 @@ export class WindowManager {
     else this.showOverlay();
   }
 
-  setOverlaySize(width: number, height: number) {
+  setMode(mode: "compact" | "expanded") {
     const w = this.overlay;
-    if (!w) return;
+    if (!w || w.isDestroyed()) return;
+    this.mode = mode;
     const b = w.getBounds();
     const area = screen.getDisplayMatching(b).workArea;
-    w.setBounds({ ...b, width: Math.min(Math.max(360, width), area.width), height: Math.min(Math.max(120, height), area.height) });
-    this.ensureOverlayVisible();
+    const height = mode === "expanded" ? Math.min(this.getSettings().overlay.expandedHeight, area.height - 48) : COMPACT_HEIGHT;
+    this.setBounds(resizeAnchored(b, area, Math.max(MIN_WIDTH, b.width), height));
+    this.onModeChange(mode);
+  }
+
+  setOverlaySize(width: number, height: number) {
+    const w = this.overlay;
+    if (!w || w.isDestroyed()) return;
+    const b = w.getBounds();
+    const area = screen.getDisplayMatching(b).workArea;
+    this.setBounds(resizeAnchored(b, area, Math.min(Math.max(MIN_WIDTH, width), area.width), Math.min(Math.max(MIN_HEIGHT, height), area.height)));
+  }
+
+  resetPosition() {
+    const w = this.overlay;
+    if (!w || w.isDestroyed()) return;
+    const area = screen.getDisplayNearestPoint(screen.getCursorScreenPoint()).workArea;
+    this.setBounds(presetRect(area, "top-center", 560, this.mode === "expanded" ? this.getSettings().overlay.expandedHeight : COMPACT_HEIGHT));
   }
 
   openMain(route = "/main/assistant") {

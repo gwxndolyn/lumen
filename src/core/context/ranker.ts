@@ -1,9 +1,9 @@
-import type { ContextKind } from "../../shared/types";
+import type { ContextSource } from "../../shared/types";
 import { contentHash, tokenize } from "./text";
 
 export interface Candidate {
   id: string;
-  kind: ContextKind;
+  kind: ContextSource;
   title: string;
   text: string;
   createdAt: number;
@@ -13,16 +13,22 @@ export interface Candidate {
   /** Base64 image for vision models. */
   image?: { mediaType: "image/png" | "image/jpeg"; data: string };
   suspicious?: boolean;
+  /** 0–1 reliability; low-confidence OCR is down-weighted. */
+  confidence?: number | null;
+  sourceId?: string;
 }
 
 export interface Ranked extends Candidate {
   score: number;
 }
 
-const KIND_WEIGHT: Record<ContextKind, number> = {
+const KIND_WEIGHT: Record<ContextSource, number> = {
   screenshot: 1.4,
+  ocr: 1.3,
+  selected_text: 1.4,
   clipboard: 1.2,
   note: 1.2,
+  user_message: 1.0,
   document: 1.0,
   transcript: 1.1,
   knowledge: 0.9,
@@ -56,7 +62,8 @@ export function rankCandidates(query: string, candidates: Candidate[], now = Dat
     }
     const ageMin = Math.max(0, (now - c.createdAt) / 60_000);
     const recency = 1 / (1 + ageMin / 30); // halves after ~30 minutes
-    let score = bm25 * KIND_WEIGHT[c.kind] + recency * 0.5;
+    const reliability = c.confidence == null ? 1 : 0.5 + 0.5 * Math.max(0, Math.min(1, c.confidence));
+    let score = (bm25 * KIND_WEIGHT[c.kind] + recency * 0.5) * reliability;
     if (c.pinned) score += 1;
     if (c.explicit) score = Math.max(score, 0.5) + 0.5;
     if (c.image) score += 0.75;
@@ -65,7 +72,7 @@ export function rankCandidates(query: string, candidates: Candidate[], now = Dat
   return ranked.sort((a, b2) => b2.score - a.score);
 }
 
-/** Drop candidates whose normalized text is identical (keeps the most recent / pinned one). */
+/** Drop candidates whose normalized text is identical (keeps the pinned / most recent one). */
 export function dedupe(candidates: Candidate[]): Candidate[] {
   const seen = new Map<string, Candidate>();
   for (const c of candidates) {
@@ -73,7 +80,7 @@ export function dedupe(candidates: Candidate[]): Candidate[] {
       seen.set(`img:${c.id}`, c);
       continue;
     }
-    const key = contentHash(c.text.trim().toLowerCase());
+    const key = contentHash(c.text.trim().toLowerCase().replace(/\s+/g, " "));
     const prev = seen.get(key);
     if (!prev || (c.pinned && !prev.pinned) || (!!c.pinned === !!prev.pinned && c.createdAt > prev.createdAt)) {
       seen.set(key, c);

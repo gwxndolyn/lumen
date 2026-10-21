@@ -9,9 +9,11 @@ Requirements: Node 22+ (tested with Node 24.15 and Electron 44.9, on macOS arm64
 ```bash
 npm install
 npm start            # build and launch
-npm test             # 82 unit/integration tests (vitest)
+npm test             # 132 unit + integration tests (incl. workflows A–H, real OCR)
+npm run lint         # oxlint
+npm run check        # typecheck + lint + tests
 npm run typecheck    # strict TypeScript, main + renderer
-npm run smoke        # boots the real Electron app and drives the UI end-to-end
+npm run smoke        # real Electron app + UI, against local Anthropic/Deepgram wire stand-ins and the real mic
 npm run package      # unpacked app in release/ (electron-builder)
 npm run dist         # platform installer (dmg / nsis / AppImage)
 ```
@@ -30,8 +32,9 @@ During development you can supply keys as `ANTHROPIC_API_KEY` / `DEEPGRAM_API_KE
 |---|---|---|
 | Show / hide assistant | ⌘⇧Space | Ctrl+Shift+Space |
 | Ask about screen (captures the display under the cursor) | ⌘⇧S | Ctrl+Shift+S |
+| Ask about selection (copy text first) | ⌘⇧A | Ctrl+Shift+A |
 | Open full window | ⌘⇧L | Ctrl+Shift+L |
-| In panel: send / newline / stop or hide / new chat / expand | ↵ / ⇧↵ / Esc / ⌘N / ⌘E | |
+| In panel: send / newline / stop or hide / new chat / expand / answer style / copy last | ↵ / ⇧↵ / Esc / ⌘N / ⌘E / ⌥1–7 / ⌘⇧C | |
 
 You can rebind all of these under *Settings → Shortcuts*. If another app already holds a shortcut, the conflict is shown there.
 

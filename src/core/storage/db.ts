@@ -5,9 +5,14 @@ import type {
   ChatMessage,
   Conversation,
   ContextReference,
+  ContextSource,
   KnowledgeDoc,
+  KnowledgeHit,
   MessageMeta,
   SearchHit,
+  Session,
+  SessionAiConfig,
+  SessionSummary,
   TranscriptSegment,
   TranscriptSession,
 } from "../../shared/types";
@@ -60,6 +65,34 @@ export const MIGRATIONS: string[] = [
   `CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
    CREATE TABLE meeting_insights (session_id TEXT PRIMARY KEY REFERENCES transcript_sessions(id) ON DELETE CASCADE,
      data TEXT NOT NULL, created_at INTEGER NOT NULL);`,
+  // 4: workspace sessions. Every conversation, transcript and session-scoped document belongs to one;
+  // deleting a session cascades to all of them (and, via triggers, to their FTS index rows).
+  `CREATE TABLE sessions (
+     id TEXT PRIMARY KEY, title TEXT NOT NULL, type TEXT NOT NULL, notes TEXT NOT NULL DEFAULT '',
+     created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, context_ttl_minutes INTEGER, ai TEXT NOT NULL DEFAULT '{}');
+   INSERT INTO sessions (id, title, type, created_at, updated_at)
+     SELECT 'default', 'My first session', 'general',
+       COALESCE((SELECT MIN(created_at) FROM conversations), 0), COALESCE((SELECT MAX(updated_at) FROM conversations), 0)
+     WHERE EXISTS (SELECT 1 FROM conversations) OR EXISTS (SELECT 1 FROM transcript_sessions);
+   ALTER TABLE conversations ADD COLUMN session_id TEXT REFERENCES sessions(id) ON DELETE CASCADE;
+   UPDATE conversations SET session_id = 'default';
+   CREATE INDEX idx_conversations_session ON conversations(session_id, updated_at);
+   ALTER TABLE transcript_sessions ADD COLUMN session_id TEXT REFERENCES sessions(id) ON DELETE CASCADE;
+   UPDATE transcript_sessions SET session_id = 'default';
+   ALTER TABLE transcript_segments ADD COLUMN channel TEXT;
+   ALTER TABLE transcript_segments ADD COLUMN confidence REAL;
+   ALTER TABLE knowledge_docs ADD COLUMN session_id TEXT REFERENCES sessions(id) ON DELETE CASCADE;
+   ALTER TABLE knowledge_docs ADD COLUMN format TEXT NOT NULL DEFAULT 'text';
+   ALTER TABLE knowledge_docs ADD COLUMN content_hash TEXT;
+   CREATE TABLE context_items (
+     id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+     source TEXT NOT NULL, source_id TEXT NOT NULL, title TEXT NOT NULL, text TEXT NOT NULL,
+     created_at INTEGER NOT NULL, expires_at INTEGER, pinned INTEGER NOT NULL DEFAULT 0, enabled INTEGER NOT NULL DEFAULT 1,
+     hash TEXT NOT NULL);
+   CREATE INDEX idx_context_session ON context_items(session_id);
+   CREATE TRIGGER chunks_au AFTER UPDATE OF text ON knowledge_chunks BEGIN
+     INSERT INTO chunks_fts(chunks_fts, rowid, text) VALUES ('delete', old.rowid, old.text);
+     INSERT INTO chunks_fts(rowid, text) VALUES (new.rowid, new.text); END;`,
 ];
 
 type Row = Record<string, unknown>;
@@ -72,6 +105,32 @@ export function toFtsQuery(input: string, joiner = " AND "): string | null {
     .slice(0, 12);
   if (!terms.length) return null;
   return terms.map((t, i) => `"${t}"${i === terms.length - 1 ? "*" : ""}`).join(joiner);
+}
+
+const RETRIEVAL_STOPWORDS = new Set(
+  "a an and are as at be but by for from has have how i in is it its of on or that the this to was what when where which who why will with you your me my we our can do does tell about please".split(
+    " ",
+  ),
+);
+
+/** OR-query of meaningful terms for retrieval (stopwords would match everything). */
+export function toRetrievalQuery(input: string): string | null {
+  const terms = [...new Set(input.toLowerCase().split(/[^\p{L}\p{N}_]+/u))].filter((t) => t.length > 1 && !RETRIEVAL_STOPWORDS.has(t));
+  return terms.length ? toFtsQuery(terms.join(" "), " OR ") : null;
+}
+
+export interface PersistedContextItem {
+  id: string;
+  sessionId: string;
+  source: ContextSource;
+  sourceId: string;
+  title: string;
+  text: string;
+  createdAt: number;
+  expiresAt: number | null;
+  pinned: boolean;
+  enabled: boolean;
+  hash: string;
 }
 
 export class Store {
@@ -101,8 +160,20 @@ export class Store {
         this.db.exec("COMMIT");
       } catch (err) {
         this.db.exec("ROLLBACK");
-        throw new Error(`Database migration ${v + 1} failed: ${(err as Error).message}`);
+        throw new Error(`Database migration ${v + 1} failed: ${(err as Error).message}`, { cause: err });
       }
+    }
+  }
+
+  private tx<T>(fn: () => T): T {
+    this.db.exec("BEGIN");
+    try {
+      const out = fn();
+      this.db.exec("COMMIT");
+      return out;
+    } catch (err) {
+      this.db.exec("ROLLBACK");
+      throw err;
     }
   }
 
@@ -115,30 +186,143 @@ export class Store {
     this.db.prepare("INSERT INTO kv(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(key, value);
   }
 
+  // ---- sessions ----
+  createSession(input: { title: string; type: AssistantMode; notes?: string; contextTtlMinutes?: number | null; ai?: SessionAiConfig }, now = Date.now()): Session {
+    const s: Session = {
+      id: randomUUID(),
+      title: input.title.trim().slice(0, 120) || "Untitled session",
+      type: input.type,
+      notes: input.notes ?? "",
+      createdAt: now,
+      updatedAt: now,
+      contextTtlMinutes: input.contextTtlMinutes ?? null,
+      ai: input.ai ?? {},
+    };
+    this.db
+      .prepare("INSERT INTO sessions VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+      .run(s.id, s.title, s.type, s.notes, s.createdAt, s.updatedAt, s.contextTtlMinutes, JSON.stringify(s.ai));
+    return s;
+  }
+
+  getSession(id: string): Session | null {
+    const r = this.db.prepare("SELECT * FROM sessions WHERE id = ?").get(id) as Row | undefined;
+    return r ? toSession(r) : null;
+  }
+
+  updateSession(id: string, patch: Partial<Pick<Session, "title" | "type" | "notes" | "contextTtlMinutes" | "ai">>, now = Date.now()): Session | null {
+    const cur = this.getSession(id);
+    if (!cur) return null;
+    const next = { ...cur, ...patch, updatedAt: now };
+    this.db
+      .prepare("UPDATE sessions SET title = ?, type = ?, notes = ?, context_ttl_minutes = ?, ai = ?, updated_at = ? WHERE id = ?")
+      .run(next.title.slice(0, 120), next.type, next.notes.slice(0, 50_000), next.contextTtlMinutes, JSON.stringify(next.ai), now, id);
+    return next;
+  }
+
+  touchSession(id: string, now = Date.now()) {
+    this.db.prepare("UPDATE sessions SET updated_at = ? WHERE id = ?").run(now, id);
+  }
+
+  listSessions(): SessionSummary[] {
+    return (
+      this.db
+        .prepare(
+          `SELECT s.*,
+             (SELECT COUNT(*) FROM conversations c WHERE c.session_id = s.id) AS nc,
+             (SELECT COUNT(*) FROM transcript_sessions t WHERE t.session_id = s.id) AS nt,
+             (SELECT COUNT(*) FROM context_items x WHERE x.session_id = s.id) AS nx,
+             (SELECT COUNT(*) FROM knowledge_docs d WHERE d.session_id = s.id) AS nd
+           FROM sessions s ORDER BY updated_at DESC`,
+        )
+        .all() as Row[]
+    ).map((r) => ({
+      ...toSession(r),
+      conversations: Number(r.nc),
+      transcripts: Number(r.nt),
+      contextItems: Number(r.nx),
+      documents: Number(r.nd),
+    }));
+  }
+
+  /** Deletes the session and, by cascade, its conversations, messages, transcripts, segments, insights, documents, chunks and stored context. */
+  deleteSession(id: string): boolean {
+    return Number(this.db.prepare("DELETE FROM sessions WHERE id = ?").run(id).changes) > 0;
+  }
+
+  exportSession(id: string) {
+    const session = this.getSession(id);
+    if (!session) return null;
+    return {
+      exportedAt: new Date().toISOString(),
+      schemaVersion: this.schemaVersion(),
+      session,
+      conversations: this.listConversations(id, 100_000).map((c) => ({ ...c, messages: this.listMessages(c.id) })),
+      transcripts: this.listTranscriptSessions(id).map((t) => ({ ...t, segments: this.listSegments(t.id), insights: this.getInsights(t.id) })),
+      documents: this.listKnowledgeDocs(id, false).map((d) => ({ ...d, chunks: this.docChunks(d.id) })),
+      context: this.listContextItems(id),
+    };
+  }
+
+  // ---- persisted session context (text only; images are never stored) ----
+  saveContextItem(c: PersistedContextItem) {
+    this.db
+      .prepare(
+        `INSERT INTO context_items VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET title = excluded.title, text = excluded.text, created_at = excluded.created_at,
+           expires_at = excluded.expires_at, pinned = excluded.pinned, enabled = excluded.enabled, hash = excluded.hash`,
+      )
+      .run(c.id, c.sessionId, c.source, c.sourceId, c.title, c.text, c.createdAt, c.expiresAt, c.pinned ? 1 : 0, c.enabled ? 1 : 0, c.hash);
+  }
+
+  deleteContextItem(id: string) {
+    this.db.prepare("DELETE FROM context_items WHERE id = ?").run(id);
+  }
+
+  listContextItems(sessionId?: string): PersistedContextItem[] {
+    const rows = (
+      sessionId
+        ? this.db.prepare("SELECT * FROM context_items WHERE session_id = ? ORDER BY created_at").all(sessionId)
+        : this.db.prepare("SELECT * FROM context_items ORDER BY created_at").all()
+    ) as Row[];
+    return rows.map((r) => ({
+      id: String(r.id),
+      sessionId: String(r.session_id),
+      source: String(r.source) as ContextSource,
+      sourceId: String(r.source_id),
+      title: String(r.title),
+      text: String(r.text),
+      createdAt: Number(r.created_at),
+      expiresAt: r.expires_at == null ? null : Number(r.expires_at),
+      pinned: Number(r.pinned) === 1,
+      enabled: Number(r.enabled) === 1,
+      hash: String(r.hash),
+    }));
+  }
+
+  deleteExpiredContext(now = Date.now()): number {
+    return Number(this.db.prepare("DELETE FROM context_items WHERE expires_at IS NOT NULL AND expires_at <= ? AND pinned = 0").run(now).changes);
+  }
+
   // ---- conversations ----
-  createConversation(title: string, mode: AssistantMode, now = Date.now()): Conversation {
+  createConversation(sessionId: string, title: string, mode: AssistantMode, now = Date.now()): Conversation {
     const id = randomUUID();
-    this.db.prepare("INSERT INTO conversations VALUES (?, ?, ?, ?, ?)").run(id, title, mode, now, now);
-    return { id, title, mode, createdAt: now, updatedAt: now, messageCount: 0 };
+    this.db.prepare("INSERT INTO conversations (id, title, mode, created_at, updated_at, session_id) VALUES (?, ?, ?, ?, ?, ?)").run(id, title, mode, now, now, sessionId);
+    this.touchSession(sessionId, now);
+    return { id, sessionId, title, mode, createdAt: now, updatedAt: now, messageCount: 0 };
   }
 
   getConversation(id: string): Conversation | null {
     const r = this.db
-      .prepare(
-        "SELECT c.*, (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id) AS n FROM conversations c WHERE id = ?",
-      )
+      .prepare("SELECT c.*, (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id) AS n FROM conversations c WHERE id = ?")
       .get(id) as Row | undefined;
     return r ? toConversation(r) : null;
   }
 
-  listConversations(limit = 200): Conversation[] {
-    return (
-      this.db
-        .prepare(
-          "SELECT c.*, (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id) AS n FROM conversations c ORDER BY updated_at DESC LIMIT ?",
-        )
-        .all(limit) as Row[]
-    ).map(toConversation);
+  listConversations(sessionId: string | null, limit = 200): Conversation[] {
+    const sql = `SELECT c.*, (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id) AS n FROM conversations c
+                 ${sessionId ? "WHERE session_id = ?" : ""} ORDER BY updated_at DESC LIMIT ?`;
+    const rows = (sessionId ? this.db.prepare(sql).all(sessionId, limit) : this.db.prepare(sql).all(limit)) as Row[];
+    return rows.map(toConversation);
   }
 
   renameConversation(id: string, title: string) {
@@ -149,9 +333,7 @@ export class Store {
     this.db.prepare("DELETE FROM conversations WHERE id = ?").run(id);
   }
 
-  addMessage(
-    m: Omit<ChatMessage, "id" | "createdAt"> & { id?: string; createdAt?: number },
-  ): ChatMessage {
+  addMessage(m: Omit<ChatMessage, "id" | "createdAt"> & { id?: string; createdAt?: number }): ChatMessage {
     const msg: ChatMessage = { ...m, id: m.id ?? randomUUID(), createdAt: m.createdAt ?? Date.now() };
     this.db
       .prepare("INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?)")
@@ -170,16 +352,15 @@ export class Store {
   }
 
   listMessages(conversationId: string): ChatMessage[] {
-    return (
-      this.db.prepare("SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at, rowid").all(conversationId) as Row[]
-    ).map(toMessage);
+    return (this.db.prepare("SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at, rowid").all(conversationId) as Row[]).map(toMessage);
   }
 
   // ---- transcripts ----
-  createTranscriptSession(title: string, provider: string, now = Date.now()): TranscriptSession {
+  createTranscriptSession(sessionId: string, title: string, provider: string, now = Date.now()): TranscriptSession {
     const id = randomUUID();
-    this.db.prepare("INSERT INTO transcript_sessions VALUES (?, ?, ?, NULL, ?)").run(id, title, now, provider);
-    return { id, title, startedAt: now, endedAt: null, segmentCount: 0, provider };
+    this.db.prepare("INSERT INTO transcript_sessions (id, title, started_at, ended_at, provider, session_id) VALUES (?, ?, ?, NULL, ?, ?)").run(id, title, now, provider, sessionId);
+    this.touchSession(sessionId, now);
+    return { id, sessionId, title, startedAt: now, endedAt: null, segmentCount: 0, provider, persisted: true };
   }
 
   endTranscriptSession(id: string, now = Date.now()) {
@@ -190,28 +371,31 @@ export class Store {
     this.db.prepare("UPDATE transcript_sessions SET title = ? WHERE id = ?").run(title.slice(0, 200), id);
   }
 
-  listTranscriptSessions(): TranscriptSession[] {
-    return (
-      this.db
-        .prepare(
-          "SELECT s.*, (SELECT COUNT(*) FROM transcript_segments g WHERE g.session_id = s.id) AS n FROM transcript_sessions s ORDER BY started_at DESC",
-        )
-        .all() as Row[]
-    ).map((r) => ({
+  getTranscriptSession(id: string): TranscriptSession | null {
+    return this.listTranscriptSessions(null).find((t) => t.id === id) ?? null;
+  }
+
+  listTranscriptSessions(sessionId: string | null): TranscriptSession[] {
+    const sql = `SELECT s.*, (SELECT COUNT(*) FROM transcript_segments g WHERE g.session_id = s.id) AS n FROM transcript_sessions s
+                 ${sessionId ? "WHERE s.session_id = ?" : ""} ORDER BY started_at DESC`;
+    const rows = (sessionId ? this.db.prepare(sql).all(sessionId) : this.db.prepare(sql).all()) as Row[];
+    return rows.map((r) => ({
       id: String(r.id),
+      sessionId: String(r.session_id),
       title: String(r.title),
       startedAt: Number(r.started_at),
       endedAt: r.ended_at == null ? null : Number(r.ended_at),
       segmentCount: Number(r.n),
       provider: String(r.provider),
+      persisted: true,
     }));
   }
 
   addSegment(s: Omit<TranscriptSegment, "id" | "edited">): TranscriptSegment {
     const seg: TranscriptSegment = { ...s, id: randomUUID(), edited: false };
     this.db
-      .prepare("INSERT INTO transcript_segments VALUES (?, ?, ?, ?, ?, ?, 0)")
-      .run(seg.id, seg.sessionId, seg.startMs, seg.endMs, seg.speaker, seg.text);
+      .prepare("INSERT INTO transcript_segments (id, session_id, start_ms, end_ms, speaker, text, edited, channel, confidence) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)")
+      .run(seg.id, seg.sessionId, seg.startMs, seg.endMs, seg.speaker, seg.text, seg.channel, seg.confidence);
     return seg;
   }
 
@@ -223,17 +407,17 @@ export class Store {
     this.db.prepare("DELETE FROM transcript_segments WHERE id = ?").run(id);
   }
 
-  listSegments(sessionId: string): TranscriptSegment[] {
-    return (
-      this.db.prepare("SELECT * FROM transcript_segments WHERE session_id = ? ORDER BY start_ms, rowid").all(sessionId) as Row[]
-    ).map((r) => ({
+  listSegments(transcriptId: string): TranscriptSegment[] {
+    return (this.db.prepare("SELECT * FROM transcript_segments WHERE session_id = ? ORDER BY start_ms, rowid").all(transcriptId) as Row[]).map((r) => ({
       id: String(r.id),
       sessionId: String(r.session_id),
       startMs: Number(r.start_ms),
       endMs: Number(r.end_ms),
       speaker: r.speaker == null ? null : String(r.speaker),
+      channel: r.channel == null ? null : (String(r.channel) as TranscriptSegment["channel"]),
       text: String(r.text),
       edited: Number(r.edited) === 1,
+      confidence: r.confidence == null ? null : Number(r.confidence),
     }));
   }
 
@@ -241,88 +425,98 @@ export class Store {
     this.db.prepare("DELETE FROM transcript_sessions WHERE id = ?").run(id);
   }
 
-  saveInsights(sessionId: string, data: unknown) {
+  saveInsights(transcriptId: string, data: unknown) {
     this.db
-      .prepare(
-        "INSERT INTO meeting_insights VALUES (?, ?, ?) ON CONFLICT(session_id) DO UPDATE SET data = excluded.data, created_at = excluded.created_at",
-      )
-      .run(sessionId, JSON.stringify(data), Date.now());
+      .prepare("INSERT INTO meeting_insights VALUES (?, ?, ?) ON CONFLICT(session_id) DO UPDATE SET data = excluded.data, created_at = excluded.created_at")
+      .run(transcriptId, JSON.stringify(data), Date.now());
   }
 
-  getInsights<T>(sessionId: string): T | null {
-    const r = this.db.prepare("SELECT data FROM meeting_insights WHERE session_id = ?").get(sessionId) as Row | undefined;
+  getInsights<T>(transcriptId: string): T | null {
+    const r = this.db.prepare("SELECT data FROM meeting_insights WHERE session_id = ?").get(transcriptId) as Row | undefined;
     return r ? (JSON.parse(String(r.data)) as T) : null;
   }
 
   // ---- knowledge base ----
-  addKnowledgeDoc(title: string, source: string, chunks: string[], now = Date.now()): KnowledgeDoc {
-    const id = randomUUID();
-    const chars = chunks.reduce((s, c) => s + c.length, 0);
-    this.db.exec("BEGIN");
-    try {
-      this.db.prepare("INSERT INTO knowledge_docs VALUES (?, ?, ?, ?, ?)").run(id, title, source, chars, now);
-      const ins = this.db.prepare("INSERT INTO knowledge_chunks VALUES (?, ?, ?, ?)");
-      chunks.forEach((c, i) => ins.run(randomUUID(), id, i, c));
-      this.db.exec("COMMIT");
-    } catch (err) {
-      this.db.exec("ROLLBACK");
-      throw err;
-    }
-    return { id, title, source, chars, chunkCount: chunks.length, createdAt: now };
+  findDocByHash(hash: string, sessionId: string | null): KnowledgeDoc | null {
+    const r = this.db
+      .prepare(`SELECT d.*, 0 AS n FROM knowledge_docs d WHERE content_hash = ? AND ${sessionId ? "session_id = ?" : "session_id IS NULL"}`)
+      .get(...(sessionId ? [hash, sessionId] : [hash])) as Row | undefined;
+    return r ? toDoc(r) : null;
   }
 
-  listKnowledgeDocs(): KnowledgeDoc[] {
-    return (
+  addKnowledgeDoc(
+    input: { title: string; source: string; chunks: string[]; sessionId?: string | null; format?: string; hash?: string },
+    now = Date.now(),
+  ): KnowledgeDoc {
+    const id = randomUUID();
+    const chars = input.chunks.reduce((s, c) => s + c.length, 0);
+    const sessionId = input.sessionId ?? null;
+    this.tx(() => {
       this.db
-        .prepare(
-          "SELECT d.*, (SELECT COUNT(*) FROM knowledge_chunks c WHERE c.doc_id = d.id) AS n FROM knowledge_docs d ORDER BY created_at DESC",
-        )
-        .all() as Row[]
-    ).map((r) => ({
-      id: String(r.id),
-      title: String(r.title),
-      source: String(r.source),
-      chars: Number(r.chars),
-      chunkCount: Number(r.n),
-      createdAt: Number(r.created_at),
-    }));
+        .prepare("INSERT INTO knowledge_docs (id, title, source, chars, created_at, session_id, format, content_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+        .run(id, input.title, input.source, chars, now, sessionId, input.format ?? "text", input.hash ?? null);
+      const ins = this.db.prepare("INSERT INTO knowledge_chunks VALUES (?, ?, ?, ?)");
+      input.chunks.forEach((c, i) => ins.run(randomUUID(), id, i, c));
+    });
+    return { id, title: input.title, source: input.source, sessionId, format: input.format ?? "text", chars, chunkCount: input.chunks.length, createdAt: now };
+  }
+
+  /** Global documents plus (optionally) those attached to one session. */
+  listKnowledgeDocs(sessionId: string | null, includeGlobal = true): KnowledgeDoc[] {
+    const where = sessionId ? (includeGlobal ? "WHERE d.session_id IS NULL OR d.session_id = ?" : "WHERE d.session_id = ?") : "WHERE d.session_id IS NULL";
+    const rows = this.db
+      .prepare(`SELECT d.*, (SELECT COUNT(*) FROM knowledge_chunks c WHERE c.doc_id = d.id) AS n FROM knowledge_docs d ${where} ORDER BY created_at DESC`)
+      .all(...(sessionId ? [sessionId] : [])) as Row[];
+    return rows.map(toDoc);
+  }
+
+  docChunks(docId: string): string[] {
+    return (this.db.prepare("SELECT text FROM knowledge_chunks WHERE doc_id = ? ORDER BY ord").all(docId) as Row[]).map((r) => String(r.text));
   }
 
   deleteKnowledgeDoc(id: string) {
     this.db.prepare("DELETE FROM knowledge_docs WHERE id = ?").run(id);
   }
 
-  /** BM25-ranked knowledge chunks for retrieval. */
-  searchKnowledge(query: string, limit = 6): { docId: string; title: string; text: string; createdAt: number }[] {
-    // Retrieval uses OR semantics so partial matches still surface.
-    const orQuery = toFtsQuery(query, " OR ");
-    if (!orQuery) return [];
+  /** BM25-ranked knowledge passages visible to `sessionId` (global + that session's documents only). */
+  searchKnowledge(query: string, sessionId: string | null, limit = 6): KnowledgeHit[] {
+    const q = toRetrievalQuery(query);
+    if (!q) return [];
+    const scope = sessionId ? "(d.session_id IS NULL OR d.session_id = ?)" : "d.session_id IS NULL";
     return (
       this.db
         .prepare(
-          `SELECT c.doc_id, d.title, c.text, d.created_at FROM chunks_fts f
-           JOIN knowledge_chunks c ON c.rowid = f.rowid JOIN knowledge_docs d ON d.id = c.doc_id
-           WHERE chunks_fts MATCH ? ORDER BY bm25(chunks_fts) LIMIT ?`,
+          `SELECT c.id AS chunk_id, c.doc_id, d.title, c.text, d.session_id, snippet(chunks_fts, 0, '«', '»', '…', 16) AS snip
+           FROM chunks_fts f JOIN knowledge_chunks c ON c.rowid = f.rowid JOIN knowledge_docs d ON d.id = c.doc_id
+           WHERE chunks_fts MATCH ? AND ${scope} ORDER BY bm25(chunks_fts) LIMIT ?`,
         )
-        .all(orQuery, limit) as Row[]
-    ).map((r) => ({ docId: String(r.doc_id), title: String(r.title), text: String(r.text), createdAt: Number(r.created_at) }));
+        .all(...(sessionId ? [q, sessionId, limit] : [q, limit])) as Row[]
+    ).map((r) => ({
+      docId: String(r.doc_id),
+      chunkId: String(r.chunk_id),
+      title: String(r.title),
+      text: String(r.text),
+      snippet: String(r.snip),
+      sessionId: r.session_id == null ? null : String(r.session_id),
+    }));
   }
 
   // ---- search ----
-  search(query: string, limit = 50): SearchHit[] {
-    const q = toFtsQuery(query);
+  /** Full-text search of messages and transcripts. When `sessionId` is set, results are restricted to it. */
+  search(query: string, sessionId: string | null, limit = 50, mode: "all" | "any" = "all"): SearchHit[] {
+    const q = mode === "any" ? toRetrievalQuery(query) : toFtsQuery(query);
     if (!q) return [];
     const msgs = (
       this.db
         .prepare(
-          `SELECT m.id, m.conversation_id, c.title, m.created_at,
-                  snippet(messages_fts, 0, '«', '»', '…', 12) AS snip
+          `SELECT m.id, m.conversation_id, c.title, c.session_id, m.created_at, snippet(messages_fts, 0, '«', '»', '…', 12) AS snip
            FROM messages_fts f JOIN messages m ON m.rowid = f.rowid JOIN conversations c ON c.id = m.conversation_id
-           WHERE messages_fts MATCH ? ORDER BY bm25(messages_fts) LIMIT ?`,
+           WHERE messages_fts MATCH ? ${sessionId ? "AND c.session_id = ?" : ""} ORDER BY bm25(messages_fts) LIMIT ?`,
         )
-        .all(q, limit) as Row[]
+        .all(...(sessionId ? [q, sessionId, limit] : [q, limit])) as Row[]
     ).map<SearchHit>((r) => ({
       kind: "message",
+      sessionId: String(r.session_id),
       parentId: String(r.conversation_id),
       parentTitle: String(r.title),
       itemId: String(r.id),
@@ -332,15 +526,15 @@ export class Store {
     const segs = (
       this.db
         .prepare(
-          `SELECT g.id, g.session_id, s.title, s.started_at + g.start_ms AS at,
-                  snippet(segments_fts, 0, '«', '»', '…', 12) AS snip
+          `SELECT g.id, g.session_id AS tid, s.title, s.session_id, s.started_at + g.start_ms AS at, snippet(segments_fts, 0, '«', '»', '…', 12) AS snip
            FROM segments_fts f JOIN transcript_segments g ON g.rowid = f.rowid JOIN transcript_sessions s ON s.id = g.session_id
-           WHERE segments_fts MATCH ? ORDER BY bm25(segments_fts) LIMIT ?`,
+           WHERE segments_fts MATCH ? ${sessionId ? "AND s.session_id = ?" : ""} ORDER BY bm25(segments_fts) LIMIT ?`,
         )
-        .all(q, limit) as Row[]
+        .all(...(sessionId ? [q, sessionId, limit] : [q, limit])) as Row[]
     ).map<SearchHit>((r) => ({
       kind: "transcript",
-      parentId: String(r.session_id),
+      sessionId: String(r.session_id),
+      parentId: String(r.tid),
       parentTitle: String(r.title),
       itemId: String(r.id),
       snippet: String(r.snip),
@@ -349,32 +543,36 @@ export class Store {
     return [...msgs, ...segs].slice(0, limit);
   }
 
+  /** Row counts in each FTS index — used to verify deletion really removes indexed data. */
+  ftsCounts() {
+    const n = (t: string) => Number((this.db.prepare(`SELECT COUNT(*) AS n FROM ${t}_docsize`).get() as Row).n);
+    return { messages: n("messages_fts"), segments: n("segments_fts"), chunks: n("chunks_fts") };
+  }
+
   // ---- retention, export, deletion ----
-  applyRetention(conversationDays: number, transcriptDays: number, now = Date.now()): { conversations: number; transcripts: number } {
+  applyRetention(conversationDays: number, transcriptDays: number, now = Date.now()): { conversations: number; transcripts: number; context: number } {
     let conversations = 0;
     let transcripts = 0;
     if (conversationDays > 0) {
-      conversations = Number(
-        this.db.prepare("DELETE FROM conversations WHERE updated_at < ?").run(now - conversationDays * 86_400_000).changes,
-      );
+      conversations = Number(this.db.prepare("DELETE FROM conversations WHERE updated_at < ?").run(now - conversationDays * 86_400_000).changes);
     }
     if (transcriptDays > 0) {
       transcripts = Number(
-        this.db
-          .prepare("DELETE FROM transcript_sessions WHERE COALESCE(ended_at, started_at) < ?")
-          .run(now - transcriptDays * 86_400_000).changes,
+        this.db.prepare("DELETE FROM transcript_sessions WHERE COALESCE(ended_at, started_at) < ?").run(now - transcriptDays * 86_400_000).changes,
       );
     }
-    return { conversations, transcripts };
+    return { conversations, transcripts, context: this.deleteExpiredContext(now) };
   }
 
   counts() {
     const n = (sql: string) => Number((this.db.prepare(sql).get() as Row).n);
     return {
+      sessions: n("SELECT COUNT(*) AS n FROM sessions"),
       conversations: n("SELECT COUNT(*) AS n FROM conversations"),
       messages: n("SELECT COUNT(*) AS n FROM messages"),
       transcripts: n("SELECT COUNT(*) AS n FROM transcript_sessions"),
       knowledgeDocs: n("SELECT COUNT(*) AS n FROM knowledge_docs"),
+      contextItems: n("SELECT COUNT(*) AS n FROM context_items"),
     };
   }
 
@@ -382,31 +580,48 @@ export class Store {
     return {
       exportedAt: new Date().toISOString(),
       schemaVersion: this.schemaVersion(),
-      conversations: this.listConversations(100_000).map((c) => ({ ...c, messages: this.listMessages(c.id) })),
-      transcripts: this.listTranscriptSessions().map((s) => ({
-        ...s,
-        segments: this.listSegments(s.id),
-        insights: this.getInsights(s.id),
-      })),
-      knowledge: this.listKnowledgeDocs().map((d) => ({
-        ...d,
-        chunks: (this.db.prepare("SELECT text FROM knowledge_chunks WHERE doc_id = ? ORDER BY ord").all(d.id) as Row[]).map((r) =>
-          String(r.text),
-        ),
-      })),
+      sessions: this.listSessions().map((s) => this.exportSession(s.id)),
+      globalKnowledge: this.listKnowledgeDocs(null).map((d) => ({ ...d, chunks: this.docChunks(d.id) })),
     };
   }
 
   deleteAll() {
     this.db.exec(
-      "BEGIN; DELETE FROM conversations; DELETE FROM transcript_sessions; DELETE FROM knowledge_docs; DELETE FROM meeting_insights; COMMIT; VACUUM;",
+      "BEGIN; DELETE FROM sessions; DELETE FROM conversations; DELETE FROM transcript_sessions; DELETE FROM knowledge_docs; DELETE FROM meeting_insights; DELETE FROM context_items; COMMIT; VACUUM;",
     );
   }
+}
+
+function toSession(r: Row): Session {
+  return {
+    id: String(r.id),
+    title: String(r.title),
+    type: String(r.type) as AssistantMode,
+    notes: String(r.notes ?? ""),
+    createdAt: Number(r.created_at),
+    updatedAt: Number(r.updated_at),
+    contextTtlMinutes: r.context_ttl_minutes == null ? null : Number(r.context_ttl_minutes),
+    ai: safeJson<SessionAiConfig>(String(r.ai ?? "{}"), {}),
+  };
+}
+
+function toDoc(r: Row): KnowledgeDoc {
+  return {
+    id: String(r.id),
+    title: String(r.title),
+    source: String(r.source),
+    sessionId: r.session_id == null ? null : String(r.session_id),
+    format: String(r.format ?? "text"),
+    chars: Number(r.chars),
+    chunkCount: Number(r.n ?? 0),
+    createdAt: Number(r.created_at),
+  };
 }
 
 function toConversation(r: Row): Conversation {
   return {
     id: String(r.id),
+    sessionId: String(r.session_id),
     title: String(r.title),
     mode: String(r.mode) as AssistantMode,
     createdAt: Number(r.created_at),

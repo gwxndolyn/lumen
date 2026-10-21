@@ -8,6 +8,7 @@ type Props = { settings: Settings; update: (p: unknown) => Promise<void> };
 const LABELS: Record<keyof Settings["shortcuts"], { title: string; hint: string }> = {
   toggleOverlay: { title: "Show / hide assistant", hint: "Open the floating panel and focus the input." },
   askAboutScreen: { title: "Ask about screen", hint: "Capture the display under the cursor and attach it to the next question." },
+  askAboutSelection: { title: "Ask about selection", hint: "Copy text in any app (⌘/Ctrl+C), then press this to attach it as selected text." },
   openMainWindow: { title: "Open full window", hint: "Open the main Lumen window." },
 };
 

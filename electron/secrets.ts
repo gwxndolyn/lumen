@@ -1,7 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
 
-export type SecretName = "anthropic" | "deepgram";
+import type { SecretName } from "../src/shared/types";
+export type { SecretName };
 
 export interface Cipher {
   isEncryptionAvailable(): boolean;
@@ -9,7 +10,7 @@ export interface Cipher {
   decryptString(enc: Buffer): string;
 }
 
-const ENV: Record<SecretName, string> = { anthropic: "ANTHROPIC_API_KEY", deepgram: "DEEPGRAM_API_KEY" };
+const ENV: Record<SecretName, string> = { anthropic: "ANTHROPIC_API_KEY", deepgram: "DEEPGRAM_API_KEY", openai_compat: "LUMEN_OPENAI_COMPAT_API_KEY" };
 
 /**
  * API keys are encrypted with the OS credential store (Electron safeStorage: Keychain on macOS,

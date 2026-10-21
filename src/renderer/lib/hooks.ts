@@ -1,16 +1,30 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import type { AppEvent } from "../../shared/api";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import type { AppEvent, TranscriptState } from "../../shared/api";
 import type {
+  AnswerStyle,
+  AudioInputState,
   ChatMessage,
   ContextItemSummary,
   ContextReference,
   ErrorCode,
+  LiveScreenState,
+  ProviderHealth,
+  Session,
   Settings,
+  SourceAvailability,
   TranscriptEvent,
   TranscriptSegment,
   TranscriptStatus,
 } from "../../shared/types";
 import { api, errMsg, newId } from "./api";
+
+export function useAppEvent(fn: (e: AppEvent) => void) {
+  const ref = useRef(fn);
+  useLayoutEffect(() => {
+    ref.current = fn;
+  });
+  useEffect(() => api.onApp((e) => ref.current(e)), []);
+}
 
 export function useSettings(): [Settings | null, (patch: unknown) => Promise<void>, string | null] {
   const [settings, setSettings] = useState<Settings | null>(null);
@@ -33,21 +47,64 @@ export function useSettings(): [Settings | null, (patch: unknown) => Promise<voi
   return [settings, update, error];
 }
 
-export function useContextItems(): ContextItemSummary[] {
-  const [items, setItems] = useState<ContextItemSummary[]>([]);
-  useEffect(() => {
-    void api.listContext().then(setItems);
-    return api.onApp((e) => {
-      if (e.type === "context") setItems(e.items);
-    });
-  }, []);
-  return items;
+/** The active workspace session; updates when the user switches or edits sessions. */
+export function useActiveSession(): Session | null {
+  const [session, setSession] = useState<Session | null>(null);
+  const load = useCallback(() => void api.activeSession().then(setSession), []);
+  useEffect(load, [load]);
+  useAppEvent((e) => {
+    if (e.type === "session-switched" || e.type === "sessions-changed") load();
+  });
+  return session;
 }
 
-export function useAppEvent(fn: (e: AppEvent) => void) {
-  const ref = useRef(fn);
-  ref.current = fn;
-  useEffect(() => api.onApp((e) => ref.current(e)), []);
+export function useContextItems(): ContextItemSummary[] {
+  const [items, setItems] = useState<ContextItemSummary[]>([]);
+  const sessionRef = useRef<string | null>(null);
+  useEffect(() => {
+    void api.activeSession().then((s) => {
+      sessionRef.current = s.id;
+      void api.listContext().then(setItems);
+    });
+  }, []);
+  useAppEvent((e) => {
+    if (e.type === "session-switched") {
+      sessionRef.current = e.sessionId;
+      void api.listContext().then(setItems);
+    }
+    // Only accept updates for the session this window is showing.
+    if (e.type === "context" && e.sessionId === sessionRef.current) setItems(e.items);
+  });
+  // Re-render periodically so expiry countdowns stay current and expired items drop out.
+  const now = useNow(30_000);
+  return items.filter((i) => i.expiresAt === null || i.expiresAt > now);
+}
+
+/** Current time, refreshed on an interval (keeps render pure). */
+export function useNow(intervalMs = 1000): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), intervalMs);
+    return () => clearInterval(t);
+  }, [intervalMs]);
+  return now;
+}
+
+export function useProviderHealth(): ProviderHealth | null {
+  const [h, setH] = useState<ProviderHealth | null>(null);
+  useEffect(() => void api.providerHealth().then(setH), []);
+  useAppEvent((e) => {
+    if (e.type === "provider-health") setH(e.health);
+    if (e.type === "settings") void api.providerHealth().then(setH);
+  });
+  return h;
+}
+
+export function useLiveScreen(): LiveScreenState | null {
+  const [s, setS] = useState<LiveScreenState | null>(null);
+  useEffect(() => void api.liveScreenState().then(setS), []);
+  useAppEvent((e) => e.type === "live-screen" && setS(e.state));
+  return s;
 }
 
 export interface UiMessage {
@@ -57,8 +114,9 @@ export interface UiMessage {
   references: ContextReference[];
   status: "done" | "streaming" | "error" | "cancelled";
   error?: { message: string; code: ErrorCode; retryable: boolean };
-  meta?: { model?: string; isMock?: boolean; costUsd?: number; ttftMs?: number | null; totalMs?: number; fallback?: string | null };
+  meta?: { model?: string; isMock?: boolean; costUsd?: number; ttftMs?: number | null; totalMs?: number; fallback?: string | null; style?: AnswerStyle };
   warnings?: string[];
+  availability?: SourceAvailability;
   retryNote?: string;
 }
 
@@ -69,17 +127,32 @@ function fromStored(m: ChatMessage): UiMessage {
     content: m.content,
     references: m.references,
     status: m.meta.cancelled ? "cancelled" : "done",
-    meta: { model: m.meta.model, isMock: m.meta.isMock, costUsd: m.meta.estimatedCostUsd },
+    meta: { model: m.meta.model, isMock: m.meta.isMock, costUsd: m.meta.estimatedCostUsd, ttftMs: m.meta.ttftMs, totalMs: m.meta.totalMs, style: m.meta.style },
   };
 }
 
-/** Chat state machine bound to streaming IPC events. */
+/**
+ * Chat state machine bound to streaming IPC events. Events are matched by request id, so deltas
+ * from one question can never be appended to another; a session switch resets the thread.
+ */
 export function useChat(settings: Settings | null) {
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [messages, setMessages] = useState<UiMessage[]>([]);
   const [activeRequest, setActiveRequest] = useState<string | null>(null);
   const reqRef = useRef<string | null>(null);
   const placeholder = useRef<string | null>(null);
+
+  const reset = useCallback(() => {
+    reqRef.current = null;
+    placeholder.current = null;
+    setActiveRequest(null);
+    setConversationId(null);
+    setMessages([]);
+  }, []);
+
+  useAppEvent((e) => {
+    if (e.type === "session-switched") reset();
+  });
 
   useEffect(
     () =>
@@ -96,6 +169,7 @@ export function useChat(settings: Settings | null) {
               setConversationId(e.conversationId);
               cur.references = e.references;
               cur.warnings = e.warnings;
+              cur.availability = e.availability;
               cur.meta = { model: e.provider.model, isMock: e.provider.isMock };
               // Reconcile the optimistic user message id with the stored one.
               if (idx > 0 && next[idx - 1]!.role === "user") next[idx - 1] = { ...next[idx - 1]!, id: e.userMessageId };
@@ -112,9 +186,11 @@ export function useChat(settings: Settings | null) {
               cur.id = e.messageId;
               cur.status = "done";
               cur.retryNote = undefined;
+              cur.references = cur.references.filter((r) => e.citedLabels.includes(r.label));
               cur.meta = { ...cur.meta, costUsd: e.usage.estimatedCostUsd, ttftMs: e.ttftMs, totalMs: e.totalMs, fallback: e.servedByFallback };
               break;
             case "error":
+              if (e.conversationId) setConversationId(e.conversationId);
               cur.status = "error";
               cur.retryNote = undefined;
               cur.error = { message: e.message, code: e.code, retryable: e.retryable };
@@ -137,7 +213,7 @@ export function useChat(settings: Settings | null) {
   );
 
   const send = useCallback(
-    async (text: string, opts: { includeLiveTranscript: boolean; retryOf?: string }) => {
+    async (text: string, opts: { includeLiveTranscript: boolean; retryOf?: string; style?: AnswerStyle }) => {
       if (!settings || reqRef.current) return;
       const requestId = newId();
       const pid = `pending-${requestId}`;
@@ -146,26 +222,21 @@ export function useChat(settings: Settings | null) {
       setActiveRequest(requestId);
       setMessages((prev) => {
         const base = opts.retryOf ? prev.filter((m) => m.id !== opts.retryOf) : prev;
-        const user: UiMessage[] = opts.retryOf
-          ? []
-          : [{ id: `u-${requestId}`, role: "user", content: text, references: [], status: "done" }];
-        return [...base, ...user, { id: pid, role: "assistant", content: "", references: [], status: "streaming" }];
+        const user: UiMessage[] = opts.retryOf ? [] : [{ id: `u-${requestId}`, role: "user", content: text, references: [], status: "done" }];
+        return [...base, ...user, { id: pid, role: "assistant", content: "", references: [], status: "streaming", meta: { style: opts.style ?? settings.assistant.style } }];
       });
       try {
         await api.chatSend({
           requestId,
           conversationId,
           text,
-          mode: settings.assistant.mode,
-          length: settings.assistant.length,
+          style: opts.style ?? settings.assistant.style,
           tone: settings.assistant.tone,
           includeLiveTranscript: opts.includeLiveTranscript,
           retryOfMessageId: opts.retryOf,
         });
       } catch (err) {
-        setMessages((prev) =>
-          prev.map((m) => (m.id === pid ? { ...m, status: "error", error: { message: errMsg(err), code: "unknown", retryable: false } } : m)),
-        );
+        setMessages((prev) => prev.map((m) => (m.id === pid ? { ...m, status: "error", error: { message: errMsg(err), code: "unknown", retryable: false } } : m)));
         reqRef.current = null;
         setActiveRequest(null);
       }
@@ -186,10 +257,10 @@ export function useChat(settings: Settings | null) {
       if (msg.status === "error" && msg.id.startsWith("pending-")) {
         const user = messages.slice(0, idx).findLast((m) => m.role === "user");
         setMessages((prev) => prev.filter((m) => m.id !== assistantId && m.id !== user?.id));
-        if (user) void send(user.content, { includeLiveTranscript });
+        if (user) void send(user.content, { includeLiveTranscript, style: msg.meta?.style });
         return;
       }
-      void send("", { includeLiveTranscript, retryOf: assistantId });
+      void send("", { includeLiveTranscript, retryOf: assistantId, style: msg.meta?.style });
     },
     [messages, send],
   );
@@ -202,39 +273,84 @@ export function useChat(settings: Settings | null) {
   return { conversationId, messages, busy: activeRequest !== null, send, cancel, retry, load };
 }
 
-export interface LiveTranscript {
-  sessionId: string | null;
-  status: TranscriptStatus;
-  title: string | null;
+export interface LiveTranscript extends Omit<TranscriptState, "segments"> {
   detail: string | null;
+  action: "retry" | "settings" | "microphone" | "permissions" | null;
   segments: TranscriptSegment[];
   interim: { text: string; speaker: string | null } | null;
+  audio: AudioInputState | null;
+  /** Recording is running in a different session than the one shown. */
+  elsewhere: boolean;
 }
 
+const EMPTY: LiveTranscript = {
+  sessionId: null,
+  workspaceSessionId: null,
+  status: "idle",
+  title: null,
+  persisted: true,
+  channels: 1,
+  detail: null,
+  action: null,
+  segments: [],
+  interim: null,
+  audio: null,
+  elsewhere: false,
+};
+
 export function useLiveTranscript(): LiveTranscript {
-  const [state, setState] = useState<LiveTranscript>({ sessionId: null, status: "idle", title: null, detail: null, segments: [], interim: null });
-  useEffect(() => {
-    void api.transcriptState().then(async (s) => {
-      const segments = s.sessionId ? await api.getSegments(s.sessionId) : [];
-      setState((p) => ({ ...p, sessionId: s.sessionId, status: s.status as TranscriptStatus, title: s.title, segments }));
-    });
-    return api.onTranscript((e: TranscriptEvent) => {
-      setState((p) => {
-        if (e.type === "status") {
-          const fresh = e.sessionId !== p.sessionId;
-          return {
-            ...p,
-            sessionId: e.sessionId,
-            status: e.status,
-            detail: e.detail ?? null,
-            segments: fresh ? [] : p.segments,
-            interim: e.status === "stopped" ? null : p.interim,
-          };
-        }
-        if (e.type === "interim") return { ...p, interim: { text: e.text, speaker: e.speaker } };
-        return { ...p, interim: null, segments: [...p.segments, e.segment] };
-      });
-    });
+  const [state, setState] = useState<LiveTranscript>(EMPTY);
+  const activeSession = useRef<string | null>(null);
+  const load = useCallback(async () => {
+    const [s, session] = await Promise.all([api.transcriptState(), api.activeSession()]);
+    activeSession.current = session.id;
+    setState((p) => ({
+      ...p,
+      ...s,
+      detail: null,
+      action: null,
+      interim: null,
+      elsewhere: !!s.workspaceSessionId && s.workspaceSessionId !== session.id && s.status !== "idle",
+    }));
   }, []);
+  useEffect(() => void load(), [load]);
+  useAppEvent((e) => e.type === "session-switched" && void load());
+  useEffect(
+    () =>
+      api.onTranscript((e: TranscriptEvent) => {
+        setState((p) => {
+          if (e.type === "audio") return { ...p, audio: e.state };
+          if (e.type === "status") {
+            const mine = e.workspaceSessionId === activeSession.current;
+            if (!mine) {
+              const running = ["recording", "paused", "reconnecting", "connecting"].includes(e.status);
+              return { ...p, elsewhere: running, status: running ? e.status : "idle", workspaceSessionId: e.workspaceSessionId };
+            }
+            const fresh = e.sessionId !== p.sessionId;
+            return {
+              ...p,
+              elsewhere: false,
+              sessionId: e.sessionId,
+              workspaceSessionId: e.workspaceSessionId,
+              status: e.status,
+              detail: e.detail ?? null,
+              action: e.action ?? null,
+              segments: fresh ? [] : p.segments,
+              interim: e.status === "stopped" || e.status === "error" ? null : p.interim,
+              audio: e.status === "stopped" || e.status === "error" ? null : p.audio,
+            };
+          }
+          if (p.elsewhere) return p;
+          if (e.type === "interim") return e.sessionId === p.sessionId ? { ...p, interim: { text: e.text, speaker: e.speaker } } : p;
+          if (e.segment.sessionId !== p.sessionId) return p;
+          // Guard against duplicate delivery of the same segment.
+          if (p.segments.some((s) => s.id === e.segment.id)) return p;
+          return { ...p, interim: null, segments: [...p.segments, e.segment] };
+        });
+      }),
+    [],
+  );
   return state;
 }
+
+export const isRecordingStatus = (s: TranscriptStatus) => s === "recording" || s === "paused" || s === "reconnecting" || s === "connecting";

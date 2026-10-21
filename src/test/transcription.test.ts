@@ -54,7 +54,9 @@ function harness() {
     sockets.push(s);
     return s;
   });
+  const ws = store.createSession({ title: "W", type: "meeting" });
   const session = new TranscriptSession(provider, store, (e) => events.push(e), {
+    workspaceSessionId: ws.id,
     language: "en",
     diarize: true,
     title: "Standup",
@@ -84,7 +86,7 @@ describe("Deepgram provider", () => {
     expect(parseDeepgramMessage("not json")).toBeNull();
     expect(parseDeepgramMessage(JSON.stringify({ type: "Metadata" }))).toBeNull();
     const r = parseDeepgramMessage(JSON.stringify({ type: "Results", is_final: true, start: 2, duration: 1.5, channel: { alternatives: [{ transcript: " hi ", words: [{ speaker: 1 }, { speaker: 1 }, { speaker: 0 }] }] } }));
-    expect(r).toEqual({ text: "hi", isFinal: true, startSec: 2, endSec: 3.5, speaker: "Speaker 2" });
+    expect(r).toEqual({ text: "hi", isFinal: true, startSec: 2, endSec: 3.5, speaker: "Speaker 2", channel: null, confidence: null });
   });
 });
 
@@ -109,6 +111,19 @@ describe("TranscriptSession", () => {
     expect(segs[0]!.speaker).toBe("Speaker 1");
     expect(h.events.some((e) => e.type === "interim")).toBe(true);
     expect(h.session.recentTranscript()).toContain("Speaker 1: hello world");
+  });
+
+  it("keeps timestamps continuous across pause/resume", () => {
+    const h = harness();
+    h.sockets[0]!.open();
+    h.sockets[0]!.result("before", true, 0);
+    h.session.pause();
+    h.advance(10_000);
+    h.session.resume();
+    // Recognizer time only advanced 1 s of audio, but 10 s of wall time passed while paused.
+    h.sockets[0]!.result("after", true, 1);
+    const segs = h.store.listSegments(h.session.id);
+    expect(segs[1]!.startMs - segs[0]!.startMs).toBeGreaterThanOrEqual(10_000);
   });
 
   it("pause drops audio; resume continues", () => {
@@ -153,9 +168,10 @@ describe("TranscriptSession", () => {
   it("stops with an error on auth rejection instead of retrying forever", () => {
     const h = harness();
     h.sockets[0]!.drop(1008, "");
+    expect(h.events.at(-1)).toMatchObject({ type: "status", status: "error", action: "settings" });
     expect(h.session.status).toBe("error");
     expect(h.sockets).toHaveLength(1);
-    expect(h.store.listTranscriptSessions()[0]!.endedAt).not.toBeNull();
+    expect(h.store.listTranscriptSessions(null)[0]!.endedAt).not.toBeNull();
   });
 
   it("gives up after max reconnects", () => {
@@ -181,8 +197,8 @@ describe("TranscriptSession", () => {
 describe("meeting insights", () => {
   it("validates structured output and persists it", async () => {
     const store = new Store(":memory:");
-    const s = store.createTranscriptSession("Sync", "deepgram");
-    store.addSegment({ sessionId: s.id, startMs: 0, endMs: 1000, speaker: "Speaker 1", text: "Alice will send the report by Monday." });
+    const s = store.createTranscriptSession(store.createSession({ title: "W", type: "meeting" }).id, "Sync", "deepgram");
+    store.addSegment({ sessionId: s.id, startMs: 0, endMs: 1000, speaker: "Speaker 1", channel: "mic", confidence: 0.9, text: "Alice will send the report by Monday." });
     const payload = {
       summary: "Alice will send the report.",
       keyPoints: ["Report due Monday"],
@@ -195,11 +211,12 @@ describe("meeting insights", () => {
     const fake: AIProvider = {
       kind: "anthropic",
       isMock: false,
+      supportsImages: true,
       test: async () => ({ ok: true, message: "", latencyMs: 0 }),
       generate: async (req) => {
         sentSchema = req.jsonSchema;
         expect(JSON.stringify(req.messages)).toContain("Alice will send the report by Monday.");
-        return { text: JSON.stringify(payload), model: "claude-opus-5-5", stopReason: "end_turn", servedByFallback: null, ttftMs: 1, usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 } };
+        return { text: JSON.stringify(payload), model: "claude-opus-5-5", stopReason: "end_turn", servedByFallback: null, ttftMs: 1, retries: 0, usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 } };
       },
     };
     const res = await generateInsights(fake, store, DEFAULT_SETTINGS, s.id, new AbortController().signal);
@@ -210,21 +227,22 @@ describe("meeting insights", () => {
 
   it("rejects malformed model output", async () => {
     const store = new Store(":memory:");
-    const s = store.createTranscriptSession("Sync", "deepgram");
-    store.addSegment({ sessionId: s.id, startMs: 0, endMs: 1, speaker: null, text: "hi" });
+    const s = store.createTranscriptSession(store.createSession({ title: "W", type: "meeting" }).id, "Sync", "deepgram");
+    store.addSegment({ sessionId: s.id, startMs: 0, endMs: 1, speaker: null, channel: "mic", confidence: null, text: "hi" });
     const bad: AIProvider = {
       kind: "anthropic",
       isMock: false,
+      supportsImages: true,
       test: async () => ({ ok: true, message: "", latencyMs: 0 }),
-      generate: async () => ({ text: '{"summary": 5}', model: "m", stopReason: "end_turn", servedByFallback: null, ttftMs: 1, usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 } }),
+      generate: async () => ({ text: '{"summary": 5}', model: "m", stopReason: "end_turn", servedByFallback: null, ttftMs: 1, retries: 0, usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 } }),
     };
     await expect(generateInsights(bad, store, DEFAULT_SETTINGS, s.id, new AbortController().signal)).rejects.toThrow(/unexpected format/);
   });
 
   it("mock provider produces schema-valid, clearly labelled insights", async () => {
     const store = new Store(":memory:");
-    const s = store.createTranscriptSession("Sync", "deepgram");
-    store.addSegment({ sessionId: s.id, startMs: 0, endMs: 1, speaker: null, text: "hi" });
+    const s = store.createTranscriptSession(store.createSession({ title: "W", type: "meeting" }).id, "Sync", "deepgram");
+    store.addSegment({ sessionId: s.id, startMs: 0, endMs: 1, speaker: null, channel: "mic", confidence: null, text: "hi" });
     const res = await generateInsights(new MockProvider(0), store, DEFAULT_SETTINGS, s.id, new AbortController().signal);
     expect(res.isMock).toBe(true);
     expect(res.summary).toContain("[mock]");
@@ -232,7 +250,7 @@ describe("meeting insights", () => {
 
   it("refuses to summarize an empty transcript (never fabricates)", async () => {
     const store = new Store(":memory:");
-    const s = store.createTranscriptSession("Empty", "deepgram");
+    const s = store.createTranscriptSession(store.createSession({ title: "W", type: "meeting" }).id, "Empty", "deepgram");
     await expect(generateInsights(new MockProvider(0), store, DEFAULT_SETTINGS, s.id, new AbortController().signal)).rejects.toThrow(/empty/);
   });
 });

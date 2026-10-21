@@ -84,3 +84,43 @@ Settings live in the `kv` table. Secrets live in `secrets.json`, encrypted with 
 | Untrusted context only in the user turn | Structural prompt-injection defence. The model has no tools. |
 | Own Markdown renderer | No `innerHTML`, no images, no auto-links |
 | `node:sqlite` | No native module rebuilds across Electron versions |
+
+## Phase 2 changes (v0.2)
+
+```
+electron/main.ts ── thin IPC layer: sender-URL check, zod validation, session-ownership checks
+        │
+        ▼
+src/core/app.ts  AppCore (no Electron imports — fully testable)
+  ├─ ContextEngine   normalized records · per-session · TTL · permission · sensitivity · OCR state
+  ├─ ChatService     dedupe ids · per-conversation lock · prepare() · buildPrompt() · provider.generate()
+  ├─ AIProvider      AnthropicProvider (SDK) | OpenAICompatProvider (SSE) | MockProvider
+  ├─ TranscriptSession + DeepgramProvider (1 or 2 channels)
+  ├─ LiveScreen      explicit periodic capture, single rolling frame
+  ├─ OcrEngine       TesseractOcr (WASM, bundled eng model)
+  └─ Store           SQLite v4: sessions → conversations/transcripts/docs/context (ON DELETE CASCADE)
+```
+
+**Question pipeline:**
+1. Dedupe the request id and check the conversation lock.
+2. Wait (bounded) for OCR still running on this session's captures.
+3. Gather candidates, scoped to the session: engine records, session notes, the live or most recent transcript, knowledge hits (global + this session), and history hits (this session).
+4. Rank, filter, redact.
+5. Build the prompt: system policy (cached) + session type + style + tone; user turn = images + `<availability>` + `<context>` + `<question>`.
+6. Stream, with the stall watchdog and retry-before-first-token.
+7. Persist the answer with only the cited references; record metrics and provider health.
+
+**Session isolation** is enforced in three places:
+- the engine keys every record by session id;
+- every store query that feeds a prompt takes a session id;
+- the IPC handlers check that a conversation, transcript or context item belongs to the active session before returning it.
+
+Chat requests are always bound to the active session in the main process. A renderer cannot choose another session.
+
+**Audio:** a 2-input AudioWorklet emits interleaved `[mic, system]` 16 kHz PCM. Deepgram `multichannel=true` returns a `channel_index` per result, which becomes the "You"/"Remote" label. The two sources are never mixed, and a system-audio failure leaves the mic running.
+
+**Screen:** desktopCapturer → blank detection → hold in memory → finalize to a vision JPEG (≤1568 px) and an OCR PNG (1.4–3k px) → engine record (pending until confirmed) → background OCR.
+
+**Decision — keyword search over vector search:** there is no local embedding model in the stack. Shipping a vector index without good embeddings would only look like semantic search. BM25 over FTS5 is deterministic, fast and covered by tests.
+
+**Decision — oxlint:** typescript-eslint does not yet support TypeScript 7.

@@ -37,20 +37,22 @@ export function backoffDelay(attempt: number, opts: RetryOptions, retryAfterMs?:
  * Retry `fn` with exponential backoff on retryable ProviderErrors.
  * `fn` receives a callback it must invoke once output has started streaming: after that point a
  * retry would duplicate text the user has already seen, so failures are surfaced instead.
+ * Resolves with the result and the number of retries it took.
  */
 export async function withRetry<T>(
   fn: (markStarted: () => void) => Promise<T>,
   signal: AbortSignal,
   opts: RetryOptions = DEFAULT_RETRY,
   onRetry?: (attempt: number, delayMs: number, reason: string) => void,
-): Promise<T> {
+): Promise<{ value: T; retries: number }> {
   const sleep = opts.sleep ?? abortableSleep;
   for (let attempt = 1; ; attempt++) {
     let started = false;
     try {
-      return await fn(() => {
+      const value = await fn(() => {
         started = true;
       });
+      return { value, retries: attempt - 1 };
     } catch (err) {
       if (signal.aborted || err instanceof CancelledError) throw new CancelledError();
       const retryable = err instanceof ProviderError && err.retryable && !started;

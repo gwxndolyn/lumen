@@ -6,31 +6,51 @@ const accelerator = z
   .string()
   .min(1)
   .max(64)
-  .regex(/^[A-Za-z0-9+]+$/, "Shortcut may only contain letters, digits and '+'");
+  .regex(/^[A-Za-z0-9+.]+$/, "Shortcut may only contain letters, digits and '+'");
+
+const httpUrl = z
+  .string()
+  .max(300)
+  .regex(/^https?:\/\/[^\s]+$/, "Must be an http(s) URL");
+
+export const styleEnum = z.enum(["quick", "detailed", "steps", "suggest", "technical", "meeting_summary", "follow_ups"]);
+export const modeEnum = z.enum(["general", "meeting", "interview", "technical", "coding"]);
+export const effortEnum = z.enum(["low", "medium", "high"]);
+export const toneEnum = z.enum(["neutral", "friendly", "formal", "confident"]);
 
 export const settingsSchema = z.object({
   version: z.literal(1),
   onboardingComplete: z.boolean(),
   theme: z.enum(["dark", "light", "system"]),
+  activeSessionId: z.string().max(100).nullable(),
   provider: z.object({
-    kind: z.enum(["anthropic", "mock"]),
+    kind: z.enum(["anthropic", "openai_compat", "mock"]),
     model: z.string().regex(/^[a-z0-9.-]{3,64}$/),
-    effort: z.enum(["low", "medium", "high"]),
+    effort: effortEnum,
     maxTokens: z.number().int().min(256).max(64000),
     timeoutMs: z.number().int().min(5_000).max(600_000),
+    idleTimeoutMs: z.number().int().min(5_000).max(300_000),
+    openaiCompat: z.object({ baseUrl: httpUrl, model: z.string().min(1).max(120) }),
   }),
   transcription: z.object({
     kind: z.enum(["deepgram", "none"]),
     language: z.string().regex(/^[a-zA-Z-]{2,10}$/),
     microphoneDeviceId: z.string().max(512).nullable(),
     captureSystemAudio: z.boolean(),
+    persist: z.boolean(),
   }),
   assistant: z.object({
-    mode: z.enum(["general", "meeting", "interview", "technical", "coding"]),
-    length: z.enum(["short", "detailed"]),
-    tone: z.enum(["neutral", "friendly", "formal", "confident"]),
+    mode: modeEnum,
+    style: styleEnum,
+    tone: toneEnum,
     useKnowledgeBase: z.boolean(),
     useConversationHistory: z.boolean(),
+  }),
+  screen: z.object({
+    requirePreview: z.boolean(),
+    sendImages: z.boolean(),
+    ocr: z.boolean(),
+    liveIntervalSec: z.number().int().min(3).max(300),
   }),
   overlay: z.object({
     opacity: z.number().min(0.4).max(1),
@@ -45,21 +65,29 @@ export const settingsSchema = z.object({
       })
       .nullable(),
     followCursorDisplay: z.boolean(),
+    position: z.enum(["custom", "top-center", "top-right", "bottom-right", "bottom-center"]),
+    expandedHeight: z.number().int().min(240).max(2000),
   }),
   shortcuts: z.object({
     toggleOverlay: accelerator,
     askAboutScreen: accelerator,
+    askAboutSelection: accelerator,
     openMainWindow: accelerator,
   }),
   privacy: z.object({
     transcriptRetentionDays: z.number().int().min(0).max(3650),
     conversationRetentionDays: z.number().int().min(0).max(3650),
     keepScreenshotsInHistory: z.literal(false),
+    redactSensitive: z.boolean(),
+    screenContextTtlMinutes: z.number().int().min(1).max(1440),
   }),
   consent: z.object({
     screen: z.boolean(),
     microphone: z.boolean(),
     systemAudio: z.boolean(),
+  }),
+  diagnostics: z.object({
+    logLevel: z.enum(["off", "error", "info", "debug"]),
   }),
 });
 
@@ -78,12 +106,31 @@ export function deepMerge<T>(base: T, patch: unknown): T {
   return out as T;
 }
 
+/** v0.1 stored `assistant.length`; map it onto the new answer style. */
+function upgradeLegacy(stored: Record<string, unknown>): Record<string, unknown> {
+  const a = stored.assistant;
+  if (isPlainObject(a) && "length" in a && !("style" in a)) {
+    const { length, ...rest } = a;
+    return { ...stored, assistant: { ...rest, style: length === "detailed" ? "detailed" : "quick" } };
+  }
+  return stored;
+}
+
+/** Strip keys that are not in the schema so stale fields from older versions do not linger. */
+function prune(value: unknown, shape: unknown): unknown {
+  if (!isPlainObject(value) || !isPlainObject(shape)) return value;
+  const out: Record<string, unknown> = {};
+  for (const k of Object.keys(shape)) if (k in value) out[k] = prune(value[k], shape[k]);
+  return out;
+}
+
 /**
  * Load persisted settings. Unknown or invalid stored data falls back to defaults field-by-field
  * so a corrupted value never bricks the app. Returns the repaired settings.
  */
 export function loadSettings(stored: unknown): Settings {
-  const merged = deepMerge(DEFAULT_SETTINGS, isPlainObject(stored) ? stored : {});
+  const upgraded = isPlainObject(stored) ? upgradeLegacy(stored) : {};
+  const merged = prune(deepMerge(DEFAULT_SETTINGS, upgraded), DEFAULT_SETTINGS) as Settings;
   const parsed = settingsSchema.safeParse(merged);
   if (parsed.success) return parsed.data as Settings;
   // Repair: drop every top-level section that failed validation.

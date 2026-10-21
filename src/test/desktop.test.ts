@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { clampToArea, defaultOverlayRect, moveToDisplay, resolveBounds } from "../../electron/geometry";
 import { Logger, redact } from "../../electron/logger";
 import { SecretStore, type Cipher } from "../../electron/secrets";
-import { htmlToText } from "../../electron/documents";
+import { htmlToText } from "../core/knowledge";
 import { toAccelerator } from "../renderer/lib/accelerator";
 
 const primary = { id: 1, workArea: { x: 0, y: 25, width: 1440, height: 875 } };
@@ -104,5 +104,37 @@ describe("shortcut recorder", () => {
     expect(toAccelerator(ev({ code: "KeyK", key: "k", ctrlKey: true, altKey: true }), "win32")).toBe("CommandOrControl+Alt+K");
     expect(toAccelerator(ev({ code: "KeyK", key: "k" }), "win32")).toBeNull();
     expect(toAccelerator(ev({ code: "F9", key: "F9" }), "linux")).toBe("F9");
+  });
+});
+
+import { isBlankBitmap, presetRect, resizeAnchored } from "../../electron/geometry";
+
+describe("overlay presets & anchored resize", () => {
+  const area = { x: 0, y: 25, width: 1440, height: 875 };
+  it("places presets inside the work area with a margin", () => {
+    expect(presetRect(area, "top-center", 560, 176)).toEqual({ x: 440, y: 49, width: 560, height: 176 });
+    const br = presetRect(area, "bottom-right", 560, 176);
+    expect(br.x + br.width).toBe(1440 - 24);
+    expect(br.y + br.height).toBe(25 + 875 - 24);
+  });
+  it("grows a bottom-docked panel upward and a top-docked one downward", () => {
+    const bottom = { x: 100, y: 700, width: 560, height: 176 };
+    const grown = resizeAnchored(bottom, area, 560, 520);
+    expect(grown.y + grown.height).toBe(bottom.y + bottom.height);
+    const top = { x: 100, y: 49, width: 560, height: 176 };
+    expect(resizeAnchored(top, area, 560, 520).y).toBe(49);
+  });
+});
+
+describe("blank capture detection", () => {
+  const img = (w: number, h: number, fill: (i: number) => number[]) => {
+    const b = new Uint8Array(w * h * 4);
+    for (let i = 0; i < w * h; i++) b.set([...fill(i), 255], i * 4);
+    return b;
+  };
+  it("flags a uniformly black (protected) capture and passes real content", () => {
+    expect(isBlankBitmap(img(200, 100, () => [0, 0, 0]), 200, 100)).toBe(true);
+    expect(isBlankBitmap(img(200, 100, (i) => (i % 7 === 0 ? [255, 255, 255] : [20, 20, 20])), 200, 100)).toBe(false);
+    expect(isBlankBitmap(new Uint8Array(0), 0, 0)).toBe(true);
   });
 });

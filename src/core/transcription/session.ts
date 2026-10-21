@@ -1,11 +1,18 @@
+import { randomUUID } from "node:crypto";
 import type { TranscriptEvent, TranscriptSegment, TranscriptStatus } from "../../shared/types";
 import type { Store } from "../storage/db";
-import type { TranscriptionProvider, TranscriptionStream } from "./types";
+import type { RecognitionResult, TranscriptionProvider, TranscriptionStream } from "./types";
 
 export interface SessionOptions {
+  /** Workspace session the transcript belongs to. */
+  workspaceSessionId: string;
   language: string;
   diarize: boolean;
   title: string;
+  /** 1 = mic only; 2 = interleaved [mic, system audio]. */
+  channels?: 1 | 2;
+  /** When false, segments live in memory only and are discarded on stop. */
+  persist?: boolean;
   /** Max bytes of audio buffered while reconnecting (~30 s at 16 kHz mono 16-bit). */
   maxBufferBytes?: number;
   maxReconnects?: number;
@@ -14,14 +21,18 @@ export interface SessionOptions {
   now?: () => number;
 }
 
+const CHANNEL_NAMES: Record<number, TranscriptSegment["channel"]> = { 0: "mic", 1: "system" };
+
 /**
- * Owns one live transcription session: provider stream lifecycle, pause/resume, reconnect with
- * audio buffering after transient network loss, and persistence of final segments only.
- * Interim results are shown but never stored, so the transcript only contains what the
- * recognizer finalized.
+ * Owns one live transcription: provider stream lifecycle, pause/resume, reconnect with audio
+ * buffering after transient network loss, duplicate suppression, and persistence of final
+ * segments only. Interim results are shown but never stored, so the transcript only contains what
+ * the recognizer finalized.
  */
 export class TranscriptSession {
   readonly id: string;
+  readonly workspaceSessionId: string;
+  readonly persisted: boolean;
   status: TranscriptStatus = "connecting";
   private stream: TranscriptionStream | null = null;
   private buffer: Uint8Array[] = [];
@@ -33,8 +44,9 @@ export class TranscriptSession {
   private reconnectTimer: unknown = null;
   private readonly startedAt: number;
   private lastAudioAt = 0;
-  private recentText: { at: number; speaker: string | null; text: string }[] = [];
-  private readonly opts: Required<Omit<SessionOptions, "title">> & { title: string };
+  private pausedAt: number | null = null;
+  private segments: TranscriptSegment[] = [];
+  private readonly opts: Required<Omit<SessionOptions, "title" | "workspaceSessionId">> & { title: string };
 
   constructor(
     private readonly provider: TranscriptionProvider,
@@ -44,6 +56,8 @@ export class TranscriptSession {
     private readonly onLatency?: (ms: number) => void,
   ) {
     this.opts = {
+      channels: 1,
+      persist: true,
       maxBufferBytes: 16_000 * 2 * 30,
       maxReconnects: 6,
       setTimer: (fn, ms) => setTimeout(fn, ms),
@@ -51,8 +65,10 @@ export class TranscriptSession {
       now: Date.now,
       ...opts,
     };
+    this.workspaceSessionId = opts.workspaceSessionId;
+    this.persisted = this.opts.persist;
     this.startedAt = this.opts.now();
-    this.id = store.createTranscriptSession(opts.title, provider.id, this.startedAt).id;
+    this.id = this.persisted ? store.createTranscriptSession(opts.workspaceSessionId, opts.title, provider.id, this.startedAt).id : `mem-${randomUUID()}`;
     this.connect();
   }
 
@@ -60,55 +76,51 @@ export class TranscriptSession {
     return this.opts.title;
   }
 
-  private setStatus(status: TranscriptStatus, detail?: string) {
+  get started() {
+    return this.startedAt;
+  }
+
+  get channels() {
+    return this.opts.channels;
+  }
+
+  private setStatus(status: TranscriptStatus, detail?: string, action?: "retry" | "settings" | "microphone" | "permissions") {
     this.status = status;
-    this.emit({ type: "status", sessionId: this.id, status, detail });
+    this.emit({ type: "status", sessionId: this.id, workspaceSessionId: this.workspaceSessionId, status, detail, action });
   }
 
   private connect() {
-    this.setStatus(this.reconnects ? "reconnecting" : "connecting");
+    this.setStatus(this.reconnects ? "reconnecting" : "connecting", this.reconnects ? "Reconnecting to the transcription service…" : undefined);
     this.streamOffsetMs = this.opts.now() - this.startedAt - this.bufferedMs();
     this.stream = this.provider.open(
-      { language: this.opts.language, diarize: this.opts.diarize },
+      { language: this.opts.language, diarize: this.opts.diarize, channels: this.opts.channels },
       {
         onOpen: () => {
           this.reconnects = 0;
           for (const chunk of this.buffer) this.stream?.sendAudio(chunk);
           this.buffer = [];
           this.bufferedBytes = 0;
-          this.setStatus(this.status === "paused" ? "paused" : "recording");
           this.startKeepAlive();
+          if (this.status !== "paused") this.setStatus("recording");
         },
-        onResult: (r) => {
-          if (r.isFinal) {
-            const seg = this.store.addSegment({
-              sessionId: this.id,
-              startMs: Math.round(this.streamOffsetMs + r.startSec * 1000),
-              endMs: Math.round(this.streamOffsetMs + r.endSec * 1000),
-              speaker: r.speaker,
-              text: r.text,
-            });
-            this.recentText.push({ at: seg.startMs, speaker: seg.speaker, text: seg.text });
-            if (this.recentText.length > 400) this.recentText.shift();
-            const latency = this.lastAudioAt ? Math.max(0, this.opts.now() - this.lastAudioAt) : null;
-            if (latency !== null) this.onLatency?.(latency);
-            this.emit({ type: "segment", segment: seg, latencyMs: latency });
-          } else {
-            this.emit({ type: "interim", sessionId: this.id, text: r.text, speaker: r.speaker });
-          }
-        },
-        onError: (message) => this.emit({ type: "status", sessionId: this.id, status: this.status, detail: message }),
-        onClose: (unexpected, reason) => {
+        onResult: (r) => this.onResult(r),
+        onError: (message) => this.emit({ type: "status", sessionId: this.id, workspaceSessionId: this.workspaceSessionId, status: this.status, detail: message }),
+        onClose: (unexpected, reason, fatal) => {
           this.stopKeepAlive();
           this.stream = null;
-          if (!unexpected || this.status === "stopped") return;
-          if (/rejected the API key/.test(reason) || this.reconnects >= this.opts.maxReconnects) {
-            this.finish("error", /rejected/.test(reason) ? reason : `Transcription disconnected: ${reason}`);
+          if (!unexpected || this.status === "stopped" || this.status === "error") return;
+          if (fatal) {
+            this.finish("error", reason, /API key/.test(reason) ? "settings" : "retry");
+            return;
+          }
+          if (this.reconnects >= this.opts.maxReconnects) {
+            this.finish("error", `Transcription disconnected and could not reconnect: ${reason}`, "retry");
             return;
           }
           this.reconnects++;
           const delay = Math.min(500 * 2 ** (this.reconnects - 1), 8000);
-          this.setStatus("reconnecting", `Connection lost — retrying in ${Math.round(delay / 100) / 10}s (audio is buffered)`);
+          const wasPaused = this.status === "paused";
+          if (!wasPaused) this.setStatus("reconnecting", `Connection lost — retrying in ${Math.round(delay / 100) / 10}s (audio is buffered)`);
           this.reconnectTimer = this.opts.setTimer(() => {
             this.reconnectTimer = null;
             if (this.status !== "stopped" && this.status !== "error") this.connect();
@@ -118,8 +130,49 @@ export class TranscriptSession {
     );
   }
 
+  private onResult(r: RecognitionResult) {
+    const channel = r.channel === null ? (this.opts.channels === 1 ? "mic" : null) : (CHANNEL_NAMES[r.channel] ?? null);
+    if (!r.isFinal) {
+      this.emit({ type: "interim", sessionId: this.id, text: r.text, speaker: this.label(r.speaker, channel) });
+      return;
+    }
+    const startMs = Math.round(this.streamOffsetMs + r.startSec * 1000);
+    const endMs = Math.round(this.streamOffsetMs + r.endSec * 1000);
+    if (this.isDuplicate(r.text, startMs, endMs, channel)) return;
+    const base = { sessionId: this.id, startMs, endMs, speaker: this.label(r.speaker, channel), channel, text: r.text, confidence: r.confidence };
+    const seg: TranscriptSegment = this.persisted ? this.store.addSegment(base) : { ...base, id: randomUUID(), edited: false };
+    this.segments.push(seg);
+    if (this.segments.length > 2000) this.segments.shift();
+    const latency = this.lastAudioAt ? Math.max(0, this.opts.now() - this.lastAudioAt) : null;
+    if (latency !== null) this.onLatency?.(latency);
+    this.emit({ type: "segment", segment: seg, latencyMs: latency });
+  }
+
+  /** Labels speakers per channel so "Speaker 1" on the mic is not confused with "Speaker 1" on system audio. */
+  private label(speaker: string | null, channel: TranscriptSegment["channel"]): string | null {
+    if (this.opts.channels === 1) return speaker;
+    if (channel === "mic") return speaker ? `You (${speaker})` : "You";
+    if (channel === "system") return speaker ? `Remote ${speaker}` : "Remote";
+    return speaker;
+  }
+
+  /**
+   * Recognizers can re-emit a final after a reconnect replays buffered audio. Treat a final as a
+   * duplicate if the same channel already has identical text overlapping the same time window.
+   */
+  private isDuplicate(text: string, startMs: number, endMs: number, channel: TranscriptSegment["channel"]): boolean {
+    const norm = text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+    for (let i = this.segments.length - 1; i >= 0 && i >= this.segments.length - 20; i--) {
+      const s = this.segments[i]!;
+      if (s.channel !== channel) continue;
+      const overlaps = startMs <= s.endMs + 1500 && endMs >= s.startMs - 1500;
+      if (overlaps && s.text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim() === norm) return true;
+    }
+    return false;
+  }
+
   private bufferedMs() {
-    return (this.bufferedBytes / (this.provider.sampleRate * 2)) * 1000;
+    return (this.bufferedBytes / (this.provider.sampleRate * 2 * this.opts.channels)) * 1000;
   }
 
   private startKeepAlive() {
@@ -152,11 +205,17 @@ export class TranscriptSession {
   }
 
   pause() {
-    if (this.status === "recording" || this.status === "reconnecting" || this.status === "connecting") this.setStatus("paused");
+    if (this.status === "recording" || this.status === "reconnecting" || this.status === "connecting") {
+      this.pausedAt = this.opts.now();
+      this.setStatus("paused", "Audio is not being sent while paused.");
+    }
   }
 
   resume() {
     if (this.status !== "paused") return;
+    // Recognizer timestamps only advance with audio, so shift the offset by the paused duration.
+    if (this.pausedAt !== null) this.streamOffsetMs += this.opts.now() - this.pausedAt;
+    this.pausedAt = null;
     if (this.stream) this.setStatus("recording");
     else this.connect();
   }
@@ -165,8 +224,8 @@ export class TranscriptSession {
     this.finish("stopped");
   }
 
-  private finish(status: "stopped" | "error", detail?: string) {
-    if (this.status === "stopped") return;
+  private finish(status: "stopped" | "error", detail?: string, action?: "retry" | "settings") {
+    if (this.status === "stopped" || this.status === "error") return;
     this.stopKeepAlive();
     if (this.reconnectTimer) this.opts.clearTimer(this.reconnectTimer);
     this.status = status;
@@ -174,26 +233,27 @@ export class TranscriptSession {
     this.stream = null;
     this.buffer = [];
     this.bufferedBytes = 0;
-    this.store.endTranscriptSession(this.id, this.opts.now());
-    this.emit({ type: "status", sessionId: this.id, status, detail });
+    if (this.persisted) this.store.endTranscriptSession(this.id, this.opts.now());
+    else this.segments = []; // memory-only transcripts are discarded when recording ends
+    this.emit({ type: "status", sessionId: this.id, workspaceSessionId: this.workspaceSessionId, status, detail, action });
+  }
+
+  liveSegments(): TranscriptSegment[] {
+    return [...this.segments];
   }
 
   /** Recent finalized transcript text for live context (bounded). */
   recentTranscript(maxChars = 12_000): string {
     const lines: string[] = [];
     let n = 0;
-    for (let i = this.recentText.length - 1; i >= 0; i--) {
-      const t = this.recentText[i]!;
-      const line = `[${formatTs(t.at)}] ${t.speaker ? `${t.speaker}: ` : ""}${t.text}`;
+    for (let i = this.segments.length - 1; i >= 0; i--) {
+      const t = this.segments[i]!;
+      const line = `[${formatTs(t.startMs)}] ${t.speaker ? `${t.speaker}: ` : ""}${t.text}`;
       n += line.length + 1;
       if (n > maxChars) break;
       lines.unshift(line);
     }
     return lines.join("\n");
-  }
-
-  get started() {
-    return this.startedAt;
   }
 }
 

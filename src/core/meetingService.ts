@@ -1,5 +1,6 @@
 import { z } from "zod";
-import type { MeetingInsights, Settings } from "../shared/types";
+import type { MeetingInsights, Settings, TranscriptSegment } from "../shared/types";
+import { redact } from "./context/sensitivity";
 import { BASE_SYSTEM_PROMPT } from "./context/promptBuilder";
 import { escapeForEnvelope } from "./context/injection";
 import { ProviderError, type AIProvider } from "./providers/types";
@@ -52,19 +53,25 @@ const INSIGHTS_INSTRUCTIONS = `Analyse the meeting transcript in <context> and p
 - followUpEmail: a concise follow-up email draft.
 Never invent statements, names, numbers or commitments that are not in the transcript. If the transcript is too short to support a field, return an empty list or say so in the summary.`;
 
+/**
+ * Generate structured meeting notes. Segments come from the store, or — for transcripts that are
+ * kept in memory only — are passed in directly; in that case the insights are not persisted.
+ */
 export async function generateInsights(
   provider: AIProvider,
   store: Store,
   settings: Settings,
-  sessionId: string,
+  transcriptId: string,
   signal: AbortSignal,
+  opts: { segments?: TranscriptSegment[]; model?: string; redactSensitive?: boolean } = {},
 ): Promise<MeetingInsights> {
-  const segments = store.listSegments(sessionId);
+  const segments = opts.segments ?? store.listSegments(transcriptId);
   if (!segments.length) throw new ProviderError("The transcript is empty — record something first.", "bad_request", false);
-  const transcript = segmentsToText(segments).slice(-150_000);
+  let transcript = segmentsToText(segments).slice(-150_000);
+  if (opts.redactSensitive ?? settings.privacy.redactSensitive) transcript = redact(transcript);
   const res = await provider.generate(
     {
-      model: settings.provider.model,
+      model: provider.kind === "openai_compat" ? settings.provider.openaiCompat.model : (opts.model ?? settings.provider.model),
       system: [
         { text: BASE_SYSTEM_PROMPT, cache: true },
         { text: INSIGHTS_INSTRUCTIONS, cache: false },
@@ -78,17 +85,24 @@ export async function generateInsights(
       maxTokens: 16000,
       effort: settings.provider.effort,
       timeoutMs: Math.max(settings.provider.timeoutMs, 120_000),
+      idleTimeoutMs: settings.provider.idleTimeoutMs,
       jsonSchema: INSIGHTS_JSON_SCHEMA,
     },
     signal,
   );
   let parsed: z.infer<typeof insightsSchema>;
   try {
-    parsed = insightsSchema.parse(JSON.parse(res.text));
+    parsed = insightsSchema.parse(JSON.parse(extractJson(res.text)));
   } catch {
     throw new ProviderError("The AI returned meeting notes in an unexpected format. Try again.", "unknown", true);
   }
-  const insights: MeetingInsights = { sessionId, generatedAt: Date.now(), model: res.model, isMock: provider.isMock, ...parsed };
-  store.saveInsights(sessionId, insights);
+  const insights: MeetingInsights = { sessionId: transcriptId, generatedAt: Date.now(), model: res.model, isMock: provider.isMock, ...parsed };
+  if (!opts.segments) store.saveInsights(transcriptId, insights);
   return insights;
+}
+
+/** Tolerate providers that wrap JSON in a code fence. */
+function extractJson(text: string): string {
+  const fenced = /```(?:json)?\s*([\s\S]*?)```/.exec(text);
+  return (fenced?.[1] ?? text).trim();
 }

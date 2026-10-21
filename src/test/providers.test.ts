@@ -69,6 +69,7 @@ describe("AnthropicProvider (integration via SDK + fake HTTP)", () => {
     const onRetry = vi.fn();
     const res = await p.generate(req, new AbortController().signal, { onRetry });
     expect(res.text).toBe("done");
+    expect(res.retries).toBe(1);
     expect(calls).toHaveLength(2);
     expect(onRetry).toHaveBeenCalledOnce();
   });
@@ -148,6 +149,15 @@ describe("retry & pricing", () => {
     const o = { maxAttempts: 5, baseDelayMs: 100, maxDelayMs: 1000, random: () => 0 };
     expect([1, 2, 3, 4, 5].map((a) => backoffDelay(a, o))).toEqual([100, 200, 400, 800, 1000]);
     expect(backoffDelay(1, o, 3000)).toBe(2000);
+  });
+
+  it("withRetry reports how many retries it took", async () => {
+    let n = 0;
+    const r = await withRetry(async () => {
+      if (n++ < 2) throw new ProviderError("x", "network", true);
+      return "ok";
+    }, new AbortController().signal, noSleep);
+    expect(r).toEqual({ value: "ok", retries: 2 });
   });
 
   it("withRetry stops immediately on cancellation", async () => {

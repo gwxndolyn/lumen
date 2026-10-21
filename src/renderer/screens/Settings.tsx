@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { MODE_LABELS } from "../../shared/defaults";
+import { MODE_LABELS, STYLE_LABELS } from "../../shared/defaults";
 import type { Settings } from "../../shared/types";
 import { api } from "../lib/api";
 import { listMicrophones } from "../lib/audio";
@@ -61,12 +61,29 @@ export function SettingsScreen({ settings, update }: Props) {
             <Switch label="Follow cursor display" checked={s.overlay.followCursorDisplay} onChange={(v) => void update({ overlay: { followCursorDisplay: v } })} />
           </div>
           <div className="field">
-            <div className="label">Position</div>
             <div>
-              <button className="btn sm" onClick={() => void update({ overlay: { bounds: null } }).then(() => api.overlay("toggle"))}>
-                Reset position and size
+              <label htmlFor="ov-pos">Position</label>
+              <div className="hint">Drag the panel's top bar to move it anywhere; it then remembers that custom spot.</div>
+            </div>
+            <div className="row">
+              <select id="ov-pos" className="select" value={s.overlay.position} onChange={(e) => void update({ overlay: { position: e.target.value } })}>
+                <option value="top-center">Top center</option>
+                <option value="top-right">Top right</option>
+                <option value="bottom-center">Bottom center</option>
+                <option value="bottom-right">Bottom right</option>
+                <option value="custom">Custom (where I dragged it)</option>
+              </select>
+              <button className="btn sm" onClick={() => void api.overlay("reset-position")}>
+                Reset position
               </button>
             </div>
+          </div>
+          <div className="field">
+            <div>
+              <label htmlFor="ov-h">Expanded height</label>
+              <div className="hint">{s.overlay.expandedHeight}px — also remembered when you resize the expanded panel.</div>
+            </div>
+            <input id="ov-h" type="range" min={300} max={1000} step={20} value={s.overlay.expandedHeight} onChange={(e) => void update({ overlay: { expandedHeight: Number(e.target.value) } })} />
           </div>
         </div>
 
@@ -83,16 +100,17 @@ export function SettingsScreen({ settings, update }: Props) {
             </select>
           </div>
           <div className="field">
-            <div className="label">Answer length</div>
-            <Segmented
-              label="Answer length"
-              value={s.assistant.length}
-              options={[
-                { value: "short", label: "Short" },
-                { value: "detailed", label: "Detailed" },
-              ]}
-              onChange={(v) => void update({ assistant: { length: v } })}
-            />
+            <div>
+              <label htmlFor="style">Answer style</label>
+              <div className="hint">Default for new questions; change per question in the panel (⌥1–7).</div>
+            </div>
+            <select id="style" className="select" value={s.assistant.style} onChange={(e) => void update({ assistant: { style: e.target.value } })}>
+              {Object.entries(STYLE_LABELS).map(([k, v]) => (
+                <option key={k} value={k}>
+                  {v}
+                </option>
+              ))}
+            </select>
           </div>
           <div className="field">
             <label htmlFor="tone">Tone</label>
@@ -113,7 +131,7 @@ export function SettingsScreen({ settings, update }: Props) {
           <div className="field">
             <div>
               <div className="label">Use past conversations</div>
-              <div className="hint">Retrieve related answers from earlier conversations.</div>
+              <div className="hint">Retrieve related answers from earlier conversations in the same session.</div>
             </div>
             <Switch label="Use past conversations" checked={s.assistant.useConversationHistory} onChange={(v) => void update({ assistant: { useConversationHistory: v } })} />
           </div>
@@ -158,7 +176,7 @@ export function SettingsScreen({ settings, update }: Props) {
           <div className="field">
             <div>
               <div className="label">Include system audio</div>
-              <div className="hint">Also transcribe what other meeting participants say through your speakers (Windows, macOS 13+). Requires system-audio permission.</div>
+              <div className="hint">Also transcribe, as a separate channel, what other participants say through your speakers (Windows, macOS 13+). Requires system-audio permission.</div>
             </div>
             <Switch
               label="Include system audio"

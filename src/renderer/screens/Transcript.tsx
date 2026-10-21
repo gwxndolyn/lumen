@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import type { MeetingInsights, Settings, TranscriptSegment, TranscriptSession } from "../../shared/types";
 import { api, errMsg, formatTime, formatTs } from "../lib/api";
-import { useAppEvent, type LiveTranscript } from "../lib/hooks";
+import { isRecordingStatus, useAppEvent, type LiveTranscript } from "../lib/hooks";
+import { listMicrophones } from "../lib/audio";
 import { Empty } from "../components/ui";
 
 const STATUS_LABEL: Record<string, string> = {
@@ -14,6 +15,46 @@ const STATUS_LABEL: Record<string, string> = {
   error: "Error",
 };
 
+function InputStatus({ live, settings }: { live: LiveTranscript; settings: Settings }) {
+  const a = live.audio;
+  const quiet = a && a.silentForMs > 8000;
+  return (
+    <div className="card row small" style={{ gap: 16, flexWrap: "wrap" }} aria-label="Audio input status">
+      <span className="row">
+        <span className={`dot ${a ? (quiet ? "warn" : "ok") : ""}`} />
+        Microphone: <strong>{a?.micLabel ?? "starting…"}</strong>
+        {a && (
+          <span className="level" style={{ width: 60 }}>
+            <span style={{ width: `${Math.round(a.micLevel * 100)}%` }} />
+          </span>
+        )}
+      </span>
+      <span className="row">
+        <span className={`dot ${a?.systemAudio === "active" ? "ok" : a?.systemAudio === "denied" || a?.systemAudio === "unavailable" ? "warn" : ""}`} />
+        System audio:{" "}
+        {a?.systemAudio === "active" ? (
+          <>
+            on
+            <span className="level" style={{ width: 60 }}>
+              <span style={{ width: `${Math.round(a.systemLevel * 100)}%` }} />
+            </span>
+          </>
+        ) : a?.systemAudio === "denied" ? (
+          "permission denied"
+        ) : a?.systemAudio === "unavailable" ? (
+          "unavailable on this system"
+        ) : settings.transcription.captureSystemAudio && settings.consent.systemAudio ? (
+          "starting…"
+        ) : (
+          "off"
+        )}
+      </span>
+      <span className="faint">{live.persisted ? "Saved to this session" : "Memory only — discarded when you stop"}</span>
+      {quiet && <span style={{ color: "var(--warning)" }}>No sound detected for {Math.round(a!.silentForMs / 1000)}s — check the selected microphone.</span>}
+    </div>
+  );
+}
+
 export function TranscriptScreen({ settings, live, go }: { settings: Settings; live: LiveTranscript; go: (r: string) => void }) {
   const [sessions, setSessions] = useState<TranscriptSession[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
@@ -21,15 +62,25 @@ export function TranscriptScreen({ settings, live, go }: { settings: Settings; l
   const [title, setTitle] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [hasKey, setHasKey] = useState<boolean | null>(null);
+  const [mics, setMics] = useState<MediaDeviceInfo[]>([]);
   const endRef = useRef<HTMLDivElement>(null);
-  const active = live.status === "recording" || live.status === "paused" || live.status === "reconnecting" || live.status === "connecting";
+  const active = isRecordingStatus(live.status) && !live.elsewhere;
 
   const refresh = () => void api.listTranscripts().then(setSessions);
   useEffect(() => {
     refresh();
     void api.secretsStatus().then((s) => setHasKey(s.deepgram));
-  }, [live.status]);
-  useAppEvent((e) => e.type === "history-changed" && refresh());
+  }, [live.status, live.sessionId]);
+  useEffect(() => {
+    void listMicrophones().then(setMics).catch(() => setMics([]));
+  }, [settings.consent.microphone]);
+  useAppEvent((e) => {
+    if (e.type === "history-changed") refresh();
+    if (e.type === "session-switched") {
+      setSelected(null);
+      refresh();
+    }
+  });
 
   const viewingLive = selected === null || selected === live.sessionId;
   useEffect(() => {
@@ -51,57 +102,70 @@ export function TranscriptScreen({ settings, live, go }: { settings: Settings; l
 
   const sessionId = viewingLive ? live.sessionId : selected;
   const ready = settings.consent.microphone && hasKey && settings.transcription.kind !== "none";
+  const start = () =>
+    run(async () => {
+      setSelected(null);
+      await api.transcriptStart(title);
+      setTitle("");
+    });
 
   return (
     <>
       <header className="page-header">
         <h1>Live transcript</h1>
-        <span className="row small">
+        <span className="row small" role="status">
           <span className={`dot ${live.status === "recording" ? "rec" : live.status === "error" ? "err" : active ? "warn" : ""}`} />
-          {STATUS_LABEL[live.status]}
-          {live.detail && <span className="muted">— {live.detail}</span>}
+          {live.elsewhere ? "Recording in another session" : STATUS_LABEL[live.status]}
         </span>
         <span className="spacer" />
         {!active ? (
           <>
-            <input className="input" style={{ width: 220 }} placeholder="Session title (optional)" value={title} onChange={(e) => setTitle(e.target.value)} />
-            <button
-              className="btn primary"
-              disabled={!ready}
-              onClick={() =>
-                void run(async () => {
-                  setSelected(null);
-                  await api.transcriptStart(title);
-                  setTitle("");
-                })
-              }
+            <select
+              className="select"
+              style={{ width: 200 }}
+              aria-label="Microphone"
+              value={settings.transcription.microphoneDeviceId ?? ""}
+              onChange={(e) => void api.updateSettings({ transcription: { microphoneDeviceId: e.target.value || null } })}
             >
+              <option value="">Default microphone</option>
+              {mics.map((m) => (
+                <option key={m.deviceId} value={m.deviceId}>
+                  {m.label || `Microphone ${m.deviceId.slice(0, 6)}`}
+                </option>
+              ))}
+            </select>
+            <input className="input" style={{ width: 200 }} placeholder="Title (optional)" value={title} onChange={(e) => setTitle(e.target.value)} />
+            <button className="btn primary" disabled={!ready || live.elsewhere} title={live.elsewhere ? "Stop the recording in the other session first" : undefined} onClick={() => void start()}>
               ● Start recording
             </button>
           </>
         ) : (
           <>
             {live.status === "paused" ? (
-              <button className="btn" onClick={() => void api.transcriptResume()}>
+              <button className="btn" onClick={() => void run(() => api.transcriptResume())}>
                 ▶ Resume
               </button>
             ) : (
-              <button className="btn" onClick={() => void api.transcriptPause()}>
+              <button className="btn" onClick={() => void run(() => api.transcriptPause())}>
                 ❚❚ Pause
               </button>
             )}
-            <button className="btn danger solid" onClick={() => void api.transcriptStop()}>
+            <button className="btn danger solid" onClick={() => void run(() => api.transcriptStop())}>
               ■ Stop
             </button>
           </>
         )}
       </header>
-      {!ready && hasKey !== null && (
-        <div style={{ padding: "12px 24px 0" }}>
+      <div style={{ padding: "12px 24px 0" }} className="col">
+        {!ready && hasKey !== null && (
           <div className="alert info">
             {!settings.consent.microphone ? (
               <>
                 Microphone access is off. <button className="btn sm" onClick={() => go("permissions")}>Open permissions</button>
+              </>
+            ) : settings.transcription.kind === "none" ? (
+              <>
+                Transcription is turned off. <button className="btn sm" onClick={() => go("provider")}>Choose a provider</button>
               </>
             ) : (
               <>
@@ -109,16 +173,40 @@ export function TranscriptScreen({ settings, live, go }: { settings: Settings; l
               </>
             )}
           </div>
-        </div>
-      )}
-      {error && (
-        <div style={{ padding: "12px 24px 0" }}>
-          <div className="alert error">{error}</div>
-        </div>
-      )}
+        )}
+        {live.elsewhere && (
+          <div className="alert warning small">
+            A recording is running in another session. Its transcript is only available to that session.{" "}
+            <button className="btn sm" onClick={() => void run(() => api.transcriptStop())}>
+              Stop it
+            </button>
+          </div>
+        )}
+        {live.detail && !live.elsewhere && (
+          <div className={`alert ${live.status === "error" ? "error" : live.status === "reconnecting" ? "warning" : "info"} small`} role="alert">
+            {live.detail}
+            {live.status === "error" && live.action === "retry" && (
+              <button className="btn sm" style={{ marginLeft: 8 }} onClick={() => void start()}>
+                Start again
+              </button>
+            )}
+            {live.status === "error" && live.action === "settings" && (
+              <button className="btn sm" style={{ marginLeft: 8 }} onClick={() => go("provider")}>
+                Fix API key
+              </button>
+            )}
+          </div>
+        )}
+        {error && (
+          <div className="alert error small" role="alert">
+            {error}
+          </div>
+        )}
+        {active && <InputStatus live={live} settings={settings} />}
+      </div>
       <div className="split" style={{ flex: 1, minHeight: 0 }}>
-        <div className="list" aria-label="Transcript sessions">
-          {sessions.length === 0 && <div className="small muted" style={{ padding: 14 }}>No transcripts yet.</div>}
+        <div className="list" aria-label="Transcripts in this session">
+          {sessions.length === 0 && <div className="small muted" style={{ padding: 14 }}>No transcripts in this session yet.</div>}
           {sessions.map((s) => (
             <button key={s.id} className="list-item" aria-selected={(selected ?? live.sessionId) === s.id} onClick={() => setSelected(s.id === live.sessionId ? null : s.id)}>
               <div className="title">
@@ -126,7 +214,7 @@ export function TranscriptScreen({ settings, live, go }: { settings: Settings; l
                 {s.title}
               </div>
               <div className="small faint">
-                {formatTime(s.startedAt)} · {s.segmentCount} segments
+                {formatTime(s.startedAt)} · {s.segmentCount} segments{s.persisted ? "" : " · memory only"}
               </div>
             </button>
           ))}
@@ -134,8 +222,11 @@ export function TranscriptScreen({ settings, live, go }: { settings: Settings; l
         <div className="detail">
           {!sessionId ? (
             <Empty title="Start a live transcript">
-              Lumen transcribes the selected microphone{settings.transcription.captureSystemAudio ? " and system audio" : ""} in real time. Audio is streamed to your transcription provider and is never saved; only the finalized text is stored, for{" "}
-              {settings.privacy.transcriptRetentionDays ? `${settings.privacy.transcriptRetentionDays} days` : "as long as you keep it"}. Let others know when you are recording.
+              Lumen transcribes the selected microphone{settings.transcription.captureSystemAudio && settings.consent.systemAudio ? " and, separately, system audio" : ""} in real time. Audio is streamed to the transcription provider and never saved.{" "}
+              {settings.transcription.persist
+                ? `Finalized text is stored in this session for ${settings.privacy.transcriptRetentionDays ? `${settings.privacy.transcriptRetentionDays} days` : "as long as you keep it"}.`
+                : "Transcripts are kept in memory only and discarded when you stop."}{" "}
+              Let others know when you are recording.
             </Empty>
           ) : (
             <SessionDetail sessionId={sessionId} segments={shown} interim={viewingLive ? live.interim : null} live={viewingLive && active} onChanged={refresh} endRef={endRef} setError={setError} />

@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { Settings } from "../../shared/types";
 import { api, errMsg } from "../lib/api";
+import { Switch } from "../components/ui";
 
 type Props = { settings: Settings; update: (p: unknown) => Promise<void> };
 
@@ -47,15 +48,41 @@ export function PrivacyScreen({ settings, update }: Props) {
             </select>
           </div>
           <div className="field">
+            <div>
+              <label htmlFor="screen-ttl">Screen context lifetime</label>
+              <div className="hint">Screenshots and their recognized text are kept in memory only and removed after this long (unless pinned).</div>
+            </div>
+            <select id="screen-ttl" className="select" value={settings.privacy.screenContextTtlMinutes} onChange={(e) => void update({ privacy: { screenContextTtlMinutes: Number(e.target.value) } })}>
+              {[5, 15, 30, 60, 240, 1440].map((m) => (
+                <option key={m} value={m}>
+                  {m < 60 ? `${m} minutes` : m === 1440 ? "1 day" : `${m / 60} hours`}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="field">
+            <div>
+              <div className="label">Mask sensitive data before sending</div>
+              <div className="hint">Replaces detected card numbers, API keys, private keys, passwords, SSNs and tokens with “[redacted …]” in everything sent to the AI provider.</div>
+            </div>
+            <Switch label="Mask sensitive data" checked={settings.privacy.redactSensitive} onChange={(v) => void update({ privacy: { redactSensitive: v } })} />
+          </div>
+          <div className="field">
             <div className="label">Audio and screenshots</div>
-            <div className="small muted">Never stored. Audio is streamed to the transcription provider and discarded; screenshots live in memory only and expire after 15 minutes unless pinned.</div>
+            <div className="small muted">Never written to disk. Audio is streamed to the transcription provider and discarded; screenshots live in memory only.</div>
+          </div>
+          <div className="field">
+            <div className="label">Deletion policy</div>
+            <div className="small muted">
+              Deleting a session removes its conversations, messages, transcripts, meeting notes, session documents, saved context and the matching full-text index rows. The database uses secure-delete, so removed rows are overwritten on disk.
+            </div>
           </div>
         </div>
 
         <div className="card">
           <h3>Where your data lives</h3>
           <ul className="small muted" style={{ margin: 0, paddingLeft: 18 }}>
-            <li>Conversations, transcripts and knowledge documents: a local SQLite database in your user profile.</li>
+            <li>Sessions, conversations, transcripts, notes and knowledge documents: a local SQLite database in your user profile.</li>
             <li>API keys: encrypted with your OS keychain.</li>
             <li>Sent to Anthropic: your question, attached context and retrieved passages, only when you ask.</li>
             <li>Sent to Deepgram: microphone/system audio, only while recording.</li>

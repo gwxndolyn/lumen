@@ -1,8 +1,19 @@
-import Anthropic from "@anthropic-ai/sdk";
+import Anthropic, {
+  APIConnectionError,
+  APIConnectionTimeoutError,
+  APIError,
+  APIUserAbortError,
+  AuthenticationError,
+  BadRequestError,
+  NotFoundError,
+  PermissionDeniedError,
+  RateLimitError,
+} from "@anthropic-ai/sdk";
 import type { ProviderTestResult } from "../../shared/types";
 import { DEFAULT_RETRY, withRetry, type RetryOptions } from "./retry";
 import {
   CancelledError,
+  idleWatchdog,
   ProviderError,
   type AIProvider,
   type GenerateRequest,
@@ -32,6 +43,7 @@ export interface AnthropicProviderOptions {
 export class AnthropicProvider implements AIProvider {
   readonly kind = "anthropic" as const;
   readonly isMock = false;
+  readonly supportsImages = true;
   private readonly client: Anthropic;
   private readonly retry: RetryOptions;
 
@@ -43,13 +55,15 @@ export class AnthropicProvider implements AIProvider {
 
   async generate(req: GenerateRequest, signal: AbortSignal, hooks?: StreamHooks): Promise<GenerateResult> {
     const params = this.toParams(req);
-    return withRetry(
+    const { value, retries } = await withRetry(
       async (markStarted) => {
         const started = Date.now();
         let ttftMs: number | null = null;
+        const watchdog = idleWatchdog(signal, req.idleTimeoutMs);
         try {
-          const stream = this.client.beta.messages.stream(params, { signal, timeout: req.timeoutMs });
+          const stream = this.client.beta.messages.stream(params, { signal: watchdog.signal, timeout: req.timeoutMs });
           for await (const event of stream) {
+            watchdog.kick();
             if (event.type === "content_block_delta" && event.delta.type === "text_delta") {
               if (ttftMs === null) ttftMs = Date.now() - started;
               markStarted();
@@ -59,13 +73,17 @@ export class AnthropicProvider implements AIProvider {
           const final = await stream.finalMessage();
           return this.toResult(final, ttftMs);
         } catch (err) {
+          if (watchdog.stalled() && !signal.aborted) throw new ProviderError("The AI provider stopped responding.", "timeout", true);
           throw mapError(err, signal);
+        } finally {
+          watchdog.dispose();
         }
       },
       signal,
       this.retry,
       hooks?.onRetry,
     );
+    return { ...value, retries };
   }
 
   async test(model: string): Promise<ProviderTestResult> {
@@ -112,7 +130,7 @@ export class AnthropicProvider implements AIProvider {
     };
   }
 
-  private toResult(msg: BetaMessage, ttftMs: number | null): GenerateResult {
+  private toResult(msg: BetaMessage, ttftMs: number | null): Omit<GenerateResult, "retries"> {
     if (msg.stop_reason === "refusal") {
       throw new ProviderError("The model declined to answer this request.", "refusal", false);
     }
@@ -162,20 +180,20 @@ function retryAfter(headers: Headers | undefined): number | undefined {
 /** Translate SDK errors into safe, user-facing ProviderErrors (never leak keys or raw bodies). */
 export function mapError(err: unknown, signal: AbortSignal): Error {
   if (err instanceof ProviderError || err instanceof CancelledError) return err;
-  if (signal.aborted || err instanceof Anthropic.APIUserAbortError) return new CancelledError();
-  if (err instanceof Anthropic.APIConnectionTimeoutError)
+  if (signal.aborted || err instanceof APIUserAbortError) return new CancelledError();
+  if (err instanceof APIConnectionTimeoutError)
     return new ProviderError("The AI provider timed out.", "timeout", true);
-  if (err instanceof Anthropic.APIConnectionError)
+  if (err instanceof APIConnectionError)
     return new ProviderError("Cannot reach the AI provider. Check your network connection.", "network", true);
-  if (err instanceof Anthropic.AuthenticationError)
+  if (err instanceof AuthenticationError)
     return new ProviderError("The Anthropic API key was rejected. Update it in Settings → AI provider.", "auth", false);
-  if (err instanceof Anthropic.PermissionDeniedError)
+  if (err instanceof PermissionDeniedError)
     return new ProviderError("This API key does not have access to the selected model.", "auth", false);
-  if (err instanceof Anthropic.RateLimitError)
+  if (err instanceof RateLimitError)
     return new ProviderError("Rate limited by the AI provider.", "rate_limited", true, retryAfter(err.headers));
-  if (err instanceof Anthropic.NotFoundError)
+  if (err instanceof NotFoundError)
     return new ProviderError("The selected model was not found. Choose another model in Settings.", "bad_request", false);
-  if (err instanceof Anthropic.BadRequestError) {
+  if (err instanceof BadRequestError) {
     const tooLarge = /too long|context|prompt is too long/i.test(err.message);
     return new ProviderError(
       tooLarge ? "The request is too large. Remove some context and try again." : "The AI provider rejected the request.",
@@ -183,12 +201,17 @@ export function mapError(err: unknown, signal: AbortSignal): Error {
       false,
     );
   }
-  if (err instanceof Anthropic.APIError) {
+  if (err instanceof APIError) {
     const status = err.status ?? 0;
     if (status === 529 || status === 503)
       return new ProviderError("The AI provider is overloaded.", "overloaded", true, retryAfter(err.headers));
     if (status >= 500) return new ProviderError("The AI provider had a temporary error.", "overloaded", true);
     return new ProviderError(`The AI provider returned an error (${status}).`, "unknown", false);
+  }
+  // Raw socket/stream failures (connection reset mid-stream, DNS, TLS) are not wrapped by the SDK.
+  const msg = err instanceof Error ? `${err.name} ${err.message} ${String((err as { cause?: unknown }).cause ?? "")}` : String(err);
+  if (err instanceof TypeError || /network|terminated|socket|ECONN|ETIMEDOUT|EPIPE|fetch failed|connection/i.test(msg)) {
+    return new ProviderError("The connection to the AI provider was interrupted.", "network", true);
   }
   return new ProviderError("Unexpected error while contacting the AI provider.", "unknown", false);
 }

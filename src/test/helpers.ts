@@ -16,6 +16,10 @@ export interface FakeTurn {
   delayMs?: number;
   usage?: { input: number; output: number };
   fallbackTo?: string;
+  /** Stall: emit the first N deltas, then go silent without closing. */
+  stallAfter?: number;
+  /** Replace the scripted text with a function of the request body (e.g. echo context). */
+  respond?: (body: Record<string, unknown>) => string[];
 }
 
 export function sse(event: string, data: unknown): string {
@@ -67,12 +71,21 @@ export function fakeFetch(turns: FakeTurn[]) {
         }
         push(sse("content_block_start", { type: "content_block_start", index, content_block: { type: "text", text: "" } }));
         let n = 0;
-        for (const t of turn.text ?? []) {
+        const texts = turn.respond ? turn.respond(calls.at(-1)!.body) : (turn.text ?? []);
+        for (const t of texts) {
+          if (turn.stallAfter !== undefined && n >= turn.stallAfter) {
+            await new Promise<void>((resolve) => signal?.addEventListener("abort", () => resolve(), { once: true }));
+            return;
+          }
           if (signal?.aborted) return;
           if (turn.delayMs) await new Promise((r) => setTimeout(r, turn.delayMs));
           if (signal?.aborted) return;
           push(sse("content_block_delta", { type: "content_block_delta", index, delta: { type: "text_delta", text: t } }));
-          if (turn.dropAfter !== undefined && ++n >= turn.dropAfter) {
+          n++;
+          if (turn.dropAfter !== undefined && n >= turn.dropAfter) {
+            // Let already-sent bytes reach the client before the connection drops (erroring a
+            // stream synchronously discards chunks still in its queue).
+            await new Promise((r) => setTimeout(r, 20));
             ctrl.error(new TypeError("network connection lost"));
             return;
           }
@@ -97,3 +110,11 @@ export function fakeFetch(turns: FakeTurn[]) {
 }
 
 export const noSleep = { maxAttempts: 4, baseDelayMs: 1, maxDelayMs: 2, sleep: async () => undefined };
+
+/** Concatenated text of every user turn sent to the provider (for asserting what context was sent). */
+export function sentText(body: Record<string, unknown>): string {
+  const msgs = (body.messages ?? []) as { content: unknown }[];
+  return msgs
+    .map((m) => (typeof m.content === "string" ? m.content : (m.content as { type: string; text?: string }[]).map((p) => p.text ?? `[${p.type}]`).join("\n")))
+    .join("\n");
+}

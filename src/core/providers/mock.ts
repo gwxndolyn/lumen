@@ -12,6 +12,7 @@ export const MOCK_BANNER = "**[Development mode — mock provider. This is not a
 export class MockProvider implements AIProvider {
   readonly kind = "mock" as const;
   readonly isMock = true;
+  readonly supportsImages = true;
 
   constructor(private readonly delayMs = 15) {}
 
@@ -53,6 +54,7 @@ export class MockProvider implements AIProvider {
       stopReason: "end_turn",
       servedByFallback: null,
       ttftMs,
+      retries: 0,
       usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
     };
   }

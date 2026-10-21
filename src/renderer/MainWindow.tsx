@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
+import type { SessionSummary } from "../shared/types";
+import { MODE_LABELS } from "../shared/defaults";
 import { api } from "./lib/api";
-import { useAppEvent, useLiveTranscript, useSettings } from "./lib/hooks";
-import { Toasts, useTheme } from "./components/ui";
+import { isRecordingStatus, useActiveSession, useAppEvent, useLiveTranscript, useProviderHealth, useSettings } from "./lib/hooks";
+import { ProviderStatus, RecordingControls, Toasts, useTheme } from "./components/ui";
 import { AssistantScreen } from "./screens/Assistant";
 import { CaptureScreen } from "./screens/Capture";
 import { DiagnosticsScreen } from "./screens/Diagnostics";
@@ -11,6 +13,7 @@ import { OnboardingScreen } from "./screens/Onboarding";
 import { PermissionsScreen } from "./screens/Permissions";
 import { PrivacyScreen } from "./screens/Privacy";
 import { ProviderScreen } from "./screens/Provider";
+import { SessionsScreen } from "./screens/Sessions";
 import { SettingsScreen } from "./screens/Settings";
 import { ShortcutsScreen } from "./screens/Shortcuts";
 import { TranscriptScreen } from "./screens/Transcript";
@@ -18,9 +21,10 @@ import { TranscriptScreen } from "./screens/Transcript";
 const NAV: { section?: string; route: string; label: string; icon: string }[] = [
   { route: "assistant", label: "Assistant", icon: "◎" },
   { route: "transcript", label: "Live transcript", icon: "◉" },
-  { route: "history", label: "History", icon: "↺" },
+  { route: "capture", label: "Screen context", icon: "▣" },
   { route: "knowledge", label: "Knowledge", icon: "✦" },
-  { route: "capture", label: "Screen capture", icon: "▣" },
+  { route: "history", label: "History", icon: "↺" },
+  { route: "sessions", label: "Sessions", icon: "▦" },
   { section: "Settings", route: "settings", label: "General", icon: "⚙" },
   { route: "provider", label: "AI provider", icon: "⌁" },
   { route: "shortcuts", label: "Shortcuts", icon: "⌘" },
@@ -33,11 +37,44 @@ function routeFromHash(): string {
   return location.hash.replace(/^#\/main\/?/, "") || "assistant";
 }
 
+function SessionPicker() {
+  const session = useActiveSession();
+  const [sessions, setSessions] = useState<SessionSummary[]>([]);
+  const load = () => void api.listSessions().then(setSessions);
+  useEffect(load, []);
+  useAppEvent((e) => (e.type === "sessions-changed" || e.type === "session-switched") && load());
+  if (!session) return null;
+  return (
+    <div className="col" style={{ padding: "0 8px 10px", gap: 4, WebkitAppRegion: "no-drag" } as React.CSSProperties}>
+      <label className="small faint" htmlFor="session-picker">
+        Session
+      </label>
+      <select
+        id="session-picker"
+        className="select"
+        value={session.id}
+        onChange={(e) => {
+          if (e.target.value === "__manage") location.hash = "/main/sessions";
+          else void api.switchSession(e.target.value);
+        }}
+      >
+        {sessions.map((s) => (
+          <option key={s.id} value={s.id}>
+            {s.title} · {MODE_LABELS[s.type]}
+          </option>
+        ))}
+        <option value="__manage">Manage sessions…</option>
+      </select>
+    </div>
+  );
+}
+
 export function MainWindow() {
   const [settings, update] = useSettings();
   useTheme(settings?.theme);
   const [route, setRoute] = useState(routeFromHash);
   const live = useLiveTranscript();
+  const health = useProviderHealth();
 
   useEffect(() => {
     const onHash = () => setRoute(routeFromHash());
@@ -54,7 +91,7 @@ export function MainWindow() {
   if (!settings) return null;
   if (route === "onboarding") return <OnboardingScreen settings={settings} update={update} onDone={() => go("assistant")} />;
 
-  const recording = live.status === "recording" || live.status === "reconnecting" || live.status === "paused";
+  const recording = isRecordingStatus(live.status);
   const screen = (() => {
     switch (route) {
       case "transcript":
@@ -64,7 +101,9 @@ export function MainWindow() {
       case "knowledge":
         return <KnowledgeScreen />;
       case "capture":
-        return <CaptureScreen settings={settings} go={go} />;
+        return <CaptureScreen settings={settings} update={update} go={go} />;
+      case "sessions":
+        return <SessionsScreen />;
       case "settings":
         return <SettingsScreen settings={settings} update={update} />;
       case "provider":
@@ -88,6 +127,7 @@ export function MainWindow() {
         <div className="brand">
           <span className="brand-mark" aria-hidden /> Lumen
         </div>
+        <SessionPicker />
         {NAV.map((n) => (
           <div key={n.route}>
             {n.section && <div className="nav-section">{n.section}</div>}
@@ -98,11 +138,11 @@ export function MainWindow() {
           </div>
         ))}
         <div className="spacer" />
-        {settings.provider.kind === "mock" && (
-          <div className="alert warning small" style={{ margin: 8 }}>
-            Development mode: answers are mock responses, not AI.
-          </div>
-        )}
+        <div className="col" style={{ padding: 8, gap: 6, WebkitAppRegion: "no-drag" } as React.CSSProperties}>
+          {recording && <RecordingControls live={live} />}
+          <ProviderStatus health={health} />
+          {settings.provider.kind === "mock" && <div className="alert warning small">Development mode: answers are mock responses, not AI.</div>}
+        </div>
       </nav>
       <main className="content">{screen}</main>
       <Toasts />

@@ -4,7 +4,7 @@ import type { ChatMessage, Conversation, SearchHit } from "../../shared/types";
 import { api, formatTime } from "../lib/api";
 import { useAppEvent } from "../lib/hooks";
 import { Markdown } from "../lib/markdown";
-import { Empty } from "../components/ui";
+import { Empty, Segmented } from "../components/ui";
 
 /** Render FTS snippets («match») safely as React nodes. */
 function Snippet({ text }: { text: string }) {
@@ -23,18 +23,27 @@ export function HistoryScreen() {
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<SearchHit[] | null>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
+  const [scope, setScope] = useState<"session" | "all">("session");
+  const [notice, setNotice] = useState<string | null>(null);
 
   const refresh = () => void api.listConversations().then(setConversations);
   useEffect(refresh, []);
-  useAppEvent((e) => e.type === "history-changed" && refresh());
+  useAppEvent((e) => {
+    if (e.type === "history-changed") refresh();
+    if (e.type === "session-switched") {
+      setSelected(null);
+      setMessages([]);
+      refresh();
+    }
+  });
   useEffect(() => {
     if (selected) void api.getMessages(selected).then(setMessages);
   }, [selected]);
   useEffect(() => {
     if (!query.trim()) return setHits(null);
-    const t = setTimeout(() => void api.search(query).then(setHits), 180);
+    const t = setTimeout(() => void api.search(query, scope).then(setHits), 180);
     return () => clearTimeout(t);
-  }, [query]);
+  }, [query, scope]);
 
   const conv = conversations?.find((c) => c.id === selected);
 
@@ -43,7 +52,24 @@ export function HistoryScreen() {
       <header className="page-header">
         <h1>History</h1>
         <input className="input" style={{ maxWidth: 360 }} type="search" placeholder="Search conversations and transcripts…" aria-label="Search history" value={query} onChange={(e) => setQuery(e.target.value)} />
+        <Segmented
+          label="Search scope"
+          value={scope}
+          options={[
+            { value: "session", label: "This session" },
+            { value: "all", label: "All sessions" },
+          ]}
+          onChange={setScope}
+        />
       </header>
+      {notice && (
+        <div className="alert info small" style={{ margin: "8px 24px 0" }}>
+          {notice}
+          <button className="btn ghost sm" onClick={() => setNotice(null)}>
+            Dismiss
+          </button>
+        </div>
+      )}
       <div className="split" style={{ flex: 1, minHeight: 0 }}>
         <div className="list" aria-label="Conversations">
           {conversations === null ? (
@@ -59,8 +85,21 @@ export function HistoryScreen() {
                   key={h.itemId}
                   className="list-item"
                   onClick={() => {
+                    // Opening a result from another session requires switching to it first.
+                    if (scope === "all" && conversations && !conversations.some((c) => c.id === h.parentId) && h.kind === "message") {
+                      if (confirm(`“${h.parentTitle}” is in another session. Switch to that session to open it?`)) {
+                        void api.switchSession(h.sessionId).then(() => {
+                          setScope("session");
+                          setTimeout(() => setSelected(h.parentId), 150);
+                        });
+                      }
+                      return;
+                    }
                     if (h.kind === "message") setSelected(h.parentId);
-                    else location.hash = "/main/transcript";
+                    else if (scope === "all") {
+                      void api.switchSession(h.sessionId).then(() => (location.hash = "/main/transcript"));
+                      setNotice("Switched to the transcript's session.");
+                    } else location.hash = "/main/transcript";
                   }}
                 >
                   <div className="title">
@@ -73,7 +112,7 @@ export function HistoryScreen() {
               ))
             )
           ) : conversations.length === 0 ? (
-            <div className="small muted" style={{ padding: 14 }}>No conversations yet.</div>
+            <div className="small muted" style={{ padding: 14 }}>No conversations in this session yet.</div>
           ) : (
             conversations.map((c) => (
               <button key={c.id} className="list-item" aria-selected={selected === c.id} onClick={() => setSelected(c.id)}>

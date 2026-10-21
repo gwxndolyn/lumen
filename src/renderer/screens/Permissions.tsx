@@ -36,7 +36,7 @@ export function PermissionList({ settings, update }: Props) {
       <div className="perm-row">
         <div className="grow">
           <strong>Screen context</strong>
-          <p>Lets you capture a screen, window or region when you ask. Lumen never captures in the background. Unpinned screenshots expire after 15 minutes and are never saved to disk.</p>
+          <p>Lets you capture a screen, window or region when you ask, or turn on live screen context explicitly. Lumen never captures in the background. Screen context is never saved to disk and expires after {settings.privacy.screenContextTtlMinutes} minutes unless pinned. Turning this off immediately stops live capture and deletes all screen context.</p>
           {mac && perm.screen !== "granted" && settings.consent.screen && (
             <p className="row">
               <span>macOS requires Screen Recording permission. Enable Lumen in System Settings, then restart Lumen.</span>
@@ -52,7 +52,7 @@ export function PermissionList({ settings, update }: Props) {
       <div className="perm-row">
         <div className="grow">
           <strong>Microphone</strong>
-          <p>Used only while you are recording a live transcript. A red recording indicator is always visible while it is in use.</p>
+          <p>Used only while you are recording a live transcript. A red recording indicator is always visible while it is in use. Turning this off stops any recording immediately.</p>
           {perm.microphone === "denied" && (
             <p className="row">
               <span>Microphone access is blocked by the OS.</span>
@@ -78,7 +78,7 @@ export function PermissionList({ settings, update }: Props) {
           <strong>System audio</strong>
           <p>
             {perm.systemAudioSupported
-              ? "Transcribe audio playing through your speakers (e.g. other meeting participants). Make sure everyone knows the meeting is being transcribed."
+              ? "Separately transcribe audio playing through your speakers (e.g. other meeting participants) as its own channel, labelled “Remote”. Independent of the microphone. Make sure everyone knows the meeting is being transcribed. Also enable “Include system audio” in Settings."
               : "System-audio capture is not supported on this operating system. Use a virtual audio device as the microphone instead."}
           </p>
         </div>
@@ -87,7 +87,7 @@ export function PermissionList({ settings, update }: Props) {
       <div className="perm-row">
         <div className="grow">
           <strong>Clipboard and documents</strong>
-          <p>Read only when you click “Clipboard” or choose a file. No permission is needed and nothing is read automatically.</p>
+          <p>Read only when you click “Clipboard”, press the “ask about selection” shortcut after copying, or choose a file or folder. No permission is needed and nothing is read automatically.</p>
         </div>
         <span className="badge">On demand</span>
       </div>

@@ -1,60 +1,75 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
-import { MODE_LABELS } from "../shared/defaults";
-import type { AssistantMode } from "../shared/types";
+import { STYLE_LABELS } from "../shared/defaults";
+import type { AnswerStyle, SessionSummary } from "../shared/types";
 import { api, errMsg, prettyAccelerator } from "./lib/api";
 import { AudioCapture } from "./lib/audio";
-import { useAppEvent, useChat, useContextItems, useLiveTranscript, useSettings } from "./lib/hooks";
-import { ContextChips, MessageView, Toasts, useTheme } from "./components/ui";
+import { isRecordingStatus, useActiveSession, useAppEvent, useChat, useContextItems, useLiveScreen, useLiveTranscript, useProviderHealth, useSettings } from "./lib/hooks";
+import { ContextChips, MessageView, ProviderStatus, RecordingControls, Toasts, useTheme } from "./components/ui";
 
 const audio = new AudioCapture();
+const QUICK_STYLES: AnswerStyle[] = ["quick", "detailed", "steps", "suggest", "technical", "meeting_summary", "follow_ups"];
 
 export function Overlay() {
   const [settings, update] = useSettings();
   useTheme(settings?.theme);
+  const session = useActiveSession();
   const chat = useChat(settings);
   const items = useContextItems();
   const live = useLiveTranscript();
+  const liveScreen = useLiveScreen();
+  const health = useProviderHealth();
+  const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [text, setText] = useState("");
-  const [expanded, setExpanded] = useState(false);
+  const [mode, setMode] = useState<"compact" | "expanded">("compact");
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [useLive, setUseLive] = useState(true);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
-  const liveActive = live.status === "recording" || live.status === "paused" || live.status === "reconnecting" || live.status === "connecting";
-  const [useLive, setUseLive] = useState(true);
+  const pinnedToBottom = useRef(true);
+  const liveActive = isRecordingStatus(live.status) && !live.elsewhere;
+  const pendingCaptures = items.some((i) => i.status === "pending");
 
   useEffect(() => {
     document.body.classList.add("overlay-body");
   }, []);
 
+  const loadSessions = () => void api.listSessions().then(setSessions);
+  useEffect(loadSessions, []);
+
   useAppEvent((e) => {
     if (e.type === "focus-input") inputRef.current?.focus();
+    if (e.type === "overlay-mode") setMode(e.mode);
+    if (e.type === "sessions-changed" || e.type === "session-switched") loadSessions();
     if (e.type === "audio-command") {
       if (e.command === "start") void audio.start(e.micDeviceId, e.systemAudio);
+      else if (e.command === "system-off") audio.stopSystem();
       else void audio.stop();
     }
   });
 
   useEffect(() => {
-    if (live.status === "stopped" || live.status === "error") void audio.stop();
+    if ((live.status === "stopped" || live.status === "error" || live.status === "idle") && audio.active) void audio.stop();
   }, [live.status]);
 
-  // Keep the newest tokens in view while streaming.
+  // Expand automatically for answers / previews; the user can collapse with ⌘E.
+  const needsRoom = chat.messages.length > 0 || pendingCaptures;
+  useEffect(() => {
+    if (needsRoom && mode === "compact") void api.overlay("expand");
+  }, [needsRoom]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Follow streaming output unless the user scrolled up to read.
   useEffect(() => {
     const el = scrollRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
+    if (el && pinnedToBottom.current) el.scrollTop = el.scrollHeight;
   }, [chat.messages]);
 
-  const hasThread = chat.messages.length > 0;
-  useEffect(() => {
-    void api.setOverlaySize(window.innerWidth, hasThread || expanded ? 520 : 168);
-  }, [hasThread, expanded]);
-
-  const submit = () => {
-    const q = text.trim();
+  const submit = (style?: AnswerStyle) => {
+    const q = text.trim() || (style && style !== "quick" ? STYLE_LABELS[style] : "");
     if (!q || chat.busy) return;
     setText("");
-    void chat.send(q, { includeLiveTranscript: liveActive && useLive });
+    pinnedToBottom.current = true;
+    void chat.send(q, { includeLiveTranscript: liveActive && useLive, style });
   };
 
   const onKey = (e: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -62,6 +77,20 @@ export function Overlay() {
       e.preventDefault();
       submit();
     }
+    if (e.key === "ArrowUp" && !text) {
+      const lastUser = chat.messages.findLast((m) => m.role === "user");
+      if (lastUser) {
+        e.preventDefault();
+        setText(lastUser.content);
+      }
+    }
+  };
+
+  const copy = (t: string) => {
+    void api.copyText(t).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1200);
+    });
   };
 
   // Global keyboard handling for the panel.
@@ -80,19 +109,23 @@ export function Overlay() {
         chat.cancel();
       } else if (mod && e.key.toLowerCase() === "e") {
         e.preventDefault();
-        setExpanded((v) => !v);
+        void api.overlay(mode === "compact" ? "expand" : "compact");
+      } else if (mod && e.key.toLowerCase() === "l") {
+        e.preventDefault();
+        inputRef.current?.focus();
+      } else if (mod && e.shiftKey && e.key.toLowerCase() === "c") {
+        e.preventDefault();
+        const last = chat.messages.findLast((m) => m.role === "assistant" && m.content);
+        if (last) copy(last.content);
+      } else if (e.altKey && /^[1-7]$/.test(e.key)) {
+        e.preventDefault();
+        const s = QUICK_STYLES[Number(e.key) - 1]!;
+        void update({ assistant: { style: s } });
       }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [chat]);
-
-  const copy = (t: string) => {
-    void api.copyText(t).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1200);
-    });
-  };
+  });
 
   const run = async (fn: () => Promise<unknown>) => {
     setError(null);
@@ -105,40 +138,37 @@ export function Overlay() {
 
   if (!settings) return null;
   const lastAssistant = chat.messages.findLast((m) => m.role === "assistant");
+  const expanded = mode === "expanded";
 
   return (
-    <div className="overlay" role="dialog" aria-label="Lumen assistant">
+    <div className={`overlay ${expanded ? "expanded" : "compact"}`} role="dialog" aria-label="Lumen assistant">
       <div className="overlay-bar">
         <span className="brand">
           <span className="brand-mark" aria-hidden /> Lumen
         </span>
         <select
-          className="mini-select"
-          aria-label="Assistant mode"
-          value={settings.assistant.mode}
-          onChange={(e) => void update({ assistant: { mode: e.target.value as AssistantMode } })}
+          className="mini-select session-switcher"
+          aria-label="Session"
+          value={session?.id ?? ""}
+          onChange={(e) => {
+            if (e.target.value === "__new") void api.openMain("/main/sessions");
+            else void run(() => api.switchSession(e.target.value));
+          }}
         >
-          {Object.entries(MODE_LABELS).map(([k, v]) => (
-            <option key={k} value={k}>
-              {v}
+          {sessions.map((s) => (
+            <option key={s.id} value={s.id}>
+              {s.title}
             </option>
           ))}
+          <option value="__new">＋ New / manage sessions…</option>
         </select>
-        <button
-          className="btn ghost sm"
-          aria-pressed={settings.assistant.length === "detailed"}
-          title="Toggle short / detailed answers"
-          onClick={() => void update({ assistant: { length: settings.assistant.length === "short" ? "detailed" : "short" } })}
-        >
-          {settings.assistant.length === "short" ? "Short" : "Detailed"}
-        </button>
-        {settings.provider.kind === "mock" && <span className="badge warning">Dev mode</span>}
-        {liveActive && (
-          <span className="rec-pill" title={live.detail ?? undefined}>
-            <span className={`dot ${live.status === "recording" ? "rec" : "warn"}`} />
-            {live.status === "recording" ? "REC" : live.status === "paused" ? "Paused" : "Reconnecting"}
-            <button className="btn ghost sm no-drag" style={{ color: "inherit", height: 18 }} onClick={() => void api.transcriptStop()} aria-label="Stop recording">
-              Stop
+        <ProviderStatus health={health} compact />
+        <RecordingControls live={live} compact />
+        {liveScreen?.active && (
+          <span className="rec-pill" style={{ color: "var(--accent-strong)", background: "var(--accent-soft)" }} title={liveScreen.lastError ?? "Live screen context is on"}>
+            ▣ {liveScreen.paused ? "Screen paused" : "Live screen"}
+            <button className="btn ghost sm no-drag" aria-label="Stop live screen context" onClick={() => void run(() => api.liveScreen("stop"))}>
+              ■
             </button>
           </span>
         )}
@@ -147,7 +177,10 @@ export function Overlay() {
         <button className="btn ghost sm icon" title="New conversation (⌘N)" aria-label="New conversation" onClick={() => void chat.load(null)}>
           ＋
         </button>
-        <button className="btn ghost sm icon" title="Open full window" aria-label="Open full window" onClick={() => void api.openMain(chat.conversationId ? "/main/history" : "/main/assistant")}>
+        <button className="btn ghost sm icon" title={expanded ? "Compact (⌘E)" : "Expand (⌘E)"} aria-label={expanded ? "Compact" : "Expand"} onClick={() => void api.overlay(expanded ? "compact" : "expand")}>
+          {expanded ? "▴" : "▾"}
+        </button>
+        <button className="btn ghost sm icon" title="Open full window" aria-label="Open full window" onClick={() => void api.openMain("/main/assistant")}>
           ⤢
         </button>
         <button className="btn ghost sm icon" title="Hide (Esc)" aria-label="Hide assistant" onClick={() => void api.overlay("hide")}>
@@ -155,9 +188,16 @@ export function Overlay() {
         </button>
       </div>
 
-      {(hasThread || expanded) && (
-        <div className="overlay-body-scroll" ref={scrollRef}>
-          {hasThread ? (
+      {expanded && (
+        <div
+          className="overlay-body-scroll"
+          ref={scrollRef}
+          onScroll={(e) => {
+            const el = e.currentTarget;
+            pinnedToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+          }}
+        >
+          {chat.messages.length ? (
             <div className="thread">
               {chat.messages.map((m) => (
                 <MessageView
@@ -170,11 +210,18 @@ export function Overlay() {
             </div>
           ) : (
             <div className="empty">
-              <h3>Ask anything</h3>
+              <h3>{session?.title ?? "Ask anything"}</h3>
               <p>
-                Attach your screen, clipboard or a note, or start a live transcript — Lumen only sees what you add. Press{" "}
-                <kbd>{prettyAccelerator(settings.shortcuts.askAboutScreen)}</kbd> to capture the screen under your cursor.
+                Lumen only sees what you add to this session. Press <kbd>{prettyAccelerator(settings.shortcuts.askAboutScreen)}</kbd> to capture the screen under your cursor, or{" "}
+                <kbd>{prettyAccelerator(settings.shortcuts.askAboutSelection)}</kbd> after copying text.
               </p>
+              <div className="kbd-hints">
+                <span>↵ send</span>
+                <span>Esc stop/hide</span>
+                <span>⌘E expand</span>
+                <span>⌥1–7 answer style</span>
+                <span>⌘⇧C copy last answer</span>
+              </div>
             </div>
           )}
         </div>
@@ -197,6 +244,21 @@ export function Overlay() {
           onChange={(e) => setText(e.target.value)}
           onKeyDown={onKey}
         />
+        <div className="style-chips" role="group" aria-label="Answer style">
+          {QUICK_STYLES.map((s, i) => (
+            <button
+              key={s}
+              aria-pressed={settings.assistant.style === s}
+              title={`${STYLE_LABELS[s]} (⌥${i + 1})${text.trim() ? "" : " — click again to ask"}`}
+              onClick={() => {
+                if (settings.assistant.style === s && !text.trim() && s !== "quick") submit(s);
+                else void update({ assistant: { style: s } });
+              }}
+            >
+              {STYLE_LABELS[s].replace(" explanation", "").replace("Step-by-step", "Steps")}
+            </button>
+          ))}
+        </div>
         <div className="row">
           <button
             className="btn ghost sm"
@@ -206,7 +268,12 @@ export function Overlay() {
           >
             ▣ Screen
           </button>
-          <button className="btn ghost sm" title="Pick a window or region" onClick={() => void api.openMain("/main/capture")}>
+          <button
+            className="btn ghost sm"
+            disabled={!settings.consent.screen}
+            title={settings.consent.screen ? "Pick a window or region" : "Enable screen context in Permissions"}
+            onClick={() => void api.openMain("/main/capture")}
+          >
             ⬚ Region
           </button>
           <button className="btn ghost sm" title="Add clipboard text as context" onClick={() => void run(() => api.addClipboard())}>
@@ -219,11 +286,11 @@ export function Overlay() {
           )}
           <span className="spacer" />
           {chat.busy ? (
-            <button className="btn danger sm" onClick={chat.cancel} title="Stop (Esc)">
+            <button className="btn danger sm" onClick={chat.cancel} title="Stop generating (Esc)">
               ■ Stop
             </button>
           ) : (
-            <button className="btn primary sm" onClick={submit} disabled={!text.trim()}>
+            <button className="btn primary sm" onClick={() => submit()} disabled={!text.trim()}>
               Ask ↵
             </button>
           )}
