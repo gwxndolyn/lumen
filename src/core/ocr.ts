@@ -46,6 +46,9 @@ export class TesseractOcr implements OcrEngine {
         gzip: true,
         cacheMethod: this.opts.cachePath ? "write" : "none",
         cachePath: this.opts.cachePath,
+        // Without a handler tesseract.js rethrows job failures as uncaught exceptions; the
+        // failure is already delivered to the caller through the rejected recognize() promise.
+        errorHandler: () => undefined,
       })) as unknown as TesseractWorker;
     })();
     return this.worker;
