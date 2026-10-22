@@ -1,0 +1,208 @@
+{
+  "version": 1,
+  "updated": "2026-10-22",
+  "scoring": "priority = impact (1-5) x confidence (0-1) / effort (1-5); severity classes are ranked before score. Estimates are judgements, not measurements.",
+  "items": [
+    {
+      "id": "LUM-001",
+      "title": "Renderer crash leaves a blank window",
+      "category": "critical-defect",
+      "subsystem": "renderer",
+      "problem": "No React error boundary in src/renderer/main.tsx. Any render-time exception unmounts the tree; the overlay or main window goes blank with no recovery path.",
+      "evidence": "grep for ErrorBoundary/componentDidCatch returns nothing; main.tsx renders <Overlay/> or <MainWindow/> directly.",
+      "benefit": "User keeps a recoverable window and their data; failure is logged for diagnosis.",
+      "impact": 5,
+      "confidence": 0.9,
+      "effort": 1,
+      "risk": "low",
+      "acceptance": [
+        "A throwing child renders a recovery panel with Reload",
+        "The error is reported to the main-process log without user content",
+        "Unit test proves both"
+      ],
+      "verification": "vitest render test + typecheck + smoke",
+      "status": "done",
+      "evidence_of_completion": "src/renderer/components/ErrorBoundary.tsx wraps both windows; diagnostics:rendererCrash logs error name + component names only. Test src/test/errorBoundary.test.tsx (2 pass) \u2014 found and fixed: host elements were reported as components."
+    },
+    {
+      "id": "LUM-002",
+      "title": "No CI pipeline",
+      "category": "production-blocker",
+      "subsystem": "build",
+      "problem": "No .github/workflows. Typecheck, lint, tests and audit only run when someone remembers.",
+      "evidence": "ls .github \u2192 missing",
+      "benefit": "Regressions caught on every push for macOS and Windows.",
+      "impact": 4,
+      "confidence": 0.8,
+      "effort": 2,
+      "risk": "low",
+      "acceptance": [
+        "Workflow runs npm ci, typecheck, lint, test on macos-latest and windows-latest",
+        "YAML validated locally"
+      ],
+      "verification": "YAML parse; cannot execute GitHub Actions from this environment (record as not-run)",
+      "status": "unverified",
+      "evidence_of_completion": ".github/workflows/ci.yml (macOS/Windows/Ubuntu: npm ci, typecheck, lint, test, build; audit job). YAML parsed with js-yaml. NOT RUN: GitHub Actions cannot execute here. First push will be the real verification; the windows-latest job also partially addresses LUM-007."
+    },
+    {
+      "id": "LUM-003",
+      "title": "`npm run format` references prettier, which is not installed",
+      "category": "reliability",
+      "subsystem": "build",
+      "problem": "package.json format/format:write call prettier; node_modules/.bin/prettier does not exist, so the scripts fail.",
+      "evidence": "ls node_modules/.bin/prettier \u2192 No such file",
+      "benefit": "Advertised scripts work.",
+      "impact": 2,
+      "confidence": 0.9,
+      "effort": 1,
+      "risk": "low",
+      "acceptance": [
+        "npm run format exits 0 or the script is removed with justification"
+      ],
+      "verification": "run the script",
+      "status": "done",
+      "evidence_of_completion": "prettier@3 added; .prettierrc.json printWidth 200 (least churn: 73 vs 80 files at 160); format/format:write now check only files changed vs master (scripts/format-changed.mjs); format:all for the whole tree. npm run format exits 0."
+    },
+    {
+      "id": "LUM-004",
+      "title": "Dead error state in Technical screen",
+      "category": "ux",
+      "subsystem": "renderer/technical",
+      "problem": "Technical.tsx destructures `error` from useAction but never calls run(); analyzeProblem failures are silently dropped (unhandled promise).",
+      "evidence": "src/renderer/screens/Technical.tsx:43,50",
+      "benefit": "Parser/IPC failures become visible instead of silent.",
+      "impact": 2,
+      "confidence": 0.8,
+      "effort": 1,
+      "risk": "low",
+      "acceptance": [
+        "analyzeProblem rejection shows an error",
+        "no unhandled rejection"
+      ],
+      "verification": "typecheck + lint + smoke technical screen",
+      "status": "done",
+      "evidence_of_completion": "Technical.tsx analyzeProblem rejection now sets a visible error; lint exhaustive-deps clean; typecheck clean."
+    },
+    {
+      "id": "LUM-005",
+      "title": "3 moderate advisories via mammoth \u2192 argparse \u2192 sprintf-js",
+      "category": "security",
+      "subsystem": "knowledge import",
+      "problem": "sprintf-js DoS advisory (GHSA-hp3w-g68c-fv3c) reachable through mammoth's CLI dependency. npm's suggested fix downgrades mammoth (breaking).",
+      "evidence": "npm audit --omit=dev",
+      "benefit": "Clean audit; smaller attack surface.",
+      "impact": 2,
+      "confidence": 0.6,
+      "effort": 2,
+      "risk": "medium",
+      "acceptance": [
+        "Advisory resolved via override without breaking .docx import",
+        "docx import test still passes"
+      ],
+      "verification": "npm audit --omit=dev; knowledge tests",
+      "status": "done",
+      "notes": "Only argparse (CLI) uses sprintf-js; Lumen never calls mammoth's CLI. electron-builder already excludes both from the bundle.",
+      "evidence_of_completion": "Advisories are only reachable via mammoth's CLI, which is excluded from the asar (verified: @electron/asar list shows 0 argparse/sprintf-js entries). npm's fix downgrades mammoth (breaking) so it was rejected. scripts/audit-shipped.mjs is now audit:prod: passes when every advisory is in an excluded+absent module; negative test (removing exclusions, no packaged build) exits 1. Raw audit kept as audit:raw."
+    },
+    {
+      "id": "LUM-006",
+      "title": "Rule-based turn/task classification has no labelled evaluation set",
+      "category": "high-value",
+      "subsystem": "core/intelligence",
+      "problem": "Classifier accuracy is only checked by a handful of unit cases; no way to measure whether a rule change helps or hurts overall.",
+      "evidence": "src/test/intelligence.test.ts has ~20 labelled examples",
+      "benefit": "Measurable accuracy; regressions visible when rules change.",
+      "impact": 4,
+      "confidence": 0.7,
+      "effort": 2,
+      "risk": "low",
+      "acceptance": [
+        "\u226580 labelled synthetic examples across relations and categories",
+        "Script reports accuracy per class",
+        "Baseline recorded; test enforces a floor"
+      ],
+      "verification": "vitest eval file",
+      "status": "done",
+      "evidence_of_completion": "Labelled fixture (90 cases) + held-out set (45). Baseline tuned: relations 95%, ambiguity 100%, categories 93%. After targeted rule fixes: 100/100/100. Held-out (measured once, not tuned): relations 89%, ambiguity 100%, categories 74%; all held-out category misses fall back to 'general'. Floors enforced in src/test/intentEval.test.ts."
+    },
+    {
+      "id": "LUM-007",
+      "title": "Real-provider and Windows verification",
+      "category": "production-blocker",
+      "subsystem": "providers / platform",
+      "problem": "No run against real Anthropic/OpenAI/Gemini/Deepgram; Windows build never executed.",
+      "evidence": "test:live skipped (no keys); no Windows host",
+      "benefit": "Confidence the product works for customers.",
+      "impact": 5,
+      "confidence": 0.9,
+      "effort": 2,
+      "risk": "low",
+      "acceptance": [
+        "npm run test:live passes with keys",
+        "Windows smoke passes"
+      ],
+      "verification": "external",
+      "status": "blocked",
+      "blocker": "Requires user-supplied API keys and a Windows machine/CI runner."
+    },
+    {
+      "id": "LUM-008",
+      "title": "Code signing and notarization",
+      "category": "production-blocker",
+      "subsystem": "packaging",
+      "problem": "Builds are unsigned: Gatekeeper/SmartScreen warnings, auto-update disabled.",
+      "evidence": "electron-builder config; platform profile reports unsigned",
+      "benefit": "Installable by customers without warnings; updates.",
+      "impact": 5,
+      "confidence": 0.9,
+      "effort": 2,
+      "risk": "low",
+      "acceptance": [
+        "Signed, notarized macOS build; signed Windows installer"
+      ],
+      "verification": "external",
+      "status": "blocked",
+      "blocker": "Requires Apple Developer ID and Windows code-signing certificates."
+    },
+    {
+      "id": "LUM-009",
+      "title": "Category recall on unseen phrasings is 74%",
+      "category": "high-value",
+      "subsystem": "core/intelligence",
+      "problem": "Held-out misses: coin change, segfault, off-by-one, regex explanation, 'timeline at scale', SQL phrased without SQL keywords. All fall back to 'general' (safe but loses the specialised structure).",
+      "evidence": "src/test/fixtures/intent-holdout.json report 2026-10-22",
+      "benefit": "More answers get the right structure.",
+      "impact": 3,
+      "confidence": 0.6,
+      "effort": 2,
+      "risk": "low",
+      "acceptance": [
+        "Write a NEW held-out set before tuning",
+        "Tune on current holdout folded into the tuned set",
+        "New holdout category accuracy > 74% with no tuned-set regression"
+      ],
+      "verification": "intentEval.test.ts",
+      "status": "open",
+      "notes": "Consider a provider-backed classifier only for low-confidence cases if rules plateau; that costs a model call and latency, so measure first."
+    },
+    {
+      "id": "LUM-010",
+      "title": "Format the remaining legacy files in one dedicated commit",
+      "category": "maintainability",
+      "subsystem": "build",
+      "problem": "70 files predate Prettier. Changed-files formatting avoids churn but leaves the tree inconsistent.",
+      "evidence": "npm run format:all reports ~70 files",
+      "benefit": "Consistent style; CI could check everything.",
+      "impact": 1,
+      "confidence": 0.9,
+      "effort": 1,
+      "risk": "low",
+      "acceptance": [
+        "One formatting-only commit; tests pass; then CI runs format:all"
+      ],
+      "verification": "npm run format:all; npm run check",
+      "status": "open",
+      "notes": "Do it on its own so the diff is reviewable as pure formatting; ask before merging if other branches are in flight."
+    }
+  ]
+}
