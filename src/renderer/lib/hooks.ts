@@ -117,6 +117,8 @@ export interface UiMessage {
   meta?: { model?: string; isMock?: boolean; costUsd?: number; ttftMs?: number | null; totalMs?: number; fallback?: string | null; style?: AnswerStyle; stopReason?: string };
   warnings?: string[];
   availability?: SourceAvailability;
+  /** Origin label shown on the user turn (e.g. "Behavioral question", "Debug"). */
+  label?: string;
   retryNote?: string;
 }
 
@@ -126,6 +128,7 @@ function fromStored(m: ChatMessage): UiMessage {
     role: m.role,
     content: m.content,
     references: m.references,
+    label: m.meta.origin?.label,
     status: m.meta.cancelled ? "cancelled" : "done",
     meta: { model: m.meta.model, isMock: m.meta.isMock, costUsd: m.meta.estimatedCostUsd, ttftMs: m.meta.ttftMs, totalMs: m.meta.totalMs, style: m.meta.style, stopReason: m.meta.stopReason },
   };
@@ -135,7 +138,10 @@ function fromStored(m: ChatMessage): UiMessage {
  * Chat state machine bound to streaming IPC events. Events are matched by request id, so deltas
  * from one question can never be appended to another; a session switch resets the thread.
  */
-export function useChat(settings: Settings | null) {
+export function useChat(settings: Settings | null, chatOpts?: { adoptSuggestions?: boolean; restore?: boolean }) {
+  const adoptSuggestions = !!chatOpts?.adoptSuggestions;
+  /** Mode workspaces start with a fresh thread; the general assistant restores the last one. */
+  const restoreEnabled = chatOpts?.restore ?? true;
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [messages, setMessages] = useState<UiMessage[]>([]);
   const [activeRequest, setActiveRequest] = useState<string | null>(null);
@@ -157,6 +163,24 @@ export function useChat(settings: Settings | null) {
   useEffect(
     () =>
       api.onChat((e) => {
+        // A suggestion started by the main process (interview copilot): adopt it as the active
+        // request so it streams into this thread like a typed question. Only when idle, so a
+        // user's own question is never displaced.
+        if (e.type === "suggestion" && adoptSuggestions) {
+          if (reqRef.current && reqRef.current.startsWith("iq-")) {
+            // Older suggestion superseded: it will emit "cancelled" for its own id.
+          } else if (reqRef.current) return;
+          const pid = `pending-${e.requestId}`;
+          reqRef.current = e.requestId;
+          placeholder.current = pid;
+          setActiveRequest(e.requestId);
+          setMessages((prev) => [
+            ...prev.filter((m) => !(m.status === "streaming" && m.id.startsWith("pending-iq-"))),
+            { id: `u-${e.requestId}`, role: "user", content: e.question.text, references: [], status: "done", label: `${e.question.categoryLabel} question` },
+            { id: pid, role: "assistant", content: "", references: [], status: "streaming", meta: { style: "suggest" } },
+          ]);
+          return;
+        }
         if (e.requestId !== reqRef.current) return;
         const pid = placeholder.current;
         setMessages((prev) => {
@@ -209,11 +233,11 @@ export function useChat(settings: Settings | null) {
           setActiveRequest(null);
         }
       }),
-    [],
+    [adoptSuggestions],
   );
 
   const send = useCallback(
-    async (text: string, opts: { includeLiveTranscript: boolean; retryOf?: string; style?: AnswerStyle }) => {
+    async (text: string, opts: { includeLiveTranscript: boolean; retryOf?: string; style?: AnswerStyle; mode?: Parameters<typeof api.chatSend>[0]["mode"]; label?: string }) => {
       if (!settings || reqRef.current) return;
       const requestId = newId();
       const pid = `pending-${requestId}`;
@@ -222,7 +246,7 @@ export function useChat(settings: Settings | null) {
       setActiveRequest(requestId);
       setMessages((prev) => {
         const base = opts.retryOf ? prev.filter((m) => m.id !== opts.retryOf) : prev;
-        const user: UiMessage[] = opts.retryOf ? [] : [{ id: `u-${requestId}`, role: "user", content: text, references: [], status: "done" }];
+        const user: UiMessage[] = opts.retryOf ? [] : [{ id: `u-${requestId}`, role: "user", content: text, references: [], status: "done", label: opts.label }];
         return [...base, ...user, { id: pid, role: "assistant", content: "", references: [], status: "streaming", meta: { style: opts.style ?? settings.assistant.style } }];
       });
       try {
@@ -234,6 +258,7 @@ export function useChat(settings: Settings | null) {
           tone: settings.assistant.tone,
           includeLiveTranscript: opts.includeLiveTranscript,
           retryOfMessageId: opts.retryOf,
+          mode: opts.mode,
         });
       } catch (err) {
         setMessages((prev) => prev.map((m) => (m.id === pid ? { ...m, status: "error", error: { message: errMsg(err), code: "unknown", retryable: false } } : m)));
@@ -281,9 +306,11 @@ export function useChat(settings: Settings | null) {
     setConversationId(id);
     setMessages(msgs.map(fromStored));
   }, []);
-  useEffect(() => void restore(), [restore]);
+  useEffect(() => {
+    if (restoreEnabled) void restore();
+  }, [restore, restoreEnabled]);
   useAppEvent((e) => {
-    if (e.type === "session-switched") void restore();
+    if (e.type === "session-switched" && restoreEnabled) void restore();
   });
 
   return { conversationId, messages, busy: activeRequest !== null, send, cancel, retry, load };

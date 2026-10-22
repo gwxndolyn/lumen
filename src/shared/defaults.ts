@@ -37,8 +37,11 @@ export const DEFAULT_SETTINGS: Settings = {
     maxTokens: 16000,
     timeoutMs: 120_000,
     idleTimeoutMs: 45_000,
-    openaiCompat: { baseUrl: "http://localhost:11434/v1", model: "llama3.1" },
+    openaiCompat: { baseUrl: "http://localhost:11434/v1", model: "llama3.1", supportsImages: false },
+    openai: { model: "gpt-5" },
+    gemini: { model: "gemini-2.5-flash" },
     dailySpendLimitUsd: 5,
+    customPrice: null,
   },
   transcription: {
     kind: "deepgram",
@@ -54,6 +57,8 @@ export const DEFAULT_SETTINGS: Settings = {
     useKnowledgeBase: true,
     useConversationHistory: true,
   },
+  interview: { autoSuggest: true, length: "short", interviewer: "any" },
+  technical: { language: "python" },
   screen: {
     requirePreview: true,
     sendImages: true,
@@ -103,3 +108,31 @@ export const STYLE_LABELS: Record<AnswerStyle, string> = {
   meeting_summary: "Meeting summary",
   follow_ups: "Follow-up questions",
 };
+
+/**
+ * Model presets per provider. Users can type any model id their account supports; presets only
+ * fill the picker. Image support is per provider family and decides whether screenshots are sent
+ * as images or as recognized text only.
+ */
+export const PROVIDER_INFO: Record<"anthropic" | "openai" | "gemini" | "openai_compat", { label: string; keyUrl: string; models: string[]; supportsImages: boolean; host: string }> = {
+  anthropic: { label: "Anthropic Claude", keyUrl: "https://console.anthropic.com/settings/keys", models: MODELS.map((m) => m.id), supportsImages: true, host: "api.anthropic.com" },
+  openai: { label: "OpenAI", keyUrl: "https://platform.openai.com/api-keys", models: ["gpt-5", "gpt-5-mini", "gpt-4.1", "gpt-4o"], supportsImages: true, host: "api.openai.com" },
+  gemini: { label: "Google Gemini", keyUrl: "https://aistudio.google.com/apikey", models: ["gemini-2.5-pro", "gemini-2.5-flash"], supportsImages: true, host: "generativelanguage.googleapis.com" },
+  openai_compat: { label: "Custom (OpenAI-compatible)", keyUrl: "", models: [], supportsImages: false, host: "" },
+};
+
+/** The model id actually used for the configured provider. */
+export function activeModel(p: { kind: string; model: string; openai: { model: string }; gemini: { model: string }; openaiCompat: { model: string } }, override?: string): string {
+  switch (p.kind) {
+    case "openai":
+      return override && !override.startsWith("claude") ? override : p.openai.model;
+    case "gemini":
+      return override && override.startsWith("gemini") ? override : p.gemini.model;
+    case "openai_compat":
+      return p.openaiCompat.model;
+    case "mock":
+      return "mock";
+    default:
+      return override && override.startsWith("claude") ? override : p.model;
+  }
+}

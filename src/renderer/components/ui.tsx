@@ -159,6 +159,7 @@ export function MessageView({ m, onRetry, onCopy }: { m: UiMessage; onRetry?: ()
   if (m.role === "user") {
     return (
       <div className="msg user">
+        {m.label && <span className="msg-label">{m.label}</span>}
         <div className="bubble">{m.content}</div>
       </div>
     );

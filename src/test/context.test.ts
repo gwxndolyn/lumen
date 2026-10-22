@@ -234,3 +234,15 @@ describe("sensitivity", () => {
     expect(redact("-----BEGIN RSA PRIVATE KEY-----\nabc\n-----END RSA PRIVATE KEY-----")).toBe("[redacted private key]");
   });
 });
+
+describe("ranking regression: single retrieved passage", () => {
+  it("keeps an index-retrieved passage even when it is the only candidate (IDF degenerates)", () => {
+    const { e } = engine();
+    const q = "Tell me about a time you led a difficult migration project?";
+    const p = e.prepare("s", q, [{ id: "kb1", kind: "knowledge", title: "Work experience", text: "Led the migration of the billing system.", createdAt: 0, retrieved: true }]);
+    expect(p.ranked.map((r) => r.id)).toEqual(["kb1"]);
+    // A retrieved passage that shares no terms with the question is still dropped.
+    const none = e.prepare("s", q, [{ id: "kb2", kind: "knowledge", title: "Cats", text: "cats sleep", createdAt: 0, retrieved: true }]);
+    expect(none.ranked).toEqual([]);
+  });
+});

@@ -23,7 +23,8 @@ import { TesseractOcr } from "../src/core/ocr";
 import { SUPPORTED_DOC_EXTENSIONS, extractDocumentText } from "../src/core/knowledge";
 import type { Store } from "../src/core/storage/db";
 import { openStore } from "../src/core/storage/open";
-import { cleanupTempFiles } from "../src/core/fsutil";
+import { cleanupTempFiles, writeFileAtomic } from "../src/core/fsutil";
+import { CATEGORY_LABELS } from "../src/core/interview/questions";
 import type { AppEvent } from "../src/shared/api";
 import { loadSettingsJson, modeEnum, styleEnum, toneEnum, effortEnum } from "../src/shared/settingsSchema";
 import type { AudioInputState, Diagnostics } from "../src/shared/types";
@@ -42,7 +43,7 @@ if (!app.requestSingleInstanceLock()) {
 
 const userData = app.getPath("userData");
 const logger = new Logger(path.join(userData, "logs"));
-const secrets = new SecretStore(userData, safeStorage);
+const secrets = new SecretStore(userData, safeStorage, !app.isPackaged);
 const capture = new CaptureService();
 const shortcutStatus: Record<string, boolean> = {};
 let store: Store;
@@ -231,7 +232,7 @@ function handle(channel: string, fn: Handler) {
 
 const str = (max: number) => z.string().max(max);
 const id = z.string().min(1).max(100);
-const secretName = z.enum(["anthropic", "deepgram", "openai_compat"]);
+const secretName = z.enum(["anthropic", "openai", "gemini", "deepgram", "openai_compat"]);
 
 function winOf(e: IpcMainInvokeEvent) {
   return BrowserWindow.fromWebContents(e.sender) ?? windows.main ?? windows.overlay!;
@@ -291,7 +292,10 @@ function registerIpc() {
     anthropic: secrets.has("anthropic"),
     deepgram: secrets.has("deepgram"),
     openai_compat: secrets.has("openai_compat"),
+    openai: secrets.has("openai"),
+    gemini: secrets.has("gemini"),
     encryptionAvailable: secrets.encryptionAvailable,
+    unreadable: [...secrets.unreadable],
   });
   handle("secrets:status", secretsStatus);
   handle("secrets:set", (_e, name, value) => {
@@ -343,13 +347,59 @@ function registerIpc() {
     tone: toneEnum,
     includeLiveTranscript: z.boolean(),
     retryOfMessageId: id.optional(),
+    // Mode prompts are rebuilt in the main process from structured fields; free-form instructions
+    // from the renderer are not accepted.
+    mode: z
+      .discriminatedUnion("kind", [
+        z.object({ kind: z.literal("technical"), task: z.enum(["solve", "explain", "debug", "review", "tests", "complexity", "refactor", "hints"]), language: z.enum(["python", "java", "javascript", "typescript", "cpp", "sql", "go", "csharp", "kotlin", "rust"]), problem: str(60_000).optional() }),
+        z.object({ kind: z.literal("interview"), question: str(4000), length: z.enum(["short", "medium", "detailed"]) }),
+      ])
+      .optional(),
   });
   handle("chat:send", (_e, req) => {
-    const r = chatReq.parse(req);
+    const { mode, ...r } = chatReq.parse(req);
     // Requests are always bound to the active session; a stale renderer cannot target another one.
-    void core.send({ ...r, sessionId: core.activeSessionId });
+    if (mode?.kind === "technical") void core.sendTechnical({ ...r, task: mode.task, language: mode.language, problem: mode.problem });
+    else if (mode?.kind === "interview") void core.sendInterview({ ...r, question: mode.question, length: mode.length });
+    else void core.send({ ...r, sessionId: core.activeSessionId });
   });
   handle("chat:cancel", (_e, rid) => core.chat.cancel(id.parse(rid)));
+  handle("technical:analyze", (_e, text) => {
+    const t = str(60_000).parse(text);
+    const p = core.analyzeProblem(t);
+    return { ...p, source: t.trim() ? "text" : p.statement ? "screen" : "none" };
+  });
+  const profileSection = z.enum(["resume", "experience", "projects", "skills", "accomplishments", "challenges", "target", "style"]);
+  handle("profile:get", () => core.profileText());
+  handle("profile:save", (_e, section, text) => {
+    core.saveProfileSection(profileSection.parse(section), str(100_000).parse(text));
+    return core.profileText();
+  });
+  handle("interview:questions", () =>
+    core.copilot.questions.map((q) => ({ id: q.id, text: q.text, category: q.category, categoryLabel: CATEGORY_LABELS[q.category], startMs: q.startMs })),
+  );
+  const notesPatch = z
+    .object({
+      summary: str(20_000),
+      keyPoints: z.array(str(2000)).max(200),
+      discussionPoints: z.array(str(2000)).max(200),
+      topics: z.array(str(500)).max(200),
+      decisions: z.array(str(2000)).max(200),
+      actionItems: z.array(z.object({ task: str(2000), owner: str(200).nullable() })).max(200),
+      unansweredQuestions: z.array(str(2000)).max(200),
+      followUpPrep: z.array(str(2000)).max(200),
+      conceptsToRevisit: z.array(str(500)).max(200),
+      followUpEmail: z.object({ subject: str(500), body: str(20_000) }),
+    })
+    .partial();
+  handle("notes:update", (_e, tid, patch) => core.updateNotes(id.parse(tid), notesPatch.parse(patch)));
+  handle("notes:export", async (e, tid, includeTranscript) => {
+    const { filename, markdown } = core.exportNotes(id.parse(tid), z.boolean().parse(includeTranscript));
+    const res = await dialog.showSaveDialog(winOf(e), { defaultPath: filename, filters: [{ name: "Markdown", extensions: ["md"] }, { name: "Text", extensions: ["txt"] }] });
+    if (res.canceled || !res.filePath) return null;
+    writeFileAtomic(res.filePath, markdown, 0o600);
+    return res.filePath;
+  });
   handle("history:list", () => store.listConversations(core.activeSessionId));
   handle("history:openConversation", () => core.openConversation());
   handle("history:setOpenConversation", (_e, cid) => core.setOpenConversation(id.nullable().parse(cid)));

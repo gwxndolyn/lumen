@@ -16,6 +16,11 @@ export interface Candidate {
   /** 0–1 reliability; low-confidence OCR is down-weighted. */
   confidence?: number | null;
   sourceId?: string;
+  /**
+   * Already judged relevant by an index (FTS/BM25 over the whole corpus). Re-ranking within a tiny
+   * candidate set makes IDF meaningless, so retrieved items keep a minimum score.
+   */
+  retrieved?: boolean;
 }
 
 export interface Ranked extends Candidate {
@@ -66,6 +71,7 @@ export function rankCandidates(query: string, candidates: Candidate[], now = Dat
     let score = (bm25 * KIND_WEIGHT[c.kind] + recency * 0.5) * reliability;
     if (c.pinned) score += 1;
     if (c.explicit) score = Math.max(score, 0.5) + 0.5;
+    if (c.retrieved && bm25 > 0) score = Math.max(score, 0.75);
     if (c.image) score += 0.75;
     return { ...c, score };
   });

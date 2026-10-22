@@ -17,13 +17,20 @@ import { SessionsScreen } from "./screens/Sessions";
 import { SettingsScreen } from "./screens/Settings";
 import { ShortcutsScreen } from "./screens/Shortcuts";
 import { TranscriptScreen } from "./screens/Transcript";
+import { InterviewScreen } from "./screens/Interview";
+import { TechnicalScreen } from "./screens/Technical";
+
+const MODES: { route: string; label: string; sub: string }[] = [
+  { route: "interview", label: "Interview", sub: "Copilot" },
+  { route: "technical", label: "Technical", sub: "Assessment" },
+  { route: "transcript", label: "Notetaker", sub: "Live notes" },
+];
 
 const NAV: { section?: string; route: string; label: string; icon: string }[] = [
   { route: "assistant", label: "Assistant", icon: "◎" },
-  { route: "transcript", label: "Live transcript", icon: "◉" },
   { route: "capture", label: "Screen context", icon: "▣" },
-  { route: "knowledge", label: "Knowledge", icon: "✦" },
-  { route: "history", label: "History", icon: "↺" },
+  { route: "knowledge", label: "Knowledge base", icon: "✦" },
+  { route: "history", label: "Session history", icon: "↺" },
   { route: "sessions", label: "Sessions", icon: "▦" },
   { section: "Settings", route: "settings", label: "General", icon: "⚙" },
   { route: "provider", label: "AI provider", icon: "⌁" },
@@ -96,6 +103,10 @@ export function MainWindow() {
     switch (route) {
       case "transcript":
         return <TranscriptScreen settings={settings} live={live} go={go} />;
+      case "interview":
+        return <InterviewScreen settings={settings} update={update} live={live} go={go} />;
+      case "technical":
+        return <TechnicalScreen settings={settings} update={update} live={live} />;
       case "history":
         return <HistoryScreen />;
       case "knowledge":
@@ -128,12 +139,21 @@ export function MainWindow() {
           <span className="brand-mark" aria-hidden /> Lumen
         </div>
         <SessionPicker />
+        <nav className="mode-nav" aria-label="Modes">
+          {MODES.map((m) => (
+            <button key={m.route} className="mode-card" aria-current={route === m.route ? "page" : undefined} onClick={() => go(m.route)}>
+              <strong>{m.label}</strong>
+              {m.sub}
+              {m.route === "transcript" && recording && <span className="dot rec" style={{ marginLeft: 4 }} aria-label="recording" />}
+            </button>
+          ))}
+        </nav>
         {NAV.map((n) => (
           <div key={n.route}>
             {n.section && <div className="nav-section">{n.section}</div>}
             <button className="nav-item" aria-current={route === n.route ? "page" : undefined} onClick={() => go(n.route)}>
               <span aria-hidden>{n.icon}</span> {n.label}
-              {n.route === "transcript" && recording && <span className="dot rec" style={{ marginLeft: "auto" }} aria-label="recording" />}
+
             </button>
           </div>
         ))}

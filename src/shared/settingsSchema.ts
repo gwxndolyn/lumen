@@ -23,14 +23,17 @@ export const settingsSchema = z.object({
   theme: z.enum(["dark", "light", "system"]),
   activeSessionId: z.string().max(100).nullable(),
   provider: z.object({
-    kind: z.enum(["anthropic", "openai_compat", "mock"]),
+    kind: z.enum(["anthropic", "openai", "gemini", "openai_compat", "mock"]),
     model: z.string().regex(/^[a-z0-9.-]{3,64}$/),
     effort: effortEnum,
     maxTokens: z.number().int().min(256).max(64000),
     timeoutMs: z.number().int().min(5_000).max(600_000),
     idleTimeoutMs: z.number().int().min(5_000).max(300_000),
-    openaiCompat: z.object({ baseUrl: httpUrl, model: z.string().min(1).max(120) }),
+    openaiCompat: z.object({ baseUrl: httpUrl, model: z.string().min(1).max(120), supportsImages: z.boolean() }),
+    openai: z.object({ model: z.string().regex(/^[A-Za-z0-9._:-]{2,80}$/) }),
+    gemini: z.object({ model: z.string().regex(/^[A-Za-z0-9._:-]{2,80}$/) }),
     dailySpendLimitUsd: z.number().min(0).max(10_000),
+    customPrice: z.object({ input: z.number().min(0).max(1000), output: z.number().min(0).max(1000) }).nullable(),
   }),
   transcription: z.object({
     kind: z.enum(["deepgram", "none"]),
@@ -45,6 +48,14 @@ export const settingsSchema = z.object({
     tone: toneEnum,
     useKnowledgeBase: z.boolean(),
     useConversationHistory: z.boolean(),
+  }),
+  interview: z.object({
+    autoSuggest: z.boolean(),
+    length: z.enum(["short", "medium", "detailed"]),
+    interviewer: z.enum(["remote", "any"]),
+  }),
+  technical: z.object({
+    language: z.enum(["python", "java", "javascript", "typescript", "cpp", "sql", "go", "csharp", "kotlin", "rust"]),
   }),
   screen: z.object({
     requirePreview: z.boolean(),

@@ -5,8 +5,9 @@ import type { Candidate } from "./context/ranker";
 import { redact } from "./context/sensitivity";
 import { truncate } from "./context/text";
 import type { Metrics } from "./metrics";
-import { estimateCostUsd } from "./providers/pricing";
+import { estimateCostUsd, hasPricing } from "./providers/pricing";
 import { toUserError } from "./errors";
+import { activeModel } from "../shared/defaults";
 import { CancelledError, ProviderError, type AIProvider, type GenerateUsage, type ProviderMessage } from "./providers/types";
 import type { Store } from "./storage/db";
 
@@ -117,7 +118,7 @@ export class ChatService {
           false,
         );
       }
-      model = provider.isMock ? "mock" : (session.ai.model ?? (provider.kind === "openai_compat" ? settings.provider.openaiCompat.model : settings.provider.model));
+      model = provider.isMock ? "mock" : activeModel(settings.provider, session.ai.model);
 
       // ---- resolve conversation + question ----
       let question = req.text.trim();
@@ -158,20 +159,21 @@ export class ChatService {
       if (live && live.sessionId === session.id && live.text.trim()) {
         extra.push({ id: `transcript:${live.transcriptId}`, kind: "transcript", title: `Live transcript — ${live.title}`, text: live.text, createdAt: Date.now(), explicit: true, sourceId: live.transcriptId });
       }
+      const query = req.retrievalQuery?.trim() || question;
       if (settings.assistant.useKnowledgeBase) {
-        for (const k of store.searchKnowledge(question, session.id)) {
-          extra.push({ id: `kb:${k.chunkId}`, kind: "knowledge", title: k.title, text: k.text, createdAt: 0, sourceId: k.docId });
+        for (const k of store.searchKnowledge(query, session.id)) {
+          extra.push({ id: `kb:${k.chunkId}`, kind: "knowledge", title: k.title, text: k.text, createdAt: 0, sourceId: k.docId, retrieved: true });
         }
       }
       if (settings.assistant.useConversationHistory) {
-        for (const hit of store.search(question, session.id, 6, "any")) {
+        for (const hit of store.search(query, session.id, 6, "any")) {
           if (hit.kind !== "message" || hit.parentId === convId) continue;
           const m = store.getMessage(hit.itemId);
           if (m) extra.push({ id: `hist:${m.id}`, kind: "history", title: hit.parentTitle, text: m.content, createdAt: m.createdAt, sourceId: m.id });
         }
       }
 
-      const prepared = context.prepare(session.id, question, extra, { sendImages: settings.screen.sendImages && provider.supportsImages });
+      const prepared = context.prepare(session.id, query, extra, { sendImages: settings.screen.sendImages && provider.supportsImages });
       contextPrepMs = prepared.prepMs;
       const style = session.ai.style ?? req.style;
       const built = buildPrompt(question, prepared.ranked, {
@@ -181,6 +183,9 @@ export class ChatService {
         availability: prepared.availability,
         sessionTitle: session.title,
       });
+      // Mode-specific task instructions are trusted (built by Lumen, never from captured content)
+      // and go in the system blocks, after the cached policy.
+      if (req.taskInstruction) built.systemBlocks.push({ text: req.taskInstruction, cache: false });
 
       // ---- multi-turn history (text only, bounded) ----
       const history = store.listMessages(convId).filter((m) => !m.meta.cancelled && m.id !== userMessageId && m.content.trim());
@@ -199,7 +204,7 @@ export class ChatService {
       const userContent = built.userContent.map((p) => (p.type === "text" ? p : { type: "image" as const, mediaType: p.mediaType, data: p.data }));
       const attachments = prepared.ranked.filter((r) => built.included.includes(r.id)).map((r) => `${r.kind}:${r.title}`);
       if (!req.retryOfMessageId) {
-        userMessageId = store.addMessage({ conversationId: convId, role: "user", content: question, references: [], meta: { attachments, style } }).id;
+        userMessageId = store.addMessage({ conversationId: convId, role: "user", content: req.displayText ?? question, references: [], meta: { attachments, style, origin: req.origin } }).id;
       }
       store.touchSession(session.id);
       store.setLastConversation(session.id, convId);
@@ -219,7 +224,7 @@ export class ChatService {
 
       const result = await provider.generate(
         {
-          model: provider.kind === "openai_compat" ? settings.provider.openaiCompat.model : (session.ai.model ?? settings.provider.model),
+          model: activeModel(settings.provider, session.ai.model),
           system: built.systemBlocks,
           messages: [...merged, { role: "user", content: userContent }],
           maxTokens: settings.provider.maxTokens,
@@ -244,7 +249,7 @@ export class ChatService {
       if (!result.text.trim()) {
         throw new ProviderError("The AI returned an empty answer. Try again, or rephrase the question.", "empty_response", true);
       }
-      const cost = estimateCostUsd(result.model, result.usage);
+      const cost = estimateCostUsd(result.model, result.usage, hasPricing(result.model) ? null : settings.provider.customPrice);
       this.deps.onUsage?.(result.model, result.usage, cost);
       const cited = citedLabels(result.text, built.references);
       const totalMs = Date.now() - started;

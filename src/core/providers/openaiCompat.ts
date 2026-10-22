@@ -18,15 +18,25 @@ import {
  * ever sent to the configured base URL.
  */
 export class OpenAICompatProvider implements AIProvider {
-  readonly kind = "openai_compat" as const;
+  readonly kind: "openai_compat" | "openai";
   readonly isMock = false;
   readonly supportsImages: boolean;
   private readonly retry: RetryOptions;
   private readonly fetchImpl: typeof fetch;
 
   constructor(
-    private readonly opts: { baseUrl: string; model: string; apiKey?: string | null; supportsImages?: boolean; retry?: RetryOptions; fetch?: typeof fetch },
+    private readonly opts: {
+      baseUrl: string;
+      model: string;
+      apiKey?: string | null;
+      supportsImages?: boolean;
+      retry?: RetryOptions;
+      fetch?: typeof fetch;
+      /** "openai" targets api.openai.com (uses `max_completion_tokens`, required by reasoning models). */
+      flavor?: "openai" | "openai_compat";
+    },
   ) {
+    this.kind = opts.flavor ?? "openai_compat";
     this.retry = opts.retry ?? DEFAULT_RETRY;
     this.fetchImpl = opts.fetch ?? fetch;
     this.supportsImages = opts.supportsImages ?? false;
@@ -53,7 +63,7 @@ export class OpenAICompatProvider implements AIProvider {
       model: this.opts.model,
       stream: true,
       stream_options: { include_usage: true },
-      max_tokens: req.maxTokens,
+      ...(this.kind === "openai" ? { max_completion_tokens: req.maxTokens } : { max_tokens: req.maxTokens }),
       messages: this.toMessages(req),
       ...(req.jsonSchema ? { response_format: { type: "json_schema", json_schema: { name: "output", schema: req.jsonSchema, strict: true } } } : {}),
     });

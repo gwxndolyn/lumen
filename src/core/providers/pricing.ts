@@ -1,6 +1,10 @@
 import type { GenerateUsage } from "./types";
 
-/** USD per million tokens. Source: Anthropic public pricing (cached 2026-10). Update when prices change. */
+/**
+ * USD per million tokens for models whose list prices we ship. Source: Anthropic public pricing
+ * (cached 2026-10). Other providers' prices change often and are not bundled — for those, users can
+ * enter their own rate (Settings → AI provider), otherwise cost is reported as unknown.
+ */
 const PRICES: Record<string, { input: number; output: number; cacheRead: number }> = {
   "claude-fable-5-1": { input: 10, output: 50, cacheRead: 0.25 },
   "claude-opus-5-5": { input: 4, output: 20, cacheRead: 0.2 },
@@ -11,8 +15,8 @@ const PRICES: Record<string, { input: number; output: number; cacheRead: number 
 /** Cache writes are billed at 1.25x the input rate (5-minute TTL). */
 const CACHE_WRITE_MULTIPLIER = 1.25;
 
-export function estimateCostUsd(model: string, usage: GenerateUsage): number {
-  const p = PRICES[model];
+export function estimateCostUsd(model: string, usage: GenerateUsage, custom?: { input: number; output: number } | null): number {
+  const p = PRICES[model] ?? (custom ? { ...custom, cacheRead: custom.input } : undefined);
   if (!p) return 0;
   const cost =
     (usage.inputTokens * p.input +

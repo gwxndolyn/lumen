@@ -167,13 +167,13 @@ export async function runSmokeTest({ app, core, store, windows, capture, shortcu
     check("F_uiUpdated", btnDisabled);
 
     // ---- screens render ----
-    const routes = ["assistant", "sessions", "transcript", "history", "knowledge", "capture", "settings", "provider", "shortcuts", "permissions", "privacy", "diagnostics"];
+    const routes = ["interview", "technical", "assistant", "sessions", "transcript", "history", "knowledge", "capture", "settings", "provider", "shortcuts", "permissions", "privacy", "diagnostics"];
     const broken: string[] = [];
     for (const r of routes) {
       await js(`location.hash = '/main/${r}'`);
       await wait(300);
       if (!(await js<boolean>("document.querySelector('.page-header h1') !== null"))) broken.push(r);
-      if (["sessions", "knowledge", "diagnostics", "provider", "transcript", "history"].includes(r)) await shot(win, `05-${r}`);
+      if (["interview", "technical", "sessions", "knowledge", "diagnostics", "provider", "transcript", "history", "shortcuts"].includes(r)) await shot(win, `05-${r}`);
     }
     check("screensRender", broken.length === 0, broken);
 

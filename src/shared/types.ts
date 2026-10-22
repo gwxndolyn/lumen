@@ -6,13 +6,13 @@ export type AssistantMode = "general" | "meeting" | "interview" | "technical" | 
 /** How a single answer should be shaped. */
 export type AnswerStyle = "quick" | "detailed" | "steps" | "suggest" | "technical" | "meeting_summary" | "follow_ups";
 export type Tone = "neutral" | "friendly" | "formal" | "confident";
-export type ProviderKind = "anthropic" | "openai_compat" | "mock";
+export type ProviderKind = "anthropic" | "openai" | "gemini" | "openai_compat" | "mock";
 export type TranscriptionKind = "deepgram" | "none";
 export type Effort = "low" | "medium" | "high";
 export type ThemePref = "dark" | "light" | "system";
 export type OverlayPosition = "custom" | "top-center" | "top-right" | "bottom-right" | "bottom-center";
 export type LogLevel = "off" | "error" | "info" | "debug";
-export type SecretName = "anthropic" | "deepgram" | "openai_compat";
+export type SecretName = "anthropic" | "openai" | "gemini" | "deepgram" | "openai_compat";
 
 export interface OverlayBounds {
   x: number;
@@ -35,9 +35,13 @@ export interface Settings {
     timeoutMs: number;
     /** Abort a stream that produces no events for this long. */
     idleTimeoutMs: number;
-    openaiCompat: { baseUrl: string; model: string };
+    openaiCompat: { baseUrl: string; model: string; supportsImages: boolean };
+    openai: { model: string };
+    gemini: { model: string };
     /** Daily estimated-spend cap in USD; 0 = no limit. */
     dailySpendLimitUsd: number;
+    /** User-entered price (USD per million tokens) for models without bundled pricing. */
+    customPrice: { input: number; output: number } | null;
   };
   transcription: {
     kind: TranscriptionKind;
@@ -53,6 +57,16 @@ export interface Settings {
     tone: Tone;
     useKnowledgeBase: boolean;
     useConversationHistory: boolean;
+  };
+  interview: {
+    /** Detect interviewer questions in the live transcript and draft an answer automatically. */
+    autoSuggest: boolean;
+    length: "short" | "medium" | "detailed";
+    /** Whose speech counts as the interviewer: system-audio channel, or anyone except "You". */
+    interviewer: "remote" | "any";
+  };
+  technical: {
+    language: "python" | "java" | "javascript" | "typescript" | "cpp" | "sql" | "go" | "csharp" | "kotlin" | "rust";
   };
   screen: {
     /** Show a preview and require confirmation before a capture can be used. */
@@ -186,6 +200,14 @@ export interface ContextReference {
 
 export interface ChatSendRequest {
   requestId: string;
+  /** Mode-specific instruction appended to the system policy (built by core/workflows.ts). */
+  taskInstruction?: string;
+  /** Text stored as the user's message when it differs from the prompt (e.g. a detected question). */
+  displayText?: string;
+  /** What to search/rank context with when the prompt contains instructions (defaults to the text). */
+  retrievalQuery?: string;
+  /** Short label for the UI (e.g. "Behavioral question"). */
+  origin?: { kind: "interview" | "technical" | "notes"; label: string; questionId?: string };
   sessionId: string;
   conversationId: string | null;
   text: string;
@@ -217,6 +239,7 @@ export type ChatEvent =
       contextPrepMs: number;
     }
   | { type: "delta"; requestId: string; text: string }
+  | { type: "suggestion"; requestId: string; question: { id: string; text: string; category: string; categoryLabel: string; startMs: number } }
   | { type: "retrying"; requestId: string; attempt: number; delayMs: number; reason: string }
   | {
       type: "done";
@@ -276,6 +299,7 @@ export interface MessageMeta {
   cancelled?: boolean;
   attachments?: string[];
   style?: AnswerStyle;
+  origin?: { kind: "interview" | "technical" | "notes"; label: string; questionId?: string };
   ttftMs?: number | null;
   totalMs?: number;
 }
@@ -357,6 +381,16 @@ export interface MeetingInsights {
   questionsToAsk: string[];
   suggestedResponses: string[];
   followUpEmail: { subject: string; body: string };
+  /** Notetaker sections (v0.3). Older stored notes may lack them. */
+  discussionPoints?: string[];
+  questionsAsked?: { question: string; askedBy: string | null; answerSummary: string | null }[];
+  topics?: string[];
+  decisions?: string[];
+  unansweredQuestions?: string[];
+  followUpPrep?: string[];
+  conceptsToRevisit?: string[];
+  /** True once the user has edited the notes; regeneration asks before overwriting. */
+  edited?: boolean;
 }
 
 export interface KnowledgeDoc {
@@ -422,7 +456,7 @@ export interface PermissionStatus {
   platform: string;
 }
 
-export type SecretsStatus = Record<SecretName, boolean> & { encryptionAvailable: boolean };
+export type SecretsStatus = Record<SecretName, boolean> & { encryptionAvailable: boolean; unreadable: SecretName[] };
 
 export interface ProviderHealth {
   kind: ProviderKind;

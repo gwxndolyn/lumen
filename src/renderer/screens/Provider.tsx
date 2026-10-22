@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
-import { MODELS } from "../../shared/defaults";
+import { MODELS, PROVIDER_INFO } from "../../shared/defaults";
 import type { ProviderTestResult, SecretName, SecretsStatus, Settings } from "../../shared/types";
-import { api, errMsg, formatTime } from "../lib/api";
+import { api, errMsg, formatTime, usd } from "../lib/api";
 import { useProviderHealth } from "../lib/hooks";
 import { ProviderStatus, Segmented, Switch } from "../components/ui";
 
@@ -96,7 +96,13 @@ export function ProviderScreen({ settings, update }: Props) {
   const [secrets, setSecrets] = useState<SecretsStatus | null>(null);
   const [test, setTest] = useState<ProviderTestResult | "running" | null>(null);
   const health = useProviderHealth();
-  useEffect(() => void api.secretsStatus().then(setSecrets), []);
+  const [devMode, setDevMode] = useState(false);
+  const [spend, setSpend] = useState<{ costUsd: number; requests: number } | null>(null);
+  useEffect(() => {
+    void api.secretsStatus().then(setSecrets);
+    void api.appInfo().then((i) => setDevMode(i.devModeAllowed));
+    void api.spendToday().then(setSpend);
+  }, []);
   const p = settings.provider;
   const runTest = () => {
     setTest("running");
@@ -119,6 +125,11 @@ export function ProviderScreen({ settings, update }: Props) {
             OS-level encryption is not available on this system, so API keys are kept in memory only and must be re-entered after restarting Lumen.
           </div>
         )}
+        {secrets && secrets.unreadable.length > 0 && (
+          <div className="alert warning small" style={{ marginBottom: 12 }}>
+            Some saved keys could not be decrypted ({secrets.unreadable.join(", ")}). This happens if the OS keychain was reset or your profile was copied from another computer. Enter them again below.
+          </div>
+        )}
         {test && test !== "running" && (
           <div className={`alert ${test.ok ? "info" : "error"} small`} style={{ marginBottom: 12 }} role="status">
             {test.message}
@@ -137,16 +148,13 @@ export function ProviderScreen({ settings, update }: Props) {
               <div className="label">Provider</div>
               <div className="hint">Development mode returns clearly labelled mock responses without contacting any AI service.</div>
             </div>
-            <Segmented
-              label="Provider"
-              value={p.kind}
-              options={[
-                { value: "anthropic", label: "Anthropic Claude" },
-                { value: "openai_compat", label: "OpenAI-compatible" },
-                { value: "mock", label: "Development mode" },
-              ]}
-              onChange={(v) => void update({ provider: { kind: v } })}
-            />
+            <select className="select" aria-label="Provider" value={p.kind} onChange={(e) => void update({ provider: { kind: e.target.value } })}>
+              <option value="anthropic">Anthropic Claude</option>
+              <option value="openai">OpenAI</option>
+              <option value="gemini">Google Gemini</option>
+              <option value="openai_compat">Custom (OpenAI-compatible)</option>
+              {(devMode || p.kind === "mock") && <option value="mock">Development mode (no AI)</option>}
+            </select>
           </div>
           {p.kind === "anthropic" && secrets && (
             <>
@@ -179,6 +187,33 @@ export function ProviderScreen({ settings, update }: Props) {
               </div>
             </>
           )}
+          {(p.kind === "openai" || p.kind === "gemini") && secrets && (
+            <>
+              <KeyField
+                name={p.kind}
+                label={`${PROVIDER_INFO[p.kind].label} API key`}
+                present={secrets[p.kind]}
+                onChange={setSecrets}
+                hint={`Stored encrypted with your OS credential store and only sent to ${PROVIDER_INFO[p.kind].host}. Create one at ${PROVIDER_INFO[p.kind].keyUrl.replace("https://", "")}.`}
+              />
+              <div className="field">
+                <div>
+                  <label htmlFor="pmodel">Model</label>
+                  <div className="hint">Pick a preset or type any model id your account can use. Use “Test connection” to confirm it is available.</div>
+                </div>
+                <div className="col">
+                  <CommitField id="pmodel" value={p[p.kind].model} onCommit={(v) => update({ provider: { [p.kind]: { model: v.trim() } } })} />
+                  <div className="row" style={{ flexWrap: "wrap" }}>
+                    {PROVIDER_INFO[p.kind].models.map((m) => (
+                      <button key={m} className={`btn sm ${p[p.kind as "openai" | "gemini"].model === m ? "primary" : ""}`} onClick={() => void update({ provider: { [p.kind]: { model: m } } })}>
+                        {m}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </>
+          )}
           {p.kind === "openai_compat" && secrets && (
             <>
               <div className="field">
@@ -193,11 +228,38 @@ export function ProviderScreen({ settings, update }: Props) {
                 <CommitField id="oc-model" value={p.openaiCompat.model} onCommit={(v) => update({ provider: { openaiCompat: { model: v.trim() } } })} />
               </div>
               <KeyField name="openai_compat" label="API key" optional present={secrets.openai_compat} onChange={setSecrets} hint="Only needed for hosted servers. Sent only to the base URL above." />
-              <div className="alert info small">Images are not sent to OpenAI-compatible servers; screen captures contribute their recognized (OCR) text only.</div>
+              <div className="field">
+                <div>
+                  <div className="label">Model accepts images</div>
+                  <div className="hint">Turn on only for vision models (e.g. llava, qwen-vl). When off, screen captures contribute their recognized (OCR) text only.</div>
+                </div>
+                <Switch label="Model accepts images" checked={p.openaiCompat.supportsImages} onChange={(v) => void update({ provider: { openaiCompat: { supportsImages: v } } })} />
+              </div>
             </>
           )}
           {p.kind !== "mock" && (
             <>
+              <div className="field">
+                <div>
+                  <label htmlFor="spend">Daily spend limit</label>
+                  <div className="hint">
+                    Estimated from token usage (Anthropic, OpenAI and Gemini list prices where known). 0 = no limit. Today: {spend ? usd(spend.costUsd) : "—"} across {spend?.requests ?? 0} requests.
+                  </div>
+                </div>
+                <CommitField id="spend" type="number" min={0} max={10000} suffix="USD / day" value={String(p.dailySpendLimitUsd)} onCommit={(v) => update({ provider: { dailySpendLimitUsd: Number(v) } })} />
+              </div>
+              {p.kind !== "anthropic" && (
+                <div className="field">
+                  <div>
+                    <div className="label">Price for this model</div>
+                    <div className="hint">Lumen only ships Anthropic prices. Enter your provider's current USD price per million tokens so cost estimates and the spend limit work; leave empty for “unknown”.</div>
+                  </div>
+                  <div className="row">
+                    <CommitField id="pin" type="number" min={0} max={1000} suffix="in" value={p.customPrice ? String(p.customPrice.input) : ""} onCommit={(v) => update({ provider: { customPrice: v === "" ? null : { input: Number(v), output: p.customPrice?.output ?? 0 } } })} />
+                    <CommitField id="pout" type="number" min={0} max={1000} suffix="out" value={p.customPrice ? String(p.customPrice.output) : ""} onCommit={(v) => update({ provider: { customPrice: v === "" ? null : { input: p.customPrice?.input ?? 0, output: Number(v) } } })} />
+                  </div>
+                </div>
+              )}
               <div className="field">
                 <div>
                   <label htmlFor="maxTokens">Max output tokens</label>

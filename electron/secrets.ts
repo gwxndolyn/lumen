@@ -11,7 +11,13 @@ export interface Cipher {
   decryptString(enc: Buffer): string;
 }
 
-const ENV: Record<SecretName, string> = { anthropic: "ANTHROPIC_API_KEY", deepgram: "DEEPGRAM_API_KEY", openai_compat: "LUMEN_OPENAI_COMPAT_API_KEY" };
+const ENV: Record<SecretName, string> = {
+  anthropic: "ANTHROPIC_API_KEY",
+  openai: "OPENAI_API_KEY",
+  gemini: "GEMINI_API_KEY",
+  deepgram: "DEEPGRAM_API_KEY",
+  openai_compat: "LUMEN_OPENAI_COMPAT_API_KEY",
+};
 
 /**
  * API keys are encrypted with the OS credential store (Electron safeStorage: Keychain on macOS,
@@ -28,6 +34,7 @@ export class SecretStore {
   constructor(
     dir: string,
     private readonly cipher: Cipher,
+    private readonly allowEnv = true,
   ) {
     this.file = path.join(dir, "secrets.json");
   }
@@ -54,8 +61,8 @@ export class SecretStore {
         return null;
       }
     }
-    // Development convenience: environment variable, never persisted.
-    return process.env[ENV[name]]?.trim() || null;
+    // Development convenience only (unpackaged builds): environment variable, never persisted.
+    return this.allowEnv ? process.env[ENV[name]]?.trim() || null : null;
   }
 
   has(name: SecretName): boolean {

@@ -112,7 +112,7 @@ export function TranscriptScreen({ settings, live, go }: { settings: Settings; l
   return (
     <>
       <header className="page-header">
-        <h1>Live transcript</h1>
+        <h1>Notetaker</h1>
         <span className="row small" role="status">
           <span className={`dot ${live.status === "recording" ? "rec" : live.status === "error" ? "err" : active ? "warn" : ""}`} />
           {live.elsewhere ? "Recording in another session" : STATUS_LABEL[live.status]}
@@ -264,7 +264,17 @@ function SessionDetail({
     void api.getInsights(sessionId).then(setInsights);
   }, [sessionId]);
 
+  const exportMd = async (includeTranscript: boolean) => {
+    try {
+      const p = await api.exportNotes(sessionId, includeTranscript);
+      if (p) setError(null);
+    } catch (err) {
+      setError(errMsg(err));
+    }
+  };
+
   const generate = async () => {
+    if (insights?.edited && !confirm("Regenerating replaces your edited notes. Continue?")) return;
     setLoading(true);
     setError(null);
     try {
@@ -286,8 +296,13 @@ function SessionDetail({
           Copy
         </button>
         <button className="btn sm primary" disabled={!local.length || loading} onClick={() => void generate()}>
-          {loading ? <span className="spinner" /> : "✦"} {insights ? "Refresh notes" : "Generate meeting notes"}
+          {loading ? <span className="spinner" /> : "✦"} {insights ? "Regenerate notes" : "Generate notes"}
         </button>
+        {!sessionId.startsWith("mem-") && (
+          <button className="btn sm" disabled={!local.length && !insights} onClick={() => void exportMd(true)} title="Export notes and transcript as Markdown">
+            ⇩ Export .md
+          </button>
+        )}
         {!live && (
           <button
             className="btn sm danger"
@@ -300,7 +315,7 @@ function SessionDetail({
         )}
       </div>
 
-      {insights && <Insights insights={insights} />}
+      {insights && <Insights insights={insights} transcriptId={sessionId} onChange={setInsights} setError={setError} />}
 
       {local.length === 0 && !interims.length && <div className="muted small" style={{ padding: 8 }}>{live ? "Listening… speak to see the transcript." : "This transcript is empty."}</div>}
       <div role="log" aria-live="polite" aria-label="Transcript">
@@ -365,45 +380,137 @@ function SessionDetail({
   );
 }
 
-function Insights({ insights }: { insights: MeetingInsights }) {
+type ListKey = "discussionPoints" | "topics" | "decisions" | "unansweredQuestions" | "followUpPrep" | "conceptsToRevisit" | "keyPoints";
+
+function EditableList({ title, tag, items, onSave }: { title: string; tag: string; items: string[]; onSave: (v: string[]) => Promise<void> }) {
+  const [editing, setEditing] = useState<string | null>(null);
+  return (
+    <div className="notes-section">
+      <h4>
+        <span className="label-tag">{tag}</span> {title}{" "}
+        {editing === null && (
+          <button className="btn ghost sm" aria-label={`Edit ${title}`} onClick={() => setEditing(items.join("\n"))}>
+            Edit
+          </button>
+        )}
+      </h4>
+      {editing !== null ? (
+        <div className="col">
+          <textarea className="textarea" rows={Math.max(3, items.length + 1)} value={editing} onChange={(e) => setEditing(e.target.value)} aria-label={`${title}, one per line`} />
+          <div className="row">
+            <button
+              className="btn primary sm"
+              onClick={() =>
+                void onSave(
+                  editing
+                    .split("\n")
+                    .map((x) => x.trim())
+                    .filter(Boolean),
+                ).then(() => setEditing(null))
+              }
+            >
+              Save
+            </button>
+            <button className="btn ghost sm" onClick={() => setEditing(null)}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : (
+        <List items={items} />
+      )}
+    </div>
+  );
+}
+
+function Insights({ insights, transcriptId, onChange, setError }: { insights: MeetingInsights; transcriptId: string; onChange: (i: MeetingInsights) => void; setError: (e: string | null) => void }) {
   const email = `Subject: ${insights.followUpEmail.subject}\n\n${insights.followUpEmail.body}`;
+  const [summary, setSummary] = useState<string | null>(null);
+  const save = async (patch: Partial<MeetingInsights>) => {
+    try {
+      onChange(await api.updateNotes(transcriptId, patch));
+      setError(null);
+    } catch (err) {
+      setError(errMsg(err));
+    }
+  };
+  const lists: [ListKey, string, string][] = [
+    ["discussionPoints", "Main discussion points", "Summary"],
+    ["topics", "Topics", "Summary"],
+    ["decisions", "Decisions", "Summary"],
+    ["unansweredQuestions", "Unanswered questions", "Summary"],
+    ["followUpPrep", "Follow-up preparation", "Suggestion"],
+    ["conceptsToRevisit", "Technical concepts to revisit", "Suggestion"],
+  ];
   return (
     <div className="card" style={{ marginBottom: 16 }}>
       <div className="row" style={{ marginBottom: 8 }}>
-        <h3 style={{ margin: 0 }}>Meeting notes</h3>
+        <h3 style={{ margin: 0 }}>Notes</h3>
         {insights.isMock && <span className="badge warning">Mock — not AI generated</span>}
+        {insights.edited && <span className="badge">Edited</span>}
         <span className="small faint">
           {insights.model} · {formatTime(insights.generatedAt)}
         </span>
       </div>
-      <div className="section-label">
-        <span className="label-tag">Summary</span> AI summary of the transcript
+      <div className="notes-section">
+        <h4>
+          <span className="label-tag">Summary</span> Executive summary{" "}
+          {summary === null && (
+            <button className="btn ghost sm" aria-label="Edit summary" onClick={() => setSummary(insights.summary)}>
+              Edit
+            </button>
+          )}
+        </h4>
+        {summary !== null ? (
+          <div className="col">
+            <textarea className="textarea" rows={4} value={summary} onChange={(e) => setSummary(e.target.value)} aria-label="Summary" />
+            <div className="row">
+              <button className="btn primary sm" onClick={() => void save({ summary }).then(() => setSummary(null))}>
+                Save
+              </button>
+              <button className="btn ghost sm" onClick={() => setSummary(null)}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        ) : (
+          <p style={{ margin: 0 }}>{insights.summary}</p>
+        )}
       </div>
-      <p>{insights.summary}</p>
+      {insights.questionsAsked && (
+        <div className="notes-section">
+          <h4>
+            <span className="label-tag">Transcript</span> Questions asked
+          </h4>
+          {insights.questionsAsked.length ? (
+            <ul>
+              {insights.questionsAsked.map((q, i) => (
+                <li key={i}>
+                  {q.question} {q.askedBy ? <span className="faint">— {q.askedBy}</span> : <span className="faint">— speaker uncertain</span>}
+                  {q.answerSummary && <div className="small muted">Answer: {q.answerSummary}</div>}
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <div className="small faint">Nothing identified.</div>
+          )}
+        </div>
+      )}
       <div className="insights-grid">
-        <div>
-          <div className="section-label">
-            <span className="label-tag">Summary</span> Key points
-          </div>
-          <List items={insights.keyPoints} />
-        </div>
-        <div>
-          <div className="section-label">
-            <span className="label-tag">Summary</span> Action items
-          </div>
-          <List items={insights.actionItems.map((a) => (a.owner ? `${a.task} — ${a.owner}` : a.task))} />
-        </div>
-        <div>
-          <div className="section-label">
+        {lists.map(([k, title, tag]) => (
+          <EditableList key={k} title={title} tag={tag} items={insights[k] ?? (k === "discussionPoints" ? insights.keyPoints : [])} onSave={(v) => save({ [k]: v })} />
+        ))}
+        <EditableList
+          title="Action items"
+          tag="Summary"
+          items={insights.actionItems.map((a) => (a.owner ? `${a.task} — ${a.owner}` : a.task))}
+          onSave={(v) => save({ actionItems: v.map((line) => { const [task, owner] = line.split(/\s+—\s+/); return { task: task ?? line, owner: owner ?? null }; }) })}
+        />
+        <div className="notes-section">
+          <h4>
             <span className="label-tag">Suggestion</span> Questions to ask
-          </div>
+          </h4>
           <List items={insights.questionsToAsk} />
-        </div>
-        <div>
-          <div className="section-label">
-            <span className="label-tag">Suggestion</span> Things you could say
-          </div>
-          <List items={insights.suggestedResponses} />
         </div>
       </div>
       <div className="section-label">
@@ -415,6 +522,9 @@ function Insights({ insights }: { insights: MeetingInsights }) {
       <pre className="mono small" style={{ whiteSpace: "pre-wrap", margin: 0, background: "var(--code-bg)", padding: 10, borderRadius: 6, border: "1px solid var(--border)" }}>
         {email}
       </pre>
+      <div className="small faint" style={{ marginTop: 8 }}>
+        Speaker labels come from automatic diarization and can be wrong; Lumen never attributes statements to named people unless the transcript says so.
+      </div>
     </div>
   );
 }

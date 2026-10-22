@@ -1,5 +1,5 @@
 import type { AppEvent } from "../shared/api";
-import { DEFAULT_SHORTCUTS } from "../shared/defaults";
+import { activeModel, DEFAULT_SHORTCUTS, PROVIDER_INFO } from "../shared/defaults";
 import { applySettingsPatch } from "../shared/settingsSchema";
 import type {
   AnswerStyle,
@@ -15,6 +15,7 @@ import type {
   Session,
   SessionAiConfig,
   Settings,
+  Tone,
   TranscriptEvent,
   TranscriptSegment,
 } from "../shared/types";
@@ -22,12 +23,18 @@ import { ChatService, type LiveTranscriptContext } from "./chatService";
 import { ContextEngine, type ContextRecord } from "./context/engine";
 import { addKnowledgeText, importKnowledge } from "./knowledge";
 import { LiveScreen } from "./liveScreen";
-import { generateInsights } from "./meetingService";
+import { generateInsights, notesToMarkdown } from "./meetingService";
+import { CATEGORY_LABELS, classifyQuestion, QuestionDetector, type DetectedQuestion, type QuestionCategory } from "./interview/questions";
+import { parseProblem, problemToContext, type Language, type ParsedProblem } from "./technical/problem";
+import { interviewPrompt, technicalPrompt, type AnswerLength, type TechnicalTask } from "./workflows";
+import { chunkText, normalizeText } from "./context/text";
+import { PROFILE_SECTIONS, type ProfileSection } from "./interview/profile";
 import { Metrics } from "./metrics";
 import type { OcrEngine } from "./ocr";
 import { AnthropicProvider } from "./providers/anthropic";
 import { MockProvider } from "./providers/mock";
 import { OpenAICompatProvider } from "./providers/openaiCompat";
+import { GeminiProvider } from "./providers/gemini";
 import { ProviderError, type AIProvider } from "./providers/types";
 import { toUserError } from "./errors";
 import type { Store } from "./storage/db";
@@ -92,7 +99,16 @@ export function safeEndpoint(url: string | undefined, kind: "http" | "ws"): stri
 export function defaultProviderFactory(kind: Settings["provider"]["kind"], secrets: SecretReader, settings: Settings): AIProvider | null {
   if (kind === "mock") return new MockProvider();
   if (kind === "openai_compat") {
-    return new OpenAICompatProvider({ baseUrl: settings.provider.openaiCompat.baseUrl, model: settings.provider.openaiCompat.model, apiKey: secrets.get("openai_compat") });
+    const c = settings.provider.openaiCompat;
+    return new OpenAICompatProvider({ baseUrl: c.baseUrl, model: c.model, apiKey: secrets.get("openai_compat"), supportsImages: c.supportsImages });
+  }
+  if (kind === "openai") {
+    const key = secrets.get("openai");
+    return key ? new OpenAICompatProvider({ flavor: "openai", baseUrl: "https://api.openai.com/v1", model: settings.provider.openai.model, apiKey: key, supportsImages: true }) : null;
+  }
+  if (kind === "gemini") {
+    const key = secrets.get("gemini");
+    return key ? new GeminiProvider({ apiKey: key, model: settings.provider.gemini.model }) : null;
   }
   const key = secrets.get("anthropic");
   return key ? new AnthropicProvider({ apiKey: key, baseURL: safeEndpoint(process.env.LUMEN_ANTHROPIC_BASE_URL, "http") }) : null;
@@ -196,7 +212,7 @@ export class AppCore {
       this.engine.revoke("systemAudio");
       this.deps.emitApp({ type: "permission-revoked", permission: "systemAudio" });
     }
-    if (prev.provider.kind !== this.settings.provider.kind || prev.provider.model !== this.settings.provider.model || JSON.stringify(prev.provider.openaiCompat) !== JSON.stringify(this.settings.provider.openaiCompat)) {
+    if (prev.provider.kind !== this.settings.provider.kind || prev.provider.model !== this.settings.provider.model || JSON.stringify(prev.provider) !== JSON.stringify(this.settings.provider)) {
       this.health = this.initialHealth();
       this.deps.emitApp({ type: "provider-health", health: this.health });
     }
@@ -244,10 +260,12 @@ export class AppCore {
 
   private initialHealth(): ProviderHealth {
     const kind = this.settings.provider.kind;
-    const model = kind === "openai_compat" ? this.settings.provider.openaiCompat.model : kind === "mock" ? "mock" : this.settings.provider.model;
+    const model = activeModel(this.settings.provider);
     if (kind === "mock" && !this.devModeAllowed) return { kind, model, state: "unconfigured", message: "Development mode is not available in this build. Choose an AI provider.", checkedAt: null, latencyMs: null };
     if (kind === "mock") return { kind, model, state: "mock", message: "Development mode — answers are mock responses, not AI.", checkedAt: null, latencyMs: null };
-    if (kind === "anthropic" && !this.deps.secrets.has("anthropic")) return { kind, model, state: "unconfigured", message: "No Anthropic API key configured.", checkedAt: null, latencyMs: null };
+    if ((kind === "anthropic" || kind === "openai" || kind === "gemini") && !this.deps.secrets.has(kind)) {
+      return { kind, model, state: "unconfigured", message: `No ${PROVIDER_INFO[kind].label} API key configured.`, checkedAt: null, latencyMs: null };
+    }
     return { kind, model, state: "unknown", message: "Not checked yet.", checkedAt: null, latencyMs: null };
   }
 
@@ -263,8 +281,7 @@ export class AppCore {
     const p = this.providerFor();
     this.health = this.initialHealth();
     if (!p) return { ok: false, message: this.health.message, latencyMs: null };
-    const model = this.settings.provider.kind === "openai_compat" ? this.settings.provider.openaiCompat.model : this.settings.provider.model;
-    const res = await p.test(model);
+    const res = await p.test(activeModel(this.settings.provider));
     this.health = {
       ...this.health,
       state: p.isMock ? "mock" : res.ok ? "ok" : /rejected|credentials|key/i.test(res.message) ? "down" : "degraded",
@@ -498,6 +515,171 @@ export class AppCore {
     };
   }
 
+  // ---------------- interview copilot ----------------
+
+  private detector: QuestionDetector | null = null;
+  private detectorTimer: ReturnType<typeof setInterval> | null = null;
+  /** Latest auto-suggestion request; superseded ones are cancelled so only the newest question streams. */
+  private suggestionRequest: string | null = null;
+  private suggestionDone: Promise<void> = Promise.resolve();
+  readonly copilot = { questions: [] as DetectedQuestion[] };
+
+  /** Interview profile (résumé, projects, skills…) lives in the knowledge base as tagged documents. */
+  profileDocs() {
+    return this.deps.store.listKnowledgeDocs(this.activeSessionId).filter((d) => d.format.startsWith("profile:"));
+  }
+
+  saveProfileSection(section: ProfileSection, text: string) {
+    const existing = this.deps.store.listKnowledgeDocs(null).find((d) => d.format === `profile:${section}`);
+    if (existing) this.deps.store.deleteKnowledgeDoc(existing.id);
+    const t = text.trim();
+    if (!t) return null;
+    return this.deps.store.addKnowledgeDoc({ title: PROFILE_SECTIONS[section], source: "profile", chunks: chunkText(normalizeText(t), 1600, 200), sessionId: null, format: `profile:${section}` });
+  }
+
+  profileText(): Record<ProfileSection, string> {
+    const out = Object.fromEntries(Object.keys(PROFILE_SECTIONS).map((k) => [k, ""])) as Record<ProfileSection, string>;
+    for (const d of this.deps.store.listKnowledgeDocs(null)) {
+      const sec = d.format.startsWith("profile:") ? (d.format.slice(8) as ProfileSection) : null;
+      if (sec && sec in out) out[sec] = this.deps.store.docChunks(d.id).join("\n");
+    }
+    return out;
+  }
+
+  /** Start watching the live transcript of the active session for interviewer questions. */
+  private ensureDetector() {
+    if (this.detectorTimer) return;
+    this.detector = new QuestionDetector({ interviewer: this.settings.interview.interviewer, now: this.now });
+    this.detectorTimer = setInterval(() => this.pollQuestions(), 400);
+    (this.detectorTimer as { unref?: () => void }).unref?.();
+  }
+
+  private stopDetector() {
+    if (this.detectorTimer) clearInterval(this.detectorTimer);
+    this.detectorTimer = null;
+    this.detector = null;
+  }
+
+  /** Called for every finalized segment. Interim results never trigger suggestions. */
+  private onSegment(seg: TranscriptSegment) {
+    const session = this.deps.store.getSession(this.live?.workspaceSessionId ?? "");
+    if (!session || session.type !== "interview" || !this.settings.interview.autoSuggest) return;
+    this.ensureDetector();
+    this.detector!.push(seg);
+  }
+
+  /** Exposed for tests: process pending segments now. */
+  pollQuestions(force = false) {
+    const q = this.detector?.poll(force);
+    if (!q || !this.live) return null;
+    if (this.live.workspaceSessionId !== this.activeSessionId) return null; // never answer into another session
+    this.copilot.questions.push(q);
+    if (this.copilot.questions.length > 50) this.copilot.questions.shift();
+    // Newest question wins: cancel an in-flight suggestion for an older question and wait for it
+    // to settle (it holds the conversation lock) before starting the new one.
+    if (this.suggestionRequest) this.chat.cancel(this.suggestionRequest);
+    const requestId = `iq-${q.id}`.slice(0, 100);
+    this.suggestionRequest = requestId;
+    this.deps.emitChat({ type: "suggestion", requestId, question: { id: q.id, text: q.text, category: q.category, categoryLabel: CATEGORY_LABELS[q.category], startMs: q.startMs } });
+    const sid = this.activeSessionId;
+    this.suggestionDone = this.suggestionDone
+      .then(() => {
+        if (this.suggestionRequest !== requestId || this.activeSessionId !== sid) return; // superseded or session changed
+        return this.sendInterview({ requestId, conversationId: this.deps.store.getLastConversation(sid), question: q.text, category: q.category, length: this.settings.interview.length, tone: this.settings.assistant.tone, includeLiveTranscript: true, questionId: q.id });
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (this.suggestionRequest === requestId) this.suggestionRequest = null;
+      });
+    return q;
+  }
+
+  sendInterview(req: {
+    requestId: string;
+    conversationId: string | null;
+    question: string;
+    length: AnswerLength;
+    tone?: Tone;
+    category?: QuestionCategory;
+    includeLiveTranscript?: boolean;
+    questionId?: string;
+    text?: string;
+    style?: AnswerStyle;
+  }) {
+    const q = req.question.trim();
+    const category = req.category ?? classifyQuestion(q).category;
+    return this.send({
+      requestId: req.requestId,
+      conversationId: req.conversationId,
+      text: interviewPrompt({ text: q, category }, req.length),
+      displayText: q,
+      retrievalQuery: q,
+      taskInstruction: "Task: interview answer suggestion. Follow the layout in the user's request exactly. Personal facts must come from the user's profile, résumé or notes in context, with citations.",
+      origin: { kind: "interview", label: CATEGORY_LABELS[category], questionId: req.questionId },
+      style: "suggest",
+      tone: req.tone ?? this.settings.assistant.tone,
+      includeLiveTranscript: req.includeLiveTranscript ?? true,
+    });
+  }
+
+  // ---------------- technical assessment ----------------
+
+  /** Parse a problem from pasted text plus any OCR text from this session's screen captures. */
+  analyzeProblem(text: string): ParsedProblem {
+    let source = text;
+    if (!source.trim()) {
+      const ocr = this.engine
+        .active(this.activeSessionId)
+        .filter((r) => (r.source === "screenshot" || r.source === "ocr") && r.text.trim())
+        .sort((a, b) => b.createdAt - a.createdAt)[0];
+      source = ocr?.text ?? "";
+    }
+    return parseProblem(source);
+  }
+
+  sendTechnical(req: { requestId: string; conversationId: string | null; text: string; task: TechnicalTask; language: Language; problem?: string; tone?: Tone; includeLiveTranscript?: boolean; style?: AnswerStyle }) {
+    const parsed = req.problem?.trim() ? parseProblem(req.problem) : this.analyzeProblem("");
+    const sid = this.activeSessionId;
+    // The problem statement becomes explicit, session-scoped context (deduped if unchanged), so
+    // follow-ups and spoken clarifications are combined with it by the normal pipeline.
+    if (req.problem?.trim()) {
+      this.engine.ingest({ sessionId: sid, source: "user_message", sourceId: "technical-problem", title: parsed.title ? `Problem: ${parsed.title}` : "Problem statement", text: `${problemToContext(parsed)}`, pinned: true });
+    }
+    const label = { solve: "Solve", explain: "Explain code", debug: "Debug", review: "Code review", tests: "Test cases", complexity: "Complexity", refactor: "Refactor", hints: "Hints (practice)" }[req.task];
+    return this.send({
+      requestId: req.requestId,
+      conversationId: req.conversationId,
+      text: technicalPrompt(req.task, req.language, req.problem?.trim() || parsed.statement ? parsed : null, req.text),
+      retrievalQuery: `${req.text} ${parsed.title ?? ""} ${parsed.statement.slice(0, 400)}`,
+      displayText: req.text.trim() || `${label}${parsed.title ? ` — ${parsed.title}` : ""} (${req.language})`,
+      taskInstruction: `Task: technical assessment assistance (${req.task}). Follow the requested structure and language conventions exactly. Code goes in fenced blocks. Do not claim to have executed code.`,
+      origin: { kind: "technical", label },
+      style: req.task === "solve" ? "steps" : "technical",
+      tone: req.tone ?? "neutral",
+      includeLiveTranscript: req.includeLiveTranscript ?? true,
+    });
+  }
+
+  // ---------------- notes ----------------
+
+  updateNotes(transcriptId: string, patch: Partial<MeetingInsights>) {
+    const t = this.deps.store.getTranscriptSession(transcriptId);
+    if (!t || t.sessionId !== this.activeSessionId) throw new Error("That transcript belongs to another session.");
+    const cur = this.deps.store.getInsights<MeetingInsights>(transcriptId);
+    if (!cur) throw new Error("There are no notes to edit yet.");
+    const next = { ...cur, ...patch, sessionId: cur.sessionId, generatedAt: cur.generatedAt, model: cur.model, isMock: cur.isMock, edited: true };
+    this.deps.store.updateInsights(transcriptId, next);
+    return next;
+  }
+
+  exportNotes(transcriptId: string, includeTranscript: boolean): { filename: string; markdown: string } {
+    const t = this.deps.store.getTranscriptSession(transcriptId);
+    if (!t || t.sessionId !== this.activeSessionId) throw new Error("That transcript belongs to another session.");
+    const session = this.deps.store.getSession(t.sessionId);
+    const md = notesToMarkdown({ title: t.title, startedAt: t.startedAt, endedAt: t.endedAt, sessionTitle: session?.title }, this.deps.store.getInsights<MeetingInsights>(transcriptId), this.deps.store.listSegments(transcriptId), { includeTranscript });
+    return { filename: `${t.title.replace(/[^\w-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60) || "notes"}.md`, markdown: md };
+  }
+
   // ---------------- chat ----------------
 
   async send(req: Omit<ChatSendRequest, "sessionId"> & { sessionId?: string }) {
@@ -541,7 +723,15 @@ export class AppCore {
     this.live = new TranscriptSession(
       provider,
       this.deps.store,
-      (e) => this.deps.emitTranscript(e),
+      (e) => {
+        this.deps.emitTranscript(e);
+        if (e.type === "segment") this.onSegment(e.segment);
+        if (e.type === "status" && (e.status === "stopped" || e.status === "error")) {
+          // Flush a question that was still inside its debounce window when recording ended.
+          this.pollQuestions(true);
+          this.stopDetector();
+        }
+      },
       {
         workspaceSessionId: sessionId,
         language: this.settings.transcription.language,

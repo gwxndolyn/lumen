@@ -51,6 +51,19 @@ export type AppEvent =
   | { type: "audio-command"; command: "start" | "stop" | "system-off"; micDeviceId: string | null; systemAudio: boolean }
   | { type: "toast"; level: "info" | "error"; message: string };
 
+export interface ParsedProblemView {
+  title: string | null;
+  statement: string;
+  constraints: string[];
+  examples: { input: string; output: string; explanation: string | null }[];
+  detectedLanguage: string | null;
+  kind: string;
+  complexityHint: string | null;
+  missing: string[];
+  looksTruncated: boolean;
+  source: "text" | "screen" | "none";
+}
+
 export interface CapturePreview {
   captureId: string;
   previewDataUrl: string;
@@ -93,7 +106,19 @@ export interface LumenApi {
   deleteSession(id: string): Promise<void>;
   exportSession(id: string): Promise<string | null>;
 
-  chatSend(req: Omit<ChatSendRequest, "sessionId"> & { sessionId?: string }): Promise<void>;
+  chatSend(
+    req: Omit<ChatSendRequest, "sessionId" | "taskInstruction" | "displayText" | "origin" | "retrievalQuery"> & {
+      mode?:
+        | { kind: "technical"; task: "solve" | "explain" | "debug" | "review" | "tests" | "complexity" | "refactor" | "hints"; language: string; problem?: string }
+        | { kind: "interview"; question: string; length: "short" | "medium" | "detailed" };
+    },
+  ): Promise<void>;
+  analyzeProblem(text: string): Promise<ParsedProblemView>;
+  getProfile(): Promise<Record<string, string>>;
+  saveProfile(section: string, text: string): Promise<Record<string, string>>;
+  interviewQuestions(): Promise<{ id: string; text: string; category: string; categoryLabel: string; startMs: number }[]>;
+  updateNotes(transcriptId: string, patch: Partial<MeetingInsights>): Promise<MeetingInsights>;
+  exportNotes(transcriptId: string, includeTranscript: boolean): Promise<string | null>;
   chatCancel(requestId: string): Promise<boolean>;
   listConversations(sessionId?: string): Promise<Conversation[]>;
   openConversation(): Promise<string | null>;

@@ -496,6 +496,11 @@ export class Store {
       .run(transcriptId, JSON.stringify(data), Date.now());
   }
 
+  /** Replace stored notes after a user edit (kept separate from generation). */
+  updateInsights(transcriptId: string, data: unknown): boolean {
+    return Number(this.db.prepare("UPDATE meeting_insights SET data = ? WHERE session_id = ?").run(JSON.stringify(data), transcriptId).changes) > 0;
+  }
+
   getInsights<T>(transcriptId: string): T | null {
     const r = this.db.prepare("SELECT data FROM meeting_insights WHERE session_id = ?").get(transcriptId) as Row | undefined;
     return r ? (JSON.parse(String(r.data)) as T) : null;
