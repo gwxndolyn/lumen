@@ -1,4 +1,4 @@
-import type { ChatEvent, ChatSendRequest, ErrorCode, Session, Settings } from "../shared/types";
+import type { ChatEvent, ChatMessage, ChatSendRequest, ErrorCode, Session, Settings } from "../shared/types";
 import { citedLabels, type ContextEngine } from "./context/engine";
 import { buildPrompt } from "./context/promptBuilder";
 import type { Candidate } from "./context/ranker";
@@ -10,6 +10,7 @@ import { toUserError } from "./errors";
 import { activeModel } from "../shared/defaults";
 import { CancelledError, ProviderError, type AIProvider, type GenerateUsage, type ProviderMessage } from "./providers/types";
 import type { Store } from "./storage/db";
+import { planResponse, type ResponsePlan } from "./intelligence/orchestrator";
 
 export interface LiveTranscriptContext {
   transcriptId: string;
@@ -39,7 +40,6 @@ export interface ChatDeps {
   log?: (level: "info" | "warn" | "error" | "debug", msg: string, data?: Record<string, unknown>) => void;
 }
 
-const HISTORY_TURNS = 12;
 const HISTORY_CHARS = 24_000;
 const RECENT_REQUEST_IDS = 500;
 
@@ -91,6 +91,8 @@ export class ChatService {
     let conversationId = req.conversationId;
     let model = settings.provider.model;
     let contextPrepMs = 0;
+    let pendingWaitMs = 0;
+    let requestSentMs: number | undefined;
 
     const fail = (pe: ProviderError) => {
       emit({ type: "error", requestId: req.requestId, message: pe.message, code: pe.code, retryable: pe.retryable || pe.code === "refusal", conversationId });
@@ -147,8 +149,30 @@ export class ChatService {
       const convId = conversationId!;
       this.inflight.get(req.requestId)!.conversationId = convId;
 
+      const waitStart = performance.now();
       await this.deps.awaitPending?.(session.id);
+      pendingWaitMs = Math.round(performance.now() - waitStart);
       if (ctrl.signal.aborted) throw new CancelledError();
+
+      // ---- understand the turn (deterministic; never blocks chat) ----
+      const priorMessages = store.listMessages(convId).filter((m) => m.id !== userMessageId);
+      const screenItems = context.active(session.id).filter((r) => r.source === "screenshot" || r.source === "ocr" || r.source === "selected_text" || r.source === "clipboard");
+      let plan: ResponsePlan | null = null;
+      try {
+        plan = planResponse({
+          question,
+          history: priorMessages,
+          settings,
+          sessionType: session.type,
+          style: session.ai.style ?? req.style,
+          depth: req.depth,
+          hasScreen: screenItems.some((r) => r.source === "screenshot" || r.source === "ocr"),
+          codeInContext: screenItems.some((r) => /```|[{};]\s*$|\b(def|function|class|return|public|SELECT)\b/m.test(r.text)),
+          hasWorkflow: !!req.taskInstruction,
+        });
+      } catch (planErr) {
+        this.deps.log?.("warn", "response planning failed; answering without a strategy", { error: (planErr as Error)?.name ?? "Error" });
+      }
 
       // ---- gather candidates (all strictly scoped to this session) ----
       const extra: Candidate[] = [];
@@ -159,7 +183,15 @@ export class ChatService {
       if (live && live.sessionId === session.id && live.text.trim()) {
         extra.push({ id: `transcript:${live.transcriptId}`, kind: "transcript", title: `Live transcript — ${live.title}`, text: live.text, createdAt: Date.now(), explicit: true, sourceId: live.transcriptId });
       }
-      const query = req.retrievalQuery?.trim() || question;
+      // Long conversation: turns older than the history window become a compact digest so a
+      // follow-up can still refer back to them. New topics don't get it (it would be noise).
+      const usable = priorMessages.filter((m) => !m.meta.cancelled && !m.meta.interrupted && m.content.trim());
+      const windowSize = plan?.historyMessages ?? 12;
+      if (plan && plan.turn.relation !== "new" && usable.length > windowSize) {
+        const digest = conversationDigest(usable.slice(0, -windowSize));
+        if (digest) extra.push({ id: `digest:${convId}`, kind: "history", title: "Earlier in this conversation", text: digest, createdAt: usable[0]!.createdAt, explicit: true, sourceId: convId });
+      }
+      const query = req.retrievalQuery?.trim() || (plan && plan.turn.relation !== "new" ? plan.turn.retrievalQuery : question);
       if (settings.assistant.useKnowledgeBase) {
         for (const k of store.searchKnowledge(query, session.id)) {
           extra.push({ id: `kb:${k.chunkId}`, kind: "knowledge", title: k.title, text: k.text, createdAt: 0, sourceId: k.docId, retrieved: true });
@@ -185,13 +217,18 @@ export class ChatService {
       });
       // Mode-specific task instructions are trusted (built by Lumen, never from captured content)
       // and go in the system blocks, after the cached policy.
+      if (plan) built.systemBlocks.push({ text: plan.preferences, cache: false });
       if (req.taskInstruction) built.systemBlocks.push({ text: req.taskInstruction, cache: false });
+      if (plan) built.systemBlocks.push({ text: plan.strategy.instruction, cache: false });
+      const intent = plan
+        ? { relation: plan.turn.relation, category: plan.task.category, depth: plan.strategy.depth, label: plan.strategy.label, ambiguous: plan.turn.ambiguous || undefined }
+        : { relation: "new" as const, category: "general", depth: settings.personalization.depth, label: "General" };
 
       // ---- multi-turn history (text only, bounded) ----
-      const history = store.listMessages(convId).filter((m) => !m.meta.cancelled && m.id !== userMessageId && m.content.trim());
+      // Follow-ups get the conversation; a new topic keeps only the last exchange.
       const turns: ProviderMessage[] = [];
       let chars = 0;
-      for (const m of history.slice(-HISTORY_TURNS).reverse()) {
+      for (const m of usable.slice(-windowSize).reverse()) {
         chars += m.content.length;
         if (chars > HISTORY_CHARS) break;
         turns.unshift({ role: m.role, content: settings.privacy.redactSensitive ? redact(m.content) : m.content });
@@ -220,8 +257,10 @@ export class ChatService {
         warnings: built.warnings,
         availability: prepared.availability,
         contextPrepMs,
+        intent,
       });
 
+      requestSentMs = Date.now() - started;
       const result = await provider.generate(
         {
           model: activeModel(settings.provider, session.ai.model),
@@ -258,7 +297,7 @@ export class ChatService {
         role: "assistant",
         content: result.text,
         references: built.references.filter((r) => cited.includes(r.label)),
-        meta: { model: result.model, isMock: provider.isMock, estimatedCostUsd: cost, stopReason: result.stopReason, style, ttftMs: result.ttftMs, totalMs },
+        meta: { model: result.model, isMock: provider.isMock, estimatedCostUsd: cost, stopReason: result.stopReason, style, ttftMs: result.ttftMs, totalMs, intent },
       });
       metrics.recordRequest({
         at: started,
@@ -266,6 +305,8 @@ export class ChatService {
         ttftMs: result.ttftMs,
         totalMs,
         contextPrepMs,
+        pendingWaitMs,
+        requestSentMs,
         retries: result.retries,
         inputTokens: result.usage.inputTokens,
         outputTokens: result.usage.outputTokens,
@@ -295,13 +336,21 @@ export class ChatService {
         } catch (saveErr) {
           this.deps.log?.("warn", "could not save stopped answer", { code: toUserError(saveErr).code });
         }
-        metrics.recordRequest({ at: started, model, ttftMs: null, totalMs, contextPrepMs, retries: 0, inputTokens: 0, outputTokens: 0, estimatedCostUsd: 0, outcome: "cancelled" });
+        metrics.recordRequest({ at: started, model, ttftMs: null, totalMs, contextPrepMs, pendingWaitMs, requestSentMs, retries: 0, inputTokens: 0, outputTokens: 0, estimatedCostUsd: 0, outcome: "cancelled" });
         emit({ type: "cancelled", requestId: req.requestId, partialMessageId });
         return;
       }
       const pe = toUserError(err);
+      // Keep what already streamed so a network drop late in a long answer doesn't lose it.
+      if (partial.trim() && conversationId) {
+        try {
+          if (store.getConversation(conversationId)) store.addMessage({ conversationId, role: "assistant", content: partial, references: [], meta: { model, interrupted: true, stopReason: pe.code } });
+        } catch (saveErr) {
+          this.deps.log?.("warn", "could not save interrupted answer", { code: toUserError(saveErr).code });
+        }
+      }
       this.deps.log?.("warn", "chat request failed", { code: pe.code, message: pe.message, cause: err instanceof ProviderError ? undefined : String((err as Error)?.name ?? "error") });
-      metrics.recordRequest({ at: started, model, ttftMs: null, totalMs, contextPrepMs, retries: 0, inputTokens: 0, outputTokens: 0, estimatedCostUsd: 0, outcome: "error", errorCode: pe.code });
+      metrics.recordRequest({ at: started, model, ttftMs: null, totalMs, contextPrepMs, pendingWaitMs, requestSentMs, retries: 0, inputTokens: 0, outputTokens: 0, estimatedCostUsd: 0, outcome: "error", errorCode: pe.code });
       if (["network", "timeout", "overloaded", "auth", "rate_limited"].includes(pe.code)) this.deps.onProviderResult?.(false, pe.code, pe.message);
       fail(pe);
     } finally {
@@ -318,5 +367,25 @@ function mergeConsecutive(turns: ProviderMessage[]): ProviderMessage[] {
       prev.content = `${prev.content}\n\n${t.content}`;
     } else out.push({ ...t });
   }
+  return out;
+}
+
+/**
+ * Deterministic digest of earlier turns: each question with the first line of its answer and the
+ * language of any code. Bounded so a very long conversation stays cheap to send.
+ */
+export function conversationDigest(messages: ChatMessage[], maxChars = 3000): string {
+  const lines: string[] = [];
+  for (let i = 0; i < messages.length; i++) {
+    const m = messages[i]!;
+    if (m.role !== "user") continue;
+    const a = messages[i + 1]?.role === "assistant" ? messages[i + 1]! : null;
+    const firstLine = a ? (a.content.split("\n").find((l) => l.trim() && !l.startsWith("```")) ?? "").trim() : "";
+    const lang = a ? /```([\w+#-]+)/.exec(a.content)?.[1] : undefined;
+    lines.push(`- Q: ${truncate(m.content.replace(/\s+/g, " "), 200)}${a ? `\n  A: ${truncate(firstLine, 200)}${lang ? ` (included ${lang} code)` : ""}` : ""}`);
+  }
+  let out = lines.join("\n");
+  // Keep the most recent part when over budget.
+  if (out.length > maxChars) out = `…\n${out.slice(out.length - maxChars)}`;
   return out;
 }

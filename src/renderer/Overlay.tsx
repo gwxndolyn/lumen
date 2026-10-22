@@ -167,6 +167,9 @@ export function Overlay() {
         e.preventDefault();
         const last = chat.messages.findLast((m) => m.role === "assistant" && m.content);
         if (last) copy(last.content);
+      } else if (e.altKey && e.shiftKey && /^Digit[1-3]$/.test(e.code)) {
+        e.preventDefault();
+        void update({ personalization: { depth: (["quick", "balanced", "deep"] as const)[Number(e.code.slice(5)) - 1]! } });
       } else if (e.altKey && /^[1-7]$/.test(e.key)) {
         e.preventDefault();
         const s = QUICK_STYLES[Number(e.key) - 1]!;
@@ -320,6 +323,7 @@ export function Overlay() {
                 <span>Esc stop/hide</span>
                 <span>⌘E expand</span>
                 <span>⌥1–7 answer style</span>
+                <span>⌥⇧1–3 depth</span>
                 <span>⌘⇧C copy last answer</span>
               </div>
             </div>
@@ -364,6 +368,12 @@ export function Overlay() {
               }}
             >
               {STYLE_LABELS[s].replace(" explanation", "").replace("Step-by-step", "Steps")}
+            </button>
+          ))}
+          <span className="faint small" style={{ margin: "0 2px 0 6px" }}>Depth</span>
+          {(["quick", "balanced", "deep"] as const).map((d, i) => (
+            <button key={d} aria-pressed={settings.personalization.depth === d} title={`Answer depth: ${d} (⌥⇧${i + 1})`} onClick={() => void update({ personalization: { depth: d } })}>
+              {d[0]!.toUpperCase() + d.slice(1)}
             </button>
           ))}
         </div>

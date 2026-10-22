@@ -158,7 +158,7 @@ export function InterviewScreen({ settings, update, live, go }: { settings: Sett
                     <div className="label">Suggest answers automatically</div>
                     <div className="hint">Only for complete questions; repeats and small talk are ignored.</div>
                   </div>
-                  <Switch label="Suggest automatically" checked={settings.interview.autoSuggest} onChange={(v) => void update({ interview: { autoSuggest: v } })} />
+                  <Switch label="Suggest automatically" checked={settings.questions.policy === "assisted"} onChange={(v) => void update({ questions: { policy: v ? "assisted" : "manual" } })} />
                 </div>
                 <div className="col" style={{ gap: 4, paddingTop: 10 }}>
                   <div className="label">Interviewer is</div>

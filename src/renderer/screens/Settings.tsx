@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { MODE_LABELS, STYLE_LABELS } from "../../shared/defaults";
+import { DEFAULT_SETTINGS, MODE_LABELS, STYLE_LABELS } from "../../shared/defaults";
 import type { Settings } from "../../shared/types";
 import { api } from "../lib/api";
 import { listMicrophones } from "../lib/audio";
@@ -185,8 +185,175 @@ export function SettingsScreen({ settings, update }: Props) {
               onChange={(v) => void update({ transcription: { captureSystemAudio: v } })}
             />
           </div>
+          <VocabularyField value={s.transcription.vocabulary} onSave={(v) => update({ transcription: { vocabulary: v } })} />
         </div>
+
+        <PersonalizationCard settings={s} update={update} />
       </div>
     </>
+  );
+}
+
+const LANGUAGE_OPTIONS = [
+  ["python", "Python"],
+  ["java", "Java"],
+  ["javascript", "JavaScript"],
+  ["typescript", "TypeScript"],
+  ["cpp", "C++"],
+  ["sql", "SQL"],
+  ["go", "Go"],
+  ["csharp", "C#"],
+  ["kotlin", "Kotlin"],
+  ["rust", "Rust"],
+] as const;
+
+function VocabularyField({ value, onSave }: { value: string[]; onSave: (v: string[]) => Promise<void> }) {
+  const [draft, setDraft] = useState(value.join(", "));
+  useEffect(() => setDraft(value.join(", ")), [value]);
+  const parsed = [...new Set(draft.split(/[,\n]/).map((t) => t.trim()).filter(Boolean))];
+  const tooLong = parsed.find((t) => t.length > 60);
+  const dirty = parsed.join("|") !== value.join("|");
+  return (
+    <div className="field" style={{ alignItems: "flex-start" }}>
+      <div>
+        <label htmlFor="vocab">Technical vocabulary</label>
+        <div className="hint">
+          Comma-separated terms the recognizer should expect, e.g. Kubernetes, PostgreSQL, useEffect. Sent to Deepgram as keyterms with each recording; transcripts are never rewritten afterwards. Up to 100 terms.
+        </div>
+      </div>
+      <div className="col" style={{ gap: 4, minWidth: 260 }}>
+        <textarea id="vocab" className="textarea" rows={2} value={draft} onChange={(e) => setDraft(e.target.value)} />
+        {tooLong && <div className="small" style={{ color: "var(--danger)" }}>“{tooLong.slice(0, 20)}…” is longer than 60 characters.</div>}
+        {parsed.length > 100 && <div className="small" style={{ color: "var(--danger)" }}>At most 100 terms.</div>}
+        <div>
+          <button className="btn sm" disabled={!dirty || !!tooLong || parsed.length > 100} onClick={() => void onSave(parsed)}>
+            Save vocabulary
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PersonalizationCard({ settings: s, update }: Props) {
+  const p = s.personalization;
+  return (
+    <div className="card">
+      <div className="row">
+        <h3 style={{ margin: 0 }}>Answers</h3>
+        <span className="spacer" />
+        <button
+          className="btn ghost sm"
+          title="Restore the default answer preferences"
+          onClick={() =>
+            void update({
+              personalization: DEFAULT_SETTINGS.personalization,
+              technical: { language: DEFAULT_SETTINGS.technical.language, level: DEFAULT_SETTINGS.technical.level },
+              questions: DEFAULT_SETTINGS.questions,
+            })
+          }
+        >
+          Restore defaults
+        </button>
+      </div>
+      <div className="field">
+        <div>
+          <div className="label">Answer depth</div>
+          <div className="hint">Quick: direct answer first. Balanced: answer, key reasoning and a caveat. Deep: alternatives, edge cases and verification. Also switchable in the panel (⌥⇧1–3).</div>
+        </div>
+        <Segmented
+          label="Answer depth"
+          value={p.depth}
+          options={[
+            { value: "quick", label: "Quick" },
+            { value: "balanced", label: "Balanced" },
+            { value: "deep", label: "Deep" },
+          ]}
+          onChange={(v) => void update({ personalization: { depth: v } })}
+        />
+      </div>
+      <div className="field">
+        <label htmlFor="pref-lang">Preferred programming language</label>
+        <select id="pref-lang" className="select" value={s.technical.language} onChange={(e) => void update({ technical: { language: e.target.value } })}>
+          {LANGUAGE_OPTIONS.map(([v, l]) => (
+            <option key={v} value={v}>
+              {l}
+            </option>
+          ))}
+        </select>
+      </div>
+      <div className="field" style={{ alignItems: "flex-start" }}>
+        <div>
+          <div className="label">Also comfortable with</div>
+          <div className="hint">Mentioned to the model so it can draw comparisons. Answers still use the preferred language unless you ask for another.</div>
+        </div>
+        <div className="row" style={{ flexWrap: "wrap", gap: 4, maxWidth: 320 }}>
+          {LANGUAGE_OPTIONS.filter(([v]) => v !== s.technical.language).map(([v, l]) => {
+            const on = p.alsoKnows.includes(v);
+            return (
+              <button
+                key={v}
+                className={`btn sm ${on ? "primary" : ""}`}
+                aria-pressed={on}
+                onClick={() => void update({ personalization: { alsoKnows: on ? p.alsoKnows.filter((x) => x !== v) : [...p.alsoKnows, v] } })}
+              >
+                {l}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+      <div className="field">
+        <div className="label">Experience level</div>
+        <Segmented
+          label="Experience level"
+          value={s.technical.level}
+          options={[
+            { value: "junior", label: "Junior" },
+            { value: "mid", label: "Mid" },
+            { value: "senior", label: "Senior" },
+          ]}
+          onChange={(v) => void update({ technical: { level: v } })}
+        />
+      </div>
+      <div className="field">
+        <div className="label">Code style</div>
+        <Segmented
+          label="Code style"
+          value={p.codeStyle}
+          options={[
+            { value: "idiomatic", label: "Idiomatic" },
+            { value: "commented", label: "Commented" },
+            { value: "compact", label: "Compact" },
+          ]}
+          onChange={(v) => void update({ personalization: { codeStyle: v } })}
+        />
+      </div>
+      <div className="field">
+        <div>
+          <div className="label">Hints before solutions</div>
+          <div className="hint">For new algorithm questions, give progressive hints first and offer the full solution after. Asking for “the solution” or “code” overrides this.</div>
+        </div>
+        <Switch label="Hints before solutions" checked={p.hintsFirst} onChange={(v) => void update({ personalization: { hintsFirst: v } })} />
+      </div>
+      <div className="field">
+        <div className="label">Include complexity analysis</div>
+        <Switch label="Include complexity analysis" checked={p.includeComplexity} onChange={(v) => void update({ personalization: { includeComplexity: v } })} />
+      </div>
+      <div className="field">
+        <div>
+          <div className="label">Include test cases</div>
+          <div className="hint">Lumen never runs code; test cases show expected (not executed) outputs.</div>
+        </div>
+        <Switch label="Include test cases" checked={p.includeTests} onChange={(v) => void update({ personalization: { includeTests: v } })} />
+      </div>
+      <div className="field">
+        <div>
+          <div className="label">Suggest answers to detected questions</div>
+          <div className="hint">In interview-practice sessions with a live transcript, draft a suggested answer when a complete question is detected. Off: Lumen only answers what you ask.</div>
+        </div>
+        <Switch label="Suggest answers to detected questions" checked={s.questions.policy === "assisted"} onChange={(v) => void update({ questions: { policy: v ? "assisted" : "manual" } })} />
+      </div>
+    </div>
   );
 }

@@ -50,6 +50,8 @@ export interface Settings {
     captureSystemAudio: boolean;
     /** When false, transcripts are kept in memory only and discarded when recording stops. */
     persist: boolean;
+    /** Technical terms to boost in recognition (Deepgram keyterm prompting). */
+    vocabulary: string[];
   };
   assistant: {
     mode: AssistantMode;
@@ -58,9 +60,24 @@ export interface Settings {
     useKnowledgeBase: boolean;
     useConversationHistory: boolean;
   };
+  /** How Lumen reacts to questions detected in the live transcript. */
+  questions: {
+    /**
+     * manual: Lumen only answers what the user submits.
+     * assisted: in interview-practice sessions, a detected question gets a suggested answer.
+     */
+    policy: "manual" | "assisted";
+  };
+  /** Applied to every answer through the response orchestrator (stated once in the system prompt). */
+  personalization: {
+    depth: "quick" | "balanced" | "deep";
+    alsoKnows: ("python" | "java" | "javascript" | "typescript" | "cpp" | "sql" | "go" | "csharp" | "kotlin" | "rust")[];
+    codeStyle: "idiomatic" | "commented" | "compact";
+    hintsFirst: boolean;
+    includeComplexity: boolean;
+    includeTests: boolean;
+  };
   interview: {
-    /** Detect interviewer questions in the live transcript and draft an answer automatically. */
-    autoSuggest: boolean;
     length: "short" | "medium" | "detailed";
     /** Whose speech counts as the interviewer: system-audio channel, or anyone except "You". */
     interviewer: "remote" | "any";
@@ -222,6 +239,8 @@ export interface ChatSendRequest {
   includeLiveTranscript: boolean;
   /** When set, re-generates the reply to the last user message instead of adding a new one. */
   retryOfMessageId?: string;
+  /** Overrides the preferred answer depth for this request. */
+  depth?: "quick" | "balanced" | "deep";
 }
 
 export interface UsageInfo {
@@ -243,6 +262,7 @@ export type ChatEvent =
       warnings: string[];
       availability: SourceAvailability;
       contextPrepMs: number;
+      intent: ResponseIntent;
     }
   | { type: "delta"; requestId: string; text: string }
   | { type: "suggestion"; requestId: string; question: { id: string; text: string; category: string; categoryLabel: string; startMs: number } }
@@ -303,11 +323,23 @@ export interface MessageMeta {
   estimatedCostUsd?: number;
   stopReason?: string;
   cancelled?: boolean;
+  /** The stream failed after some text arrived; the partial text was kept. Excluded from history. */
+  interrupted?: boolean;
   attachments?: string[];
   style?: AnswerStyle;
   origin?: { kind: "interview" | "technical" | "notes"; label: string; questionId?: string };
   ttftMs?: number | null;
   totalMs?: number;
+  /** How the response orchestrator understood this turn (deterministic, not a model judgement). */
+  intent?: ResponseIntent;
+}
+
+export interface ResponseIntent {
+  relation: "new" | "follow_up" | "elaborate" | "simplify" | "correction" | "screen" | "revise_code";
+  category: string;
+  depth: "quick" | "balanced" | "deep";
+  label: string;
+  ambiguous?: boolean;
 }
 
 export interface ChatMessage {
@@ -490,6 +522,10 @@ export interface RequestMetric {
   ttftMs: number | null;
   totalMs: number;
   contextPrepMs: number;
+  /** Time spent waiting for in-progress OCR before the request could be built. */
+  pendingWaitMs?: number;
+  /** Input received → provider request sent (everything Lumen does locally). */
+  requestSentMs?: number;
   retries: number;
   inputTokens: number;
   outputTokens: number;
@@ -521,6 +557,8 @@ export interface Diagnostics {
     p95TtftMs: number | null;
     p50TotalMs: number | null;
     p50ContextPrepMs: number | null;
+    p50RequestSentMs: number | null;
+    p50PendingWaitMs: number | null;
     errorRate: number | null;
     totalRetries: number;
     failuresByCode: Record<string, number>;
@@ -536,6 +574,8 @@ export interface ProviderTestResult {
   ok: boolean;
   message: string;
   latencyMs: number | null;
+  /** Why the test failed — lets the UI distinguish a bad key from a network problem or an outage. */
+  code?: ErrorCode | "model_unavailable";
 }
 
 export type WindowRole = "overlay" | "main";

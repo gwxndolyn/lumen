@@ -366,6 +366,7 @@ function registerIpc() {
     tone: toneEnum,
     includeLiveTranscript: z.boolean(),
     retryOfMessageId: id.optional(),
+    depth: z.enum(["quick", "balanced", "deep"]).optional(),
     // Mode prompts are rebuilt in the main process from structured fields; free-form instructions
     // from the renderer are not accepted.
     mode: z

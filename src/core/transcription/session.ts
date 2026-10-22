@@ -11,6 +11,7 @@ export interface SessionOptions {
   title: string;
   /** 1 = mic only; 2 = interleaved [mic, system audio]. */
   channels?: 1 | 2;
+  vocabulary?: string[];
   /** When false, segments live in memory only and are discarded on stop. */
   persist?: boolean;
   /** Max bytes of audio buffered while reconnecting (~30 s at 16 kHz mono 16-bit). */
@@ -59,6 +60,7 @@ export class TranscriptSession {
     this.opts = {
       channels: 1,
       persist: true,
+      vocabulary: [],
       maxBufferBytes: 16_000 * 2 * 30,
       maxReconnects: 6,
       setTimer: (fn, ms) => setTimeout(fn, ms),
@@ -94,7 +96,7 @@ export class TranscriptSession {
     this.setStatus(this.reconnects ? "reconnecting" : "connecting", this.reconnects ? "Reconnecting to the transcription service…" : undefined);
     this.streamOffsetMs = this.opts.now() - this.startedAt - this.bufferedMs();
     this.stream = this.provider.open(
-      { language: this.opts.language, diarize: this.opts.diarize, channels: this.opts.channels },
+      { language: this.opts.language, diarize: this.opts.diarize, channels: this.opts.channels, vocabulary: this.opts.vocabulary },
       {
         onOpen: () => {
           this.reconnects = 0;

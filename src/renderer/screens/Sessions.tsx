@@ -114,7 +114,21 @@ export function SessionsScreen() {
   const [creating, setCreating] = useState(false);
   const [editing, setEditing] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
+  const [sort, setSort] = useState<"updated" | "created" | "title">("updated");
+  /** Sessions whose conversations or transcripts contain the query (full-text, all sessions). */
+  const [contentMatches, setContentMatches] = useState<Set<string>>(new Set());
   const load = () => void api.listSessions().then(setSessions);
+  useEffect(() => {
+    const q = query.trim();
+    if (q.length < 2) return setContentMatches(new Set());
+    const t = setTimeout(() => void api.search(q, "all").then((hits) => setContentMatches(new Set(hits.map((h) => h.sessionId)))), 180);
+    return () => clearTimeout(t);
+  }, [query]);
+  const q = query.trim().toLowerCase();
+  const visible = (sessions ?? [])
+    .filter((s) => !q || s.title.toLowerCase().includes(q) || s.notes.toLowerCase().includes(q) || contentMatches.has(s.id))
+    .sort((a, b) => (sort === "title" ? a.title.localeCompare(b.title) : sort === "created" ? b.createdAt - a.createdAt : b.updatedAt - a.updatedAt));
   useEffect(load, []);
   useAppEvent((e) => (e.type === "sessions-changed" || e.type === "session-switched") && load());
 
@@ -148,14 +162,30 @@ export function SessionsScreen() {
             />
           </div>
         )}
+        {sessions && sessions.length > 1 && (
+          <div className="row" style={{ marginBottom: 12 }}>
+            <input className="input" type="search" style={{ maxWidth: 340 }} placeholder="Search titles, notes, conversations and transcripts…" aria-label="Search sessions" value={query} onChange={(e) => setQuery(e.target.value)} />
+            <span className="spacer" />
+            <label className="small muted" htmlFor="s-sort">
+              Sort
+            </label>
+            <select id="s-sort" className="select" style={{ width: 160 }} value={sort} onChange={(e) => setSort(e.target.value as typeof sort)}>
+              <option value="updated">Last used</option>
+              <option value="created">Date created</option>
+              <option value="title">Title</option>
+            </select>
+          </div>
+        )}
         {sessions === null ? (
           <div className="row muted">
             <span className="spinner" /> Loading…
           </div>
         ) : sessions.length === 0 ? (
           <Empty title="No sessions yet">Create a session for each meeting, interview or task.</Empty>
+        ) : visible.length === 0 ? (
+          <Empty title="No matching sessions">Nothing in titles, notes, conversations or transcripts matches “{query}”.</Empty>
         ) : (
-          sessions.map((s) => (
+          visible.map((s) => (
             <div key={s.id} className={`card ${active?.id === s.id ? "session-card active" : "session-card"}`}>
               {editing === s.id ? (
                 <div style={{ gridColumn: "1 / -1" }}>

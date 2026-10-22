@@ -33,6 +33,8 @@ export interface OpenOptions {
   diarize: boolean;
   /** 1 = microphone only; 2 = interleaved [mic, system]. */
   channels: 1 | 2;
+  /** Terms to boost (product names, identifiers). Recognized text is never rewritten afterwards. */
+  vocabulary?: string[];
 }
 
 /** Speech-recognition backend. Implementations must be replaceable without touching the UI. */

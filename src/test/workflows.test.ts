@@ -363,15 +363,19 @@ describe("G. provider disconnects → error → reconnection without corrupting 
     expect(roles).toEqual(["user"]);
   });
 
-  it("a mid-stream disconnect keeps nothing half-written and the next question works", async () => {
+  it("a mid-stream disconnect keeps the partial text flagged as interrupted, never feeds it back, and the next question works", async () => {
     const h = harness({ turns: [{ text: ["part ", "ial", "x"], dropAfter: 2 }, { text: ["fine"] }] });
     const first = await h.ask("Q1");
     expect(first.at(-1)).toMatchObject({ type: "error", code: "network" });
     const conv = startOf(first).conversationId;
-    expect(h.store.listMessages(conv).map((m) => m.role)).toEqual(["user"]);
+    const afterDrop = h.store.listMessages(conv);
+    expect(afterDrop.map((m) => m.role)).toEqual(["user", "assistant"]);
+    expect(afterDrop[1]!.meta.interrupted).toBe(true);
     const second = await h.ask("Q2", { conversationId: conv });
     expect(lastDone(second)).toBeTruthy();
-    expect(h.store.listMessages(conv).map((m) => m.content)).toEqual(["Q1", "Q2", "fine"]);
+    expect(h.store.listMessages(conv).map((m) => m.content)).toEqual(["Q1", "part ial", "Q2", "fine"]);
+    // The half-written answer is not sent to the model as if it were a real reply.
+    expect(JSON.stringify((h.calls.at(-1)!.body as { messages: unknown }).messages)).not.toContain("part ial");
   });
 
   it("a stalled stream is aborted by the watchdog and retried", async () => {

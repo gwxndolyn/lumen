@@ -3,7 +3,7 @@ import { MODE_LABELS, STYLE_LABELS } from "../../shared/defaults";
 import type { AnswerStyle, AssistantMode, Conversation, Settings, Tone } from "../../shared/types";
 import { api, formatTime } from "../lib/api";
 import { isRecordingStatus, useActiveSession, useAppEvent, useChat, useContextItems, type LiveTranscript } from "../lib/hooks";
-import { ContextChips, Empty, MessageView, useAction } from "../components/ui";
+import { ContextChips, Empty, MessageView, Segmented, useAction } from "../components/ui";
 
 const STARTERS: Record<AssistantMode, string[]> = {
   general: ["Summarize what's on my screen", "Explain this in simple terms"],
@@ -60,6 +60,16 @@ export function AssistantScreen({ settings, update, live }: { settings: Settings
           <option value="formal">Formal</option>
           <option value="confident">Confident</option>
         </select>
+        <Segmented
+          label="Answer depth"
+          value={settings.personalization.depth}
+          options={[
+            { value: "quick", label: "Quick" },
+            { value: "balanced", label: "Balanced" },
+            { value: "deep", label: "Deep" },
+          ]}
+          onChange={(v) => void update({ personalization: { depth: v } })}
+        />
         {liveActive && (
           <label className="row small" title="Include the live transcript as context">
             <input type="checkbox" checked={useLive} onChange={(e) => setUseLive(e.target.checked)} /> Live transcript

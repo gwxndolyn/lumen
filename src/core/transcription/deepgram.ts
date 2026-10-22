@@ -44,6 +44,8 @@ export class DeepgramProvider implements TranscriptionProvider {
       diarize: String(opts.diarize),
     });
     if (opts.channels === 2) p.set("multichannel", "true");
+    // Keyterm prompting biases recognition toward the user's technical vocabulary (nova-3).
+    for (const term of (opts.vocabulary ?? []).slice(0, 100)) p.append("keyterm", term);
     return `${this.baseUrl}?${p}`;
   }
 

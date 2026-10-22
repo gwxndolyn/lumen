@@ -139,7 +139,10 @@ export class GeminiProvider implements AIProvider {
     const started = Date.now();
     try {
       const res = await this.fetchImpl(`${this.base}/models?pageSize=200`, { headers: { "x-goog-api-key": this.opts.apiKey }, signal: AbortSignal.timeout(10_000) });
-      if (!res.ok) return { ok: false, message: (await geminiError(res)).message, latencyMs: null };
+      if (!res.ok) {
+        const e = await geminiError(res);
+        return { ok: false, message: e.message, latencyMs: null, code: e.code };
+      }
       const json = (await res.json().catch(() => ({}))) as { models?: { name: string; supportedGenerationMethods?: string[] }[] };
       const ids = (json.models ?? []).filter((m) => m.supportedGenerationMethods?.includes("generateContent")).map((m) => m.name.replace(/^models\//, ""));
       const found = ids.includes(this.opts.model);
@@ -147,9 +150,11 @@ export class GeminiProvider implements AIProvider {
         ok: found,
         message: found ? `Connected to Gemini (${this.opts.model}).` : `Connected, but model “${this.opts.model}” is not available to this key. Available: ${ids.slice(0, 8).join(", ")}`,
         latencyMs: Date.now() - started,
+        code: found ? undefined : "model_unavailable",
       };
-    } catch {
-      return { ok: false, message: "Cannot reach Google Gemini.", latencyMs: null };
+    } catch (err) {
+      const timedOut = (err as Error)?.name === "TimeoutError";
+      return { ok: false, message: timedOut ? "Google Gemini did not respond within 10 seconds." : "Cannot reach Google Gemini.", latencyMs: null, code: timedOut ? "timeout" : "network" };
     }
   }
 }

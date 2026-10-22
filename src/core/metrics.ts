@@ -47,6 +47,8 @@ export class Metrics {
       p95TtftMs: percentile(ttft, 95),
       p50TotalMs: percentile(total, 50),
       p50ContextPrepMs: percentile(this.requests.map((r) => r.contextPrepMs), 50),
+      p50RequestSentMs: percentile(this.requests.map((r) => r.requestSentMs).filter((v): v is number => v != null), 50),
+      p50PendingWaitMs: percentile(this.requests.map((r) => r.pendingWaitMs).filter((v): v is number => v != null), 50),
       errorRate: finished.length ? finished.filter((r) => r.outcome === "error").length / finished.length : null,
       totalRetries: this.totalRetries,
       failuresByCode,

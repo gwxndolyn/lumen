@@ -166,7 +166,7 @@ export class OpenAICompatProvider implements AIProvider {
       });
       if (!res.ok) {
         const e = await httpError(res);
-        return { ok: false, message: e.message, latencyMs: null };
+        return { ok: false, message: e.message, latencyMs: null, code: e.code };
       }
       const json = (await res.json().catch(() => ({}))) as { data?: { id: string }[] };
       const ids = (json.data ?? []).map((m) => m.id);
@@ -175,9 +175,11 @@ export class OpenAICompatProvider implements AIProvider {
         ok: hasModel,
         message: hasModel ? `Connected to ${new URL(this.opts.baseUrl).host}.` : `Connected, but model “${this.opts.model}” is not available. Available: ${ids.slice(0, 8).join(", ")}`,
         latencyMs: Date.now() - started,
+        code: hasModel ? undefined : "model_unavailable",
       };
-    } catch {
-      return { ok: false, message: `Cannot reach ${safeHost(this.opts.baseUrl)}.`, latencyMs: null };
+    } catch (err) {
+      const timedOut = (err as Error)?.name === "TimeoutError";
+      return { ok: false, message: timedOut ? `${safeHost(this.opts.baseUrl)} did not respond within 10 seconds.` : `Cannot reach ${safeHost(this.opts.baseUrl)}.`, latencyMs: null, code: timedOut ? "timeout" : "network" };
     }
   }
 }

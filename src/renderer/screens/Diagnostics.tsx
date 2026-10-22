@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import type { Diagnostics, LogLevel, ProviderTestResult } from "../../shared/types";
+import { describeTest } from "../lib/providerTest";
 import { api, formatTime, usd } from "../lib/api";
 import { Segmented } from "../components/ui";
 
@@ -81,9 +82,9 @@ export function DiagnosticsScreen() {
       </header>
       <div className="page">
         {test && test !== "running" && (
-          <div className={`alert ${test.ok ? "info" : "error"} small`} style={{ marginBottom: 12 }}>
-            {test.message}
-            {test.latencyMs != null && ` (${test.latencyMs} ms)`}
+          <div className={`alert ${test.ok ? "info" : "error"} small`} style={{ marginBottom: 12 }} role="status">
+            <strong>{describeTest(test).title}:</strong> {describeTest(test).detail}
+            {describeTest(test).next && <div>{describeTest(test).next}</div>}
           </div>
         )}
         <div className="card">
@@ -112,6 +113,8 @@ export function DiagnosticsScreen() {
             <Stat v={ms(d.metrics.p95TtftMs)} l="Time to first token (p95)" />
             <Stat v={ms(d.metrics.p50TotalMs)} l="Total response time (p50)" />
             <Stat v={ms(d.metrics.p50ContextPrepMs)} l="Context preparation (p50)" />
+            <Stat v={ms(d.metrics.p50PendingWaitMs)} l="Waiting for OCR (p50)" />
+            <Stat v={ms(d.metrics.p50RequestSentMs)} l="Input → request sent (p50)" />
             <Stat v={ms(d.metrics.transcriptionP50LatencyMs)} l="Transcription latency (p50)" />
             <Stat v={ms(d.metrics.ocrP50Ms)} l="OCR time (p50)" />
             <Stat v={d.metrics.errorRate == null ? "—" : `${Math.round(d.metrics.errorRate * 100)}%`} l="Provider error rate" />
@@ -128,6 +131,7 @@ export function DiagnosticsScreen() {
                   <th>Model</th>
                   <th>Outcome</th>
                   <th>Context prep</th>
+                  <th>Sent after</th>
                   <th>First token</th>
                   <th>Total</th>
                   <th>Retries</th>
@@ -142,6 +146,7 @@ export function DiagnosticsScreen() {
                     <td>{r.model}</td>
                     <td>{r.outcome === "error" ? `error (${r.errorCode})` : r.outcome}</td>
                     <td>{ms(r.contextPrepMs)}</td>
+                    <td>{ms(r.requestSentMs ?? null)}</td>
                     <td>{ms(r.ttftMs)}</td>
                     <td>{ms(r.totalMs)}</td>
                     <td>{r.retries}</td>

@@ -9,6 +9,7 @@ import type {
   ErrorCode,
   LiveScreenState,
   ProviderHealth,
+  ResponseIntent,
   Session,
   Settings,
   SourceAvailability,
@@ -112,9 +113,9 @@ export interface UiMessage {
   role: "user" | "assistant";
   content: string;
   references: ContextReference[];
-  status: "done" | "streaming" | "error" | "cancelled";
+  status: "done" | "streaming" | "error" | "cancelled" | "interrupted";
   error?: { message: string; code: ErrorCode; retryable: boolean };
-  meta?: { model?: string; isMock?: boolean; costUsd?: number; ttftMs?: number | null; totalMs?: number; fallback?: string | null; style?: AnswerStyle; stopReason?: string };
+  meta?: { model?: string; isMock?: boolean; costUsd?: number; ttftMs?: number | null; totalMs?: number; fallback?: string | null; style?: AnswerStyle; stopReason?: string; intent?: ResponseIntent };
   warnings?: string[];
   availability?: SourceAvailability;
   /** Origin label shown on the user turn (e.g. "Behavioral question", "Debug"). */
@@ -129,8 +130,8 @@ function fromStored(m: ChatMessage): UiMessage {
     content: m.content,
     references: m.references,
     label: m.meta.origin?.label,
-    status: m.meta.cancelled ? "cancelled" : "done",
-    meta: { model: m.meta.model, isMock: m.meta.isMock, costUsd: m.meta.estimatedCostUsd, ttftMs: m.meta.ttftMs, totalMs: m.meta.totalMs, style: m.meta.style, stopReason: m.meta.stopReason },
+    status: m.meta.cancelled ? "cancelled" : m.meta.interrupted ? "interrupted" : "done",
+    meta: { model: m.meta.model, isMock: m.meta.isMock, costUsd: m.meta.estimatedCostUsd, ttftMs: m.meta.ttftMs, totalMs: m.meta.totalMs, style: m.meta.style, stopReason: m.meta.stopReason, intent: m.meta.intent },
   };
 }
 
@@ -194,7 +195,7 @@ export function useChat(settings: Settings | null, chatOpts?: { adoptSuggestions
               cur.references = e.references;
               cur.warnings = e.warnings;
               cur.availability = e.availability;
-              cur.meta = { model: e.provider.model, isMock: e.provider.isMock };
+              cur.meta = { model: e.provider.model, isMock: e.provider.isMock, intent: e.intent };
               // Reconcile the optimistic user message id with the stored one.
               if (idx > 0 && next[idx - 1]!.role === "user") next[idx - 1] = { ...next[idx - 1]!, id: e.userMessageId };
               break;
@@ -237,7 +238,7 @@ export function useChat(settings: Settings | null, chatOpts?: { adoptSuggestions
   );
 
   const send = useCallback(
-    async (text: string, opts: { includeLiveTranscript: boolean; retryOf?: string; style?: AnswerStyle; mode?: Parameters<typeof api.chatSend>[0]["mode"]; label?: string }) => {
+    async (text: string, opts: { includeLiveTranscript: boolean; retryOf?: string; style?: AnswerStyle; depth?: "quick" | "balanced" | "deep"; mode?: Parameters<typeof api.chatSend>[0]["mode"]; label?: string }) => {
       if (!settings || reqRef.current) return;
       const requestId = newId();
       const pid = `pending-${requestId}`;
@@ -258,6 +259,7 @@ export function useChat(settings: Settings | null, chatOpts?: { adoptSuggestions
           tone: settings.assistant.tone,
           includeLiveTranscript: opts.includeLiveTranscript,
           retryOfMessageId: opts.retryOf,
+          depth: opts.depth,
           mode: opts.mode,
         });
       } catch (err) {

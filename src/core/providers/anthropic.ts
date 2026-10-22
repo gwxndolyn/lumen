@@ -104,7 +104,7 @@ export class AnthropicProvider implements AIProvider {
       return { ok: true, message: `Connected to ${res.model}.`, latencyMs: Date.now() - started };
     } catch (err) {
       const e = err instanceof ProviderError ? err : mapError(err, ctrl.signal);
-      return { ok: false, message: e.message, latencyMs: null };
+      return { ok: false, message: e.message, latencyMs: null, code: e instanceof ProviderError ? e.code : "unknown" };
     }
   }
 

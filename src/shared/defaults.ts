@@ -51,6 +51,7 @@ export const DEFAULT_SETTINGS: Settings = {
     microphoneDeviceId: null,
     captureSystemAudio: false,
     persist: true,
+    vocabulary: [],
   },
   assistant: {
     mode: "general",
@@ -59,7 +60,9 @@ export const DEFAULT_SETTINGS: Settings = {
     useKnowledgeBase: true,
     useConversationHistory: true,
   },
-  interview: { autoSuggest: true, length: "short", interviewer: "any" },
+  questions: { policy: "assisted" },
+  personalization: { depth: "quick", alsoKnows: [], codeStyle: "idiomatic", hintsFirst: false, includeComplexity: true, includeTests: true },
+  interview: { length: "short", interviewer: "any" },
   technical: { language: "python", level: "mid", detail: "concise" },
   screen: {
     requirePreview: true,

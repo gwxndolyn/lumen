@@ -216,8 +216,18 @@ export function MessageView({ m, onRetry, onCopy }: { m: UiMessage; onRetry?: ()
       {m.status !== "streaming" && m.status !== "error" && (
         <div className="msg-meta">
           {m.status === "cancelled" && <span className="badge warning">Stopped</span>}
+          {m.status === "interrupted" && (
+            <span className="badge warning" title="The connection failed partway through; this is the text that arrived before it did.">
+              Incomplete
+            </span>
+          )}
           {m.meta?.isMock && <span className="badge warning">Mock</span>}
           {m.meta?.style && m.meta.style !== "quick" && <span className="badge">{STYLE_LABELS[m.meta.style]}</span>}
+          {m.meta?.intent && (
+            <span className="badge" title="How Lumen understood this message (rule-based). Ask again with different wording if it's wrong.">
+              {m.meta.intent.ambiguous ? "Needs clarification" : m.meta.intent.label}
+            </span>
+          )}
           {m.meta?.model && !m.meta.isMock && <span>{m.meta.model}</span>}
           {m.meta?.fallback && <span className="badge">answered by {m.meta.fallback}</span>}
           {m.meta?.ttftMs != null && <span>first token {m.meta.ttftMs} ms</span>}

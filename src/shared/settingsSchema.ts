@@ -13,6 +13,7 @@ const httpUrl = z
   .regex(/^https?:\/\/[^\s]+$/, "Must be an http(s) URL");
 
 export const styleEnum = z.enum(["quick", "detailed", "steps", "suggest", "technical", "meeting_summary", "follow_ups"]);
+export const langEnum = z.enum(["python", "java", "javascript", "typescript", "cpp", "sql", "go", "csharp", "kotlin", "rust"]);
 export const modeEnum = z.enum(["general", "meeting", "interview", "technical", "coding"]);
 export const effortEnum = z.enum(["low", "medium", "high"]);
 export const toneEnum = z.enum(["neutral", "friendly", "formal", "confident"]);
@@ -41,6 +42,7 @@ export const settingsSchema = z.object({
     microphoneDeviceId: z.string().max(512).nullable(),
     captureSystemAudio: z.boolean(),
     persist: z.boolean(),
+    vocabulary: z.array(z.string().trim().min(1).max(60)).max(100),
   }),
   assistant: z.object({
     mode: modeEnum,
@@ -49,13 +51,23 @@ export const settingsSchema = z.object({
     useKnowledgeBase: z.boolean(),
     useConversationHistory: z.boolean(),
   }),
+  questions: z.object({
+    policy: z.enum(["manual", "assisted"]),
+  }),
+  personalization: z.object({
+    depth: z.enum(["quick", "balanced", "deep"]),
+    alsoKnows: z.array(langEnum).max(10),
+    codeStyle: z.enum(["idiomatic", "commented", "compact"]),
+    hintsFirst: z.boolean(),
+    includeComplexity: z.boolean(),
+    includeTests: z.boolean(),
+  }),
   interview: z.object({
-    autoSuggest: z.boolean(),
     length: z.enum(["short", "medium", "detailed"]),
     interviewer: z.enum(["remote", "any"]),
   }),
   technical: z.object({
-    language: z.enum(["python", "java", "javascript", "typescript", "cpp", "sql", "go", "csharp", "kotlin", "rust"]),
+    language: langEnum,
     level: z.enum(["junior", "mid", "senior"]),
     detail: z.enum(["concise", "full"]),
   }),
@@ -135,6 +147,11 @@ function upgradeLegacy(stored: Record<string, unknown>): Record<string, unknown>
   if (isPlainObject(a) && "length" in a && !("style" in a)) {
     const { length, ...rest } = a;
     out = { ...out, assistant: { ...rest, style: length === "detailed" ? "detailed" : "quick" } };
+  }
+  // ≤0.3 had interview.autoSuggest; it became the question policy with the same behaviour.
+  const iv = out.interview;
+  if (isPlainObject(iv) && "autoSuggest" in iv && !isPlainObject(out.questions)) {
+    out = { ...out, questions: { policy: iv.autoSuggest === false ? "manual" : "assisted" } };
   }
   // ≤0.2 toggled the panel with ⌘/Ctrl+Shift+Space. Keep a user's custom choice; move the old
   // default to the new ⌘/Ctrl+\ default.

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { MODELS, PROVIDER_INFO } from "../../shared/defaults";
 import type { ProviderTestResult, SecretName, SecretsStatus, Settings } from "../../shared/types";
+import { describeTest } from "../lib/providerTest";
 import { api, errMsg, formatTime, usd } from "../lib/api";
 import { useProviderHealth } from "../lib/hooks";
 import { ProviderStatus, Segmented, Switch } from "../components/ui";
@@ -132,8 +133,8 @@ export function ProviderScreen({ settings, update }: Props) {
         )}
         {test && test !== "running" && (
           <div className={`alert ${test.ok ? "info" : "error"} small`} style={{ marginBottom: 12 }} role="status">
-            {test.message}
-            {test.latencyMs != null && ` (${test.latencyMs} ms)`}
+            <strong>{describeTest(test).title}:</strong> {describeTest(test).detail}
+            {describeTest(test).next && <div>{describeTest(test).next}</div>}
           </div>
         )}
         {health && health.checkedAt && (

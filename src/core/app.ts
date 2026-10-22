@@ -11,6 +11,7 @@ import type {
   LiveScreenState,
   MeetingInsights,
   ProviderHealth,
+  ProviderTestResult,
   SecretName,
   Session,
   SessionAiConfig,
@@ -284,11 +285,11 @@ export class AppCore {
   async testProvider() {
     const p = this.providerFor();
     this.health = this.initialHealth();
-    if (!p) return { ok: false, message: this.health.message, latencyMs: null };
+    if (!p) return { ok: false, message: this.health.message, latencyMs: null, code: "missing_credentials" as const };
     const res = await p.test(activeModel(this.settings.provider));
     this.health = {
       ...this.health,
-      state: p.isMock ? "mock" : res.ok ? "ok" : /rejected|credentials|key/i.test(res.message) ? "down" : "degraded",
+      state: p.isMock ? "mock" : res.ok ? "ok" : healthStateFor(res.code),
       message: res.message,
       checkedAt: this.now(),
       latencyMs: res.latencyMs,
@@ -352,7 +353,11 @@ export class AppCore {
    */
   deleteSession(id: string): void {
     this.chat.cancelSession(id);
-    if (this.live?.workspaceSessionId === id) this.stopTranscript();
+    if (this.live?.workspaceSessionId === id) {
+      this.stopTranscript();
+      this.stopDetector();
+      this.copilot.questions.length = 0;
+    }
     if (this.liveScreen.snapshot.active && this.settings.activeSessionId === id) this.liveScreen.stop();
     this.engine.dropSession(id);
     this.deps.store.deleteSession(id);
@@ -563,6 +568,11 @@ export class AppCore {
     (this.detectorTimer as { unref?: () => void }).unref?.();
   }
 
+  /** Exposed for lifecycle tests: whether the question detector's poll timer is running. */
+  get detectorRunning(): boolean {
+    return this.detectorTimer !== null;
+  }
+
   private stopDetector() {
     if (this.detectorTimer) clearInterval(this.detectorTimer);
     this.detectorTimer = null;
@@ -572,7 +582,7 @@ export class AppCore {
   /** Called for every finalized segment. Interim results never trigger suggestions. */
   private onSegment(seg: TranscriptSegment) {
     const session = this.deps.store.getSession(this.live?.workspaceSessionId ?? "");
-    if (!session || session.type !== "interview" || !this.settings.interview.autoSuggest) return;
+    if (!session || session.type !== "interview" || this.settings.questions.policy !== "assisted") return;
     this.ensureDetector();
     this.detector!.push(seg);
   }
@@ -747,6 +757,7 @@ export class AppCore {
         diarize: true,
         channels: systemAudio ? 2 : 1,
         persist: this.settings.transcription.persist,
+        vocabulary: this.settings.transcription.vocabulary,
         title: title.trim().slice(0, 120) || `Meeting ${new Date(this.now()).toLocaleString()}`,
       },
       (ms) => this.metrics.recordTranscriptionLatency(ms),
@@ -829,6 +840,9 @@ export class AppCore {
 
   /** Cancel in-flight answers and wait (bounded) for them to record their final state. */
   async shutdown(timeoutMs = 1500) {
+    this.stopDetector();
+    this.liveScreen.stop();
+    if (this.live && this.live.status !== "stopped") this.stopTranscript();
     this.chat.cancelAll();
     const end = Date.now() + timeoutMs;
     while (this.chat.activeRequests > 0 && Date.now() < end) await new Promise((r) => setTimeout(r, 25));
@@ -839,4 +853,12 @@ export class AppCore {
     const r = this.deps.store.applyRetention(this.settings.privacy.conversationRetentionDays, this.settings.privacy.transcriptRetentionDays, this.now());
     return { ...r, context: n + r.context };
   }
+}
+
+/**
+ * Health after a failed test: credentials or model access problems need the user ("down");
+ * network, rate-limit and provider outages are usually transient ("degraded").
+ */
+export function healthStateFor(code: ProviderTestResult["code"]): ProviderHealth["state"] {
+  return code === "auth" || code === "missing_credentials" || code === "model_unavailable" || code === "bad_request" ? "down" : "degraded";
 }
