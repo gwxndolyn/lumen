@@ -505,6 +505,7 @@ export interface Diagnostics {
   transcription: { kind: TranscriptionKind; configured: boolean };
   permissions: PermissionStatus;
   capture: CaptureCapabilities;
+  platformProfile: import("../core/platform").PlatformProfile;
   shortcutsRegistered: Record<string, boolean>;
   metrics: {
     requests: RequestMetric[];

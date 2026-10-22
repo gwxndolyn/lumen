@@ -1,7 +1,7 @@
 {
   "name": "lumen-assistant",
   "productName": "Lumen",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Lumen \u2014 a local-first, context-aware AI desktop assistant",
   "private": true,
   "main": "dist-electron/electron/main.js",
@@ -18,7 +18,17 @@
     "smoke": "npm run build && bash scripts/smoke.sh",
     "dev": "npm run build && electron .",
     "lint": "oxlint --deny-warnings electron src scripts",
-    "check": "npm run typecheck && npm run lint && npm test"
+    "check": "npm run typecheck && npm run lint && npm test",
+    "format": "prettier --check \"electron/**/*.ts\" \"src/**/*.{ts,tsx}\" \"scripts/**/*.mjs\" \".github/**/*.yml\"",
+    "format:write": "prettier --write \"electron/**/*.ts\" \"src/**/*.{ts,tsx}\" \"scripts/**/*.mjs\" \".github/**/*.yml\"",
+    "test:live": "vitest run --config vitest.live.config.mts",
+    "audit:prod": "npm audit --omit=dev --audit-level=high",
+    "package:mac": "npm run build && electron-builder --mac --publish never",
+    "package:win": "npm run build && electron-builder --win --publish never",
+    "package:linux": "npm run build && electron-builder --linux --publish never",
+    "package:dir": "npm run build && electron-builder --dir --publish never",
+    "smoke:packaged": "bash scripts/smoke-packaged.sh",
+    "release:check": "npm run check && npm run audit:prod && npm run build"
   },
   "license": "UNLICENSED",
   "dependencies": {
@@ -46,5 +56,12 @@
     "vite": "^8.3.4",
     "vitest": "^5.0.5",
     "ws": "^8.22.0"
+  },
+  "author": {
+    "name": "Lumen"
+  },
+  "homepage": "https://example.invalid/lumen",
+  "engines": {
+    "node": ">=22.5"
   }
 }

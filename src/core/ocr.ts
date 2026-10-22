@@ -38,7 +38,9 @@ export class TesseractOcr implements OcrEngine {
   private langPath(): string {
     if (this.opts.langPath) return this.opts.langPath;
     const req = createRequire(__filename);
-    return path.join(path.dirname(req.resolve("@tesseract.js-data/eng/package.json")), "4.0.0_best_int");
+    const dir = path.join(path.dirname(req.resolve("@tesseract.js-data/eng/package.json")), "4.0.0_best_int");
+    // In packaged builds the model is unpacked next to app.asar so the WASM engine can read it.
+    return dir.replace(`${path.sep}app.asar${path.sep}`, `${path.sep}app.asar.unpacked${path.sep}`);
   }
 
   private start(): Promise<TesseractWorker> {

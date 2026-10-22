@@ -1,7 +1,9 @@
 {
   "compilerOptions": {
     "target": "ES2023",
-    "lib": ["ES2023"],
+    "lib": [
+      "ES2023"
+    ],
     "module": "nodenext",
     "moduleResolution": "nodenext",
     "outDir": "dist-electron",
@@ -10,9 +12,18 @@
     "noUnusedLocals": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
-    "types": ["node"],
+    "types": [
+      "node"
+    ],
     "sourceMap": true
   },
-  "include": ["electron/**/*.ts", "src/core/**/*.ts", "src/shared/**/*.ts"],
-  "exclude": ["**/*.test.ts"]
+  "include": [
+    "electron/**/*.ts",
+    "src/core/**/*.ts",
+    "src/shared/**/*.ts"
+  ],
+  "exclude": [
+    "**/*.test.ts",
+    "src/test-live/**"
+  ]
 }

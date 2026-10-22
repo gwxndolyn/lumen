@@ -32,9 +32,12 @@ import { CaptureService, IMAGE_EXTENSIONS, permissionSettingsUrl, permissionStat
 import { Logger } from "./logger";
 import { SecretStore } from "./secrets";
 import { isTrustedUrl, WindowManager } from "./windows";
+import { currentPlatform, initPlatformIdentity, notify, wantsToggle } from "./platform";
 
 // Isolated profile for automated smoke tests.
 if (process.env.LUMEN_USER_DATA) app.setPath("userData", process.env.LUMEN_USER_DATA);
+
+initPlatformIdentity();
 
 if (!app.requestSingleInstanceLock()) {
   app.quit();
@@ -405,6 +408,7 @@ function registerIpc() {
   handle("history:setOpenConversation", (_e, cid) => core.setOpenConversation(id.nullable().parse(cid)));
   handle("usage:today", () => core.spendToday());
   handle("app:info", () => ({ packaged: app.isPackaged, devModeAllowed: core.devModeAllowed, version: app.getVersion() }));
+  handle("platform:profile", () => currentPlatform());
   handle("history:messages", (_e, cid) => {
     assertConversationInActive(id.parse(cid));
     return store.listMessages(String(cid));
@@ -733,6 +737,7 @@ function diagnostics(): Diagnostics {
     transcription: { kind: core.settings.transcription.kind, configured: secrets.has("deepgram") },
     permissions: permissionStatus(),
     capture: capture.capabilities(),
+    platformProfile: currentPlatform(),
     shortcutsRegistered: { ...shortcutStatus },
     metrics: core.metrics.snapshot(),
     process: { memoryMb: Math.round(allMem), cpuPercent: elapsed > 0 ? Math.round(((cpu.user + cpu.system) / elapsed) * 1000) / 10 : 0 },
@@ -779,7 +784,10 @@ function applyCsp() {
   });
 }
 
-app.on("second-instance", () => windows?.showOverlay());
+app.on("second-instance", (_e, argv) => {
+  if (wantsToggle(argv)) windows?.toggleOverlay({ focus: false });
+  else windows?.showOverlay();
+});
 
 /**
  * Graceful shutdown: stop capture first (releases mic and screen), cancel in-flight answers and
@@ -855,7 +863,13 @@ function startup() {
       store,
       secrets,
       ocr,
-      emitChat: (e) => windows?.broadcast("lumen:chat", e),
+      emitChat: (e) => {
+        windows?.broadcast("lumen:chat", e);
+        // An interview suggestion finishing while the panel is hidden gets a quiet OS notification.
+        if (e.type === "done" && e.requestId.startsWith("iq-") && !windows?.overlayVisible) {
+          notify("Lumen — suggested answer ready", "Press the show/hide shortcut to view it.", () => windows.showOverlay({ focus: false }));
+        }
+      },
       emitTranscript: (e) => {
         windows?.broadcast("lumen:transcript", e);
         if (e.type === "status") updateTray();

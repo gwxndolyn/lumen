@@ -52,6 +52,7 @@ const api: LumenApi = {
   setOpenConversation: invoke("history:setOpenConversation"),
   spendToday: invoke("usage:today"),
   appInfo: invoke("app:info"),
+  platformProfile: invoke("platform:profile"),
   getMessages: invoke("history:messages"),
   renameConversation: invoke("history:rename"),
   deleteConversation: invoke("history:delete"),

@@ -125,6 +125,7 @@ export interface LumenApi {
   setOpenConversation(id: string | null): Promise<void>;
   spendToday(): Promise<{ costUsd: number; requests: number; limitUsd: number }>;
   appInfo(): Promise<{ packaged: boolean; devModeAllowed: boolean; version: string }>;
+  platformProfile(): Promise<import("../core/platform").PlatformProfile>;
   getMessages(conversationId: string): Promise<ChatMessage[]>;
   renameConversation(id: string, title: string): Promise<void>;
   deleteConversation(id: string): Promise<void>;

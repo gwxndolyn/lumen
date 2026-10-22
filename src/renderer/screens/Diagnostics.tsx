@@ -159,6 +159,43 @@ export function DiagnosticsScreen() {
         </div>
 
         <div className="card">
+          <h3>Platform support — {d.platformProfile.label}</h3>
+          <table className="data">
+            <thead>
+              <tr>
+                <th>Capability</th>
+                <th>Status</th>
+                <th>How</th>
+                <th>Requirement / limitation</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(
+                [
+                  ["Global shortcuts", d.platformProfile.globalShortcuts],
+                  ["Floating panel", d.platformProfile.overlay],
+                  ["Screen capture", d.platformProfile.screenCapture],
+                  ["Window capture", d.platformProfile.windowCapture],
+                  ["Microphone", d.platformProfile.microphone],
+                  ["System audio", d.platformProfile.systemAudio],
+                  ["Key storage", d.platformProfile.secureStorage],
+                  ["Notifications", d.platformProfile.notifications],
+                  ["Automatic updates", d.platformProfile.autoUpdate],
+                  ["Hidden from screen sharing", d.platformProfile.captureExclusion],
+                ] as const
+              ).map(([name, c]) => (
+                <tr key={name}>
+                  <td>{name}</td>
+                  <td>{c.supported ? <span className="badge success">Supported</span> : <span className="badge">Not available</span>}</td>
+                  <td className="small">{c.via}</td>
+                  <td className="small muted">{[c.requirement, c.limitation].filter(Boolean).join(" ")}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        <div className="card">
           <h3>Logging</h3>
           <div className="field">
             <div>

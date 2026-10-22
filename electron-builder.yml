@@ -1,19 +1,86 @@
+# Production packaging for macOS, Windows and Linux.
+# Build each platform on its own OS (see .github/workflows/ci.yml). Signing is configured through
+# environment variables in CI only — no certificates or passwords are stored in this repository.
 appId: dev.lumen.assistant
 productName: Lumen
+copyright: Copyright © 2026 Lumen
 directories:
   output: release
+  buildResources: build
 files:
   - dist-electron/**
+  - "!dist-electron/**/*.map"
   - dist-renderer/**
+  - "!dist-renderer/**/*.map"
+  - build/trayTemplate*.png
   - package.json
+  # mammoth's optional CLI (bin/) pulls in argparse→sprintf-js (npm audit GHSA-hp3w-g68c-fv3c);
+  # Lumen only uses the library API, so the CLI and its arg parser are not shipped.
+  - "!node_modules/mammoth/bin/**"
+  - "!node_modules/mammoth/node_modules/argparse/**"
+  - "!node_modules/mammoth/node_modules/sprintf-js/**"
+  - "!node_modules/argparse/**"
+  - "!node_modules/sprintf-js/**"
+  # The renderer is bundled by Vite; React is not needed by the main process at runtime.
+  - "!node_modules/{react,react-dom,scheduler}/**"
+  - "!**/*.{md,markdown,map,ts,tsx}"
+  - "!**/{test,tests,__tests__,example,examples,docs}/**"
+asar: true
+asarUnpack:
+  # The OCR engine loads its WASM and language model by file path.
+  - node_modules/tesseract.js-core/**
+  - node_modules/@tesseract.js-data/eng/**
+extraMetadata:
+  main: dist-electron/electron/main.js
+
 mac:
   category: public.app-category.productivity
-  target: dmg
+  icon: build/icon.png
+  target:
+    - target: dmg
+      arch: [arm64, x64]
+    - target: zip
+      arch: [arm64, x64]
+  minimumSystemVersion: "12.0"
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
   extendInfo:
     NSMicrophoneUsageDescription: Lumen uses the microphone only while you are recording a live transcript.
     NSScreenCaptureUsageDescription: Lumen captures your screen only when you ask it to, to answer questions about what you see.
+    NSAudioCaptureUsageDescription: Lumen captures system audio only when you enable it for a live transcript.
+    LSUIElement: true
+  # Notarization runs only when APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID are set.
+  notarize: false
+
+dmg:
+  sign: false
+
 win:
-  target: nsis
+  icon: build/icon.png
+  target:
+    - target: nsis
+      arch: [x64, arm64]
+  executableName: Lumen
+  # Signing: set WIN_CSC_LINK / WIN_CSC_KEY_PASSWORD (or Azure Trusted Signing) in CI.
+  signAndEditExecutable: true
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Lumen
+  deleteAppDataOnUninstall: false
+
 linux:
-  target: AppImage
+  icon: build/icon.png
+  target: [AppImage]
   category: Utility
+
+# Auto-update feed. Disabled at runtime unless the build is signed (LUMEN_SIGNED_BUILD=1).
+publish:
+  provider: generic
+  url: https://updates.example.invalid/lumen
