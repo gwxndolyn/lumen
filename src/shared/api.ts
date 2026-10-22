@@ -109,7 +109,13 @@ export interface LumenApi {
   chatSend(
     req: Omit<ChatSendRequest, "sessionId" | "taskInstruction" | "displayText" | "origin" | "retrievalQuery"> & {
       mode?:
-        | { kind: "technical"; task: "solve" | "explain" | "debug" | "review" | "tests" | "complexity" | "refactor" | "hints" | "system_design"; language: string; problem?: string; detail?: "concise" | "full" }
+        | {
+            kind: "technical";
+            task: "solve" | "explain" | "debug" | "review" | "tests" | "complexity" | "refactor" | "hints" | "system_design";
+            language: string;
+            problem?: string;
+            detail?: "concise" | "full";
+          }
         | { kind: "interview"; question: string; length: "short" | "medium" | "detailed" };
     },
   ): Promise<void>;
@@ -183,6 +189,8 @@ export interface LumenApi {
   deleteAllData(): Promise<void>;
   diagnostics(): Promise<Diagnostics>;
   openLogs(): Promise<void>;
+  /** Renderer crash report: error type and component names only. */
+  reportCrash(report: { name: string; components: string }): Promise<void>;
 
   copyText(text: string): Promise<void>;
   openExternal(url: string): Promise<void>;

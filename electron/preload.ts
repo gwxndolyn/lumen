@@ -28,6 +28,7 @@ const api: LumenApi = {
   resetShortcuts: invoke("settings:resetShortcuts"),
   getShortcutStatus: invoke("settings:shortcutStatus"),
   secretsStatus: invoke("secrets:status"),
+  reportCrash: invoke("diagnostics:rendererCrash"),
   setSecret: invoke("secrets:set"),
   clearSecret: invoke("secrets:clear"),
   testProvider: invoke("provider:test"),

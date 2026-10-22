@@ -1,19 +1,4 @@
-import {
-  app,
-  BrowserWindow,
-  clipboard,
-  dialog,
-  globalShortcut,
-  ipcMain,
-  Menu,
-  nativeImage,
-  powerMonitor,
-  safeStorage,
-  session,
-  shell,
-  Tray,
-  type IpcMainInvokeEvent,
-} from "electron";
+import { app, BrowserWindow, clipboard, dialog, globalShortcut, ipcMain, Menu, nativeImage, powerMonitor, safeStorage, session, shell, Tray, type IpcMainInvokeEvent } from "electron";
 import fs from "node:fs";
 import path from "node:path";
 import { z } from "zod";
@@ -203,9 +188,7 @@ function updateTray() {
       { label: "Show / hide assistant", accelerator: core.settings.shortcuts.toggleOverlay, click: () => windows.toggleOverlay() },
       { label: "Open Lumen", click: () => windows.openMain() },
       { type: "separator" },
-      recording
-        ? { label: "Stop recording", click: () => core.stopTranscript() }
-        : { label: "Live transcript…", click: () => windows.openMain("/main/transcript") },
+      recording ? { label: "Stop recording", click: () => core.stopTranscript() } : { label: "Live transcript…", click: () => windows.openMain("/main/transcript") },
       ...(screenLive ? [{ label: "Stop live screen context", click: () => core.stopLiveScreen() }] : []),
       { label: "Clear session context", click: () => core.engine.clear(core.activeSessionId) },
       { type: "separator" },
@@ -330,7 +313,16 @@ function registerIpc() {
     type: modeEnum,
     notes: str(50_000).optional(),
     contextTtlMinutes: z.number().int().min(0).max(100_000).nullable().optional(),
-    ai: z.object({ model: z.string().regex(/^[a-z0-9.-]{3,64}$/).optional(), effort: effortEnum.optional(), style: styleEnum.optional() }).optional(),
+    ai: z
+      .object({
+        model: z
+          .string()
+          .regex(/^[a-z0-9.-]{3,64}$/)
+          .optional(),
+        effort: effortEnum.optional(),
+        style: styleEnum.optional(),
+      })
+      .optional(),
   });
   handle("sessions:list", () => store.listSessions());
   handle("sessions:active", () => core.ensureActiveSession());
@@ -371,7 +363,13 @@ function registerIpc() {
     // from the renderer are not accepted.
     mode: z
       .discriminatedUnion("kind", [
-        z.object({ kind: z.literal("technical"), task: z.enum(["solve", "explain", "debug", "review", "tests", "complexity", "refactor", "hints", "system_design"]), language: z.enum(["python", "java", "javascript", "typescript", "cpp", "sql", "go", "csharp", "kotlin", "rust"]), problem: str(60_000).optional(), detail: z.enum(["concise", "full"]).optional() }),
+        z.object({
+          kind: z.literal("technical"),
+          task: z.enum(["solve", "explain", "debug", "review", "tests", "complexity", "refactor", "hints", "system_design"]),
+          language: z.enum(["python", "java", "javascript", "typescript", "cpp", "sql", "go", "csharp", "kotlin", "rust"]),
+          problem: str(60_000).optional(),
+          detail: z.enum(["concise", "full"]).optional(),
+        }),
         z.object({ kind: z.literal("interview"), question: str(4000), length: z.enum(["short", "medium", "detailed"]) }),
       ])
       .optional(),
@@ -395,9 +393,7 @@ function registerIpc() {
     core.saveProfileSection(profileSection.parse(section), str(100_000).parse(text));
     return core.profileText();
   });
-  handle("interview:questions", () =>
-    core.copilot.questions.map((q) => ({ id: q.id, text: q.text, category: q.category, categoryLabel: CATEGORY_LABELS[q.category], startMs: q.startMs })),
-  );
+  handle("interview:questions", () => core.copilot.questions.map((q) => ({ id: q.id, text: q.text, category: q.category, categoryLabel: CATEGORY_LABELS[q.category], startMs: q.startMs })));
   const notesPatch = z
     .object({
       summary: str(20_000),
@@ -415,7 +411,13 @@ function registerIpc() {
   handle("notes:update", (_e, tid, patch) => core.updateNotes(id.parse(tid), notesPatch.parse(patch)));
   handle("notes:export", async (e, tid, includeTranscript) => {
     const { filename, markdown } = core.exportNotes(id.parse(tid), z.boolean().parse(includeTranscript));
-    const res = await dialog.showSaveDialog(winOf(e), { defaultPath: filename, filters: [{ name: "Markdown", extensions: ["md"] }, { name: "Text", extensions: ["txt"] }] });
+    const res = await dialog.showSaveDialog(winOf(e), {
+      defaultPath: filename,
+      filters: [
+        { name: "Markdown", extensions: ["md"] },
+        { name: "Text", extensions: ["txt"] },
+      ],
+    });
     if (res.canceled || !res.filePath) return null;
     writeFileAtomic(res.filePath, formatFromPath(res.filePath) === "txt" ? markdownToText(markdown) : markdown, 0o600);
     return res.filePath;
@@ -616,7 +618,16 @@ function registerIpc() {
     const list = store.listTranscriptSessions(core.activeSessionId);
     const l = core.live;
     if (l && !l.persisted && l.workspaceSessionId === core.activeSessionId && l.status !== "stopped" && l.status !== "error") {
-      list.unshift({ id: l.id, sessionId: l.workspaceSessionId, title: `${l.title} (not saved)`, startedAt: l.started, endedAt: null, segmentCount: l.liveSegments().length, provider: "deepgram", persisted: false });
+      list.unshift({
+        id: l.id,
+        sessionId: l.workspaceSessionId,
+        title: `${l.title} (not saved)`,
+        startedAt: l.started,
+        endedAt: null,
+        segmentCount: l.liveSegments().length,
+        provider: "deepgram",
+        persisted: false,
+      });
     }
     return list;
   });
@@ -706,6 +717,10 @@ function registerIpc() {
     logger.info("all user data deleted");
   });
   handle("diagnostics:get", () => diagnostics());
+  handle("diagnostics:rendererCrash", (e, report) => {
+    const r = z.object({ name: z.string().max(80), components: z.string().max(400) }).parse(report);
+    logger.error("renderer crashed", { window: winOf(e) === windows.overlay ? "overlay" : "main", error: r.name, components: r.components });
+  });
   handle("diagnostics:openLogs", async () => {
     await shell.openPath(path.dirname(logger.file));
   });
@@ -727,7 +742,14 @@ function registerIpc() {
   });
   handle("overlay:setSize", (_e, w, h) => windows.setOverlaySize(z.number().parse(w), z.number().parse(h)));
   handle("app:openMain", (_e, route) => {
-    windows.openMain(route ? z.string().regex(/^\/main\/[a-z-]+$/).parse(route) : undefined);
+    windows.openMain(
+      route
+        ? z
+            .string()
+            .regex(/^\/main\/[a-z-]+$/)
+            .parse(route)
+        : undefined,
+    );
   });
 }
 
