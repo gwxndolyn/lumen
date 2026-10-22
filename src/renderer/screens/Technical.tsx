@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { ParsedProblemView } from "../../shared/api";
 import type { Settings } from "../../shared/types";
-import { api } from "../lib/api";
+import { api, errMsg } from "../lib/api";
 import { isRecordingStatus, useChat, useContextItems, type LiveTranscript } from "../lib/hooks";
 import { ContextChips, Empty, MessageView, Segmented, useAction } from "../components/ui";
 
@@ -40,16 +40,26 @@ export function TechnicalScreen({ settings, update, live }: { settings: Settings
   const [request, setRequest] = useState("");
   const [parsed, setParsed] = useState<ParsedProblemView | null>(null);
   const [permission, setPermission] = useState<Permission>("unknown");
-  const { error } = useAction();
+  const { error, setError } = useAction();
   const scrollRef = useRef<HTMLDivElement>(null);
   const screenText = items.some((i) => (i.source === "screenshot" || i.source === "ocr") && i.chars > 0 && i.status === "active");
   const recording = isRecordingStatus(live.status) && !live.elsewhere;
 
   // Re-parse locally as the user types or when a capture's text arrives.
   useEffect(() => {
-    const t = setTimeout(() => void api.analyzeProblem(problem).then(setParsed), 250);
+    const t = setTimeout(
+      () =>
+        void api
+          .analyzeProblem(problem)
+          .then((p) => {
+            setParsed(p);
+            setError(null);
+          })
+          .catch((err) => setError(`Could not analyze the problem: ${errMsg(err)}`)),
+      250,
+    );
     return () => clearTimeout(t);
-  }, [problem, screenText]);
+  }, [problem, screenText, setError]);
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
   }, [chat.messages]);
@@ -99,13 +109,19 @@ export function TechnicalScreen({ settings, update, live }: { settings: Settings
             </option>
           ))}
         </select>
-        <button className="btn" onClick={() => (location.hash = "/main/capture")} disabled={!settings.consent.screen} title={settings.consent.screen ? "Capture the problem from your screen" : "Enable screen context in Permissions"}>
+        <button
+          className="btn"
+          onClick={() => (location.hash = "/main/capture")}
+          disabled={!settings.consent.screen}
+          title={settings.consent.screen ? "Capture the problem from your screen" : "Enable screen context in Permissions"}
+        >
           ▣ Capture problem
         </button>
       </header>
       {permission === "unknown" && (
         <div className="alert info" style={{ margin: "10px 24px 0" }}>
-          <strong>Is AI assistance allowed for this assessment?</strong> Many coding assessments forbid outside help. Lumen will give full solutions only when you confirm it's permitted; otherwise it stays in practice mode (hints, explanations, complexity — no solutions).
+          <strong>Is AI assistance allowed for this assessment?</strong> Many coding assessments forbid outside help. Lumen will give full solutions only when you confirm it's permitted; otherwise it
+          stays in practice mode (hints, explanations, complexity — no solutions).
           <div className="row" style={{ marginTop: 8 }}>
             <button className="btn sm primary" onClick={() => setPermission("allowed")}>
               Yes — AI help is permitted / this is my own practice
@@ -125,16 +141,18 @@ export function TechnicalScreen({ settings, update, live }: { settings: Settings
             <textarea
               className="textarea mono"
               style={{ minHeight: 220, fontSize: 12 }}
-              placeholder={screenText ? "Leave empty to use the text read from your screen capture, or paste here." : "Paste the problem statement, examples, constraints and any starter code (use ``` fences for code)."}
+              placeholder={
+                screenText
+                  ? "Leave empty to use the text read from your screen capture, or paste here."
+                  : "Paste the problem statement, examples, constraints and any starter code (use ``` fences for code)."
+              }
               value={problem}
               onChange={(e) => setProblem(e.target.value)}
             />
           </label>
           {parsed && parsed.source !== "none" && (
             <div className="card" style={{ margin: 0 }}>
-              <h3 style={{ marginBottom: 4 }}>
-                Extracted {parsed.source === "screen" && <span className="badge">from screen (OCR)</span>}
-              </h3>
+              <h3 style={{ marginBottom: 4 }}>Extracted {parsed.source === "screen" && <span className="badge">from screen (OCR)</span>}</h3>
               <dl className="req-list" style={{ margin: 0 }}>
                 {parsed.title && (
                   <>
@@ -143,9 +161,22 @@ export function TechnicalScreen({ settings, update, live }: { settings: Settings
                   </>
                 )}
                 <dt>Kind</dt>
-                <dd>{parsed.kind.replace("_", " ")}{parsed.detectedLanguage ? ` · starter code in ${parsed.detectedLanguage}` : ""}</dd>
+                <dd>
+                  {parsed.kind.replace("_", " ")}
+                  {parsed.detectedLanguage ? ` · starter code in ${parsed.detectedLanguage}` : ""}
+                </dd>
                 <dt>Constraints</dt>
-                <dd>{parsed.constraints.length ? parsed.constraints.map((c) => <div key={c}><code>{c}</code></div>) : <span className="faint">none found</span>}</dd>
+                <dd>
+                  {parsed.constraints.length ? (
+                    parsed.constraints.map((c) => (
+                      <div key={c}>
+                        <code>{c}</code>
+                      </div>
+                    ))
+                  ) : (
+                    <span className="faint">none found</span>
+                  )}
+                </dd>
                 <dt>Examples</dt>
                 <dd>{parsed.examples.length ? `${parsed.examples.length} found` : <span className="faint">none found</span>}</dd>
                 {parsed.complexityHint && (
