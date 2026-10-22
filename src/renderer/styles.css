@@ -188,6 +188,11 @@ kbd { font-family: var(--mono); font-size: 11px; padding: 1px 5px; border-radius
 .md .codeblock header { display: flex; justify-content: space-between; align-items: center; padding: 4px 8px; border-bottom: 1px solid var(--border); font-size: 11px; color: var(--text-faint); }
 .md pre { margin: 0; padding: 10px 12px; overflow-x: auto; font-family: var(--mono); font-size: 12px; line-height: 1.55; }
 .md pre code { background: none; border: 0; padding: 0; }
+.md .tk-kw { color: var(--accent-strong); font-weight: 600; }
+.md .tk-str { color: #4f9d69; }
+.md .tk-com { color: var(--text-faint); font-style: italic; }
+.md .tk-num { color: #c27c2c; }
+.md .tk-fn { color: #4a8fd4; }
 .md hr { border: 0; border-top: 1px solid var(--border); margin: 12px 0; }
 .md table { border-collapse: collapse; margin: 0 0 10px; font-size: 12.5px; }
 .md th, .md td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; }

@@ -23,10 +23,11 @@ import { ChatService, type LiveTranscriptContext } from "./chatService";
 import { ContextEngine, type ContextRecord } from "./context/engine";
 import { addKnowledgeText, importKnowledge } from "./knowledge";
 import { LiveScreen } from "./liveScreen";
+import { hasChanged } from "./frameDiff";
 import { generateInsights, notesToMarkdown } from "./meetingService";
 import { CATEGORY_LABELS, classifyQuestion, QuestionDetector, type DetectedQuestion, type QuestionCategory } from "./interview/questions";
 import { parseProblem, problemToContext, type Language, type ParsedProblem } from "./technical/problem";
-import { interviewPrompt, technicalPrompt, type AnswerLength, type TechnicalTask } from "./workflows";
+import { interviewPrompt, technicalPrompt, type AnswerLength, type TechnicalDetail, type TechnicalTask } from "./workflows";
 import { chunkText, normalizeText } from "./context/text";
 import { PROFILE_SECTIONS, type ProfileSection } from "./interview/profile";
 import { Metrics } from "./metrics";
@@ -53,6 +54,8 @@ export interface CaptureInput {
   vision: { mediaType: "image/png" | "image/jpeg"; data: string };
   ocrPng: Buffer;
   thumbnailDataUrl: string;
+  /** Low-resolution fingerprint for change detection (live sampling only). */
+  fingerprint?: Uint8Array;
 }
 
 export interface AppCoreDeps {
@@ -129,6 +132,7 @@ export class AppCore {
   health: ProviderHealth;
   private ocrJobs = new Map<string, Promise<void>>();
   private liveScreenItemId: string | null = null;
+  private liveFingerprint: Uint8Array | null = null;
   private readonly now: () => number;
 
   constructor(
@@ -432,11 +436,15 @@ export class AppCore {
   private async liveScreenTick() {
     if (!this.deps.liveScreenCapture) throw new Error("Live screen context is not supported on this platform.");
     const frame = await this.deps.liveScreenCapture();
+    // Skip unchanged screens: no new OCR, no new context item, nothing re-sent.
+    if (frame.fingerprint && this.liveScreenItemId && !hasChanged(this.liveFingerprint, frame.fingerprint)) return false;
+    this.liveFingerprint = frame.fingerprint ?? null;
     // Replace the previous live frame instead of accumulating captures.
     if (this.liveScreenItemId) this.engine.remove(this.liveScreenItemId);
     const { record, ocr } = this.addCapture({ ...frame, title: `Live screen — ${frame.title}` }, { pending: false, live: true });
     this.liveScreenItemId = record.id;
     await ocr;
+    return true;
   }
 
   startLiveScreen() {
@@ -448,6 +456,7 @@ export class AppCore {
     this.liveScreen.stop();
     if (clear && this.liveScreenItemId) this.engine.remove(this.liveScreenItemId);
     this.liveScreenItemId = null;
+    this.liveFingerprint = null;
   }
 
   get liveScreenState(): LiveScreenState {
@@ -637,7 +646,7 @@ export class AppCore {
     return parseProblem(source);
   }
 
-  sendTechnical(req: { requestId: string; conversationId: string | null; text: string; task: TechnicalTask; language: Language; problem?: string; tone?: Tone; includeLiveTranscript?: boolean; style?: AnswerStyle }) {
+  sendTechnical(req: { requestId: string; conversationId: string | null; text: string; task: TechnicalTask; language: Language; problem?: string; tone?: Tone; includeLiveTranscript?: boolean; style?: AnswerStyle; detail?: TechnicalDetail }) {
     const parsed = req.problem?.trim() ? parseProblem(req.problem) : this.analyzeProblem("");
     const sid = this.activeSessionId;
     // The problem statement becomes explicit, session-scoped context (deduped if unchanged), so
@@ -645,11 +654,11 @@ export class AppCore {
     if (req.problem?.trim()) {
       this.engine.ingest({ sessionId: sid, source: "user_message", sourceId: "technical-problem", title: parsed.title ? `Problem: ${parsed.title}` : "Problem statement", text: `${problemToContext(parsed)}`, pinned: true });
     }
-    const label = { solve: "Solve", explain: "Explain code", debug: "Debug", review: "Code review", tests: "Test cases", complexity: "Complexity", refactor: "Refactor", hints: "Hints (practice)" }[req.task];
+    const label = { solve: "Solve", explain: "Explain code", debug: "Debug", review: "Code review", tests: "Test cases", complexity: "Complexity", refactor: "Refactor", hints: "Hints (practice)", system_design: "System design" }[req.task];
     return this.send({
       requestId: req.requestId,
       conversationId: req.conversationId,
-      text: technicalPrompt(req.task, req.language, req.problem?.trim() || parsed.statement ? parsed : null, req.text),
+      text: technicalPrompt(req.task, req.language, req.problem?.trim() || parsed.statement ? parsed : null, req.text, { level: this.settings.technical.level, detail: req.detail ?? this.settings.technical.detail }),
       retrievalQuery: `${req.text} ${parsed.title ?? ""} ${parsed.statement.slice(0, 400)}`,
       displayText: req.text.trim() || `${label}${parsed.title ? ` — ${parsed.title}` : ""} (${req.language})`,
       taskInstruction: `Task: technical assessment assistance (${req.task}). Follow the requested structure and language conventions exactly. Code goes in fenced blocks. Do not claim to have executed code.`,
@@ -749,6 +758,25 @@ export class AppCore {
 
   pauseTranscript() {
     this.live?.pause();
+  }
+
+  /** Global pause/resume shortcut. Returns the new state, or "none" when nothing is recording. */
+  toggleTranscriptPause(): "paused" | "resumed" | "none" {
+    const live = this.live;
+    if (!live || live.status === "stopped" || live.status === "error") return "none";
+    if (live.status === "paused") {
+      live.resume();
+      return "resumed";
+    }
+    live.pause();
+    return "paused";
+  }
+
+  /** Stop every in-flight answer (global cancel shortcut). Returns how many were stopped. */
+  cancelAllAnswers(): number {
+    const n = this.chat.activeRequests;
+    this.chat.cancelAll();
+    return n;
   }
 
   resumeTranscript() {

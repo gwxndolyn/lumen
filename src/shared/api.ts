@@ -109,7 +109,7 @@ export interface LumenApi {
   chatSend(
     req: Omit<ChatSendRequest, "sessionId" | "taskInstruction" | "displayText" | "origin" | "retrievalQuery"> & {
       mode?:
-        | { kind: "technical"; task: "solve" | "explain" | "debug" | "review" | "tests" | "complexity" | "refactor" | "hints"; language: string; problem?: string }
+        | { kind: "technical"; task: "solve" | "explain" | "debug" | "review" | "tests" | "complexity" | "refactor" | "hints" | "system_design"; language: string; problem?: string; detail?: "concise" | "full" }
         | { kind: "interview"; question: string; length: "short" | "medium" | "detailed" };
     },
   ): Promise<void>;

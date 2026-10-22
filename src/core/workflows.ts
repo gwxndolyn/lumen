@@ -46,7 +46,9 @@ export function interviewPrompt(q: Pick<DetectedQuestion, "text" | "category">, 
   ].join("\n");
 }
 
-export type TechnicalTask = "solve" | "explain" | "debug" | "review" | "tests" | "complexity" | "refactor" | "hints";
+export type TechnicalTask = "solve" | "explain" | "debug" | "review" | "tests" | "complexity" | "refactor" | "hints" | "system_design";
+export type TechnicalLevel = "junior" | "mid" | "senior";
+export type TechnicalDetail = "concise" | "full";
 
 const TASK_SPEC: Record<TechnicalTask, string> = {
   solve: [
@@ -65,6 +67,15 @@ const TASK_SPEC: Record<TechnicalTask, string> = {
   tests: "Write a focused test suite for the code/problem in the requested language's standard test framework, covering normal cases, edge cases and the given examples. State expected outputs.",
   complexity: "Analyze time and space complexity precisely (best/average/worst if they differ), identify the dominant operation, and say whether it fits the constraints.",
   refactor: "Suggest a refactor that keeps behavior identical: explain the improvements, then show the refactored code.",
+  system_design: [
+    "Use these headings:",
+    "1. **Requirements** — functional and non-functional (scale, latency, consistency); list the assumptions you make, each prefixed “Assumption:”.",
+    "2. **Estimates** — back-of-envelope traffic and storage, only if numbers are given or clearly assumed.",
+    "3. **High-level design** — components and data flow (a short ASCII diagram is fine).",
+    "4. **Data model & APIs** — key entities, storage choice and why, main endpoints.",
+    "5. **Deep dive** — the hardest part (e.g. fan-out, hot keys, consistency) and how it is solved.",
+    "6. **Trade-offs & bottlenecks** — what fails first under load and the alternatives considered.",
+  ].join("\n"),
   hints: "Practice mode: do NOT give the solution or code. Give three progressively stronger hints (pattern → key observation → algorithm outline), each under its own heading, so the user can solve it themselves.",
 };
 
@@ -81,13 +92,34 @@ const LANG_RULES: Record<Language, string> = {
   rust: "Rust (2021 edition): idiomatic ownership; no unsafe.",
 };
 
-export function technicalPrompt(task: TechnicalTask, language: Language, problem: ParsedProblem | null, userText: string): string {
+const LEVEL_RULE: Record<TechnicalLevel, string> = {
+  junior: "Pitch explanations for a junior engineer: define terms briefly and avoid unexplained jargon.",
+  mid: "Pitch explanations for a mid-level engineer.",
+  senior: "Pitch explanations for a senior engineer: skip basics, focus on trade-offs and production concerns.",
+};
+
+/** Concise answers for tasks with a long default structure; the user can ask for the full version. */
+const CONCISE: Partial<Record<TechnicalTask, string>> = {
+  solve: "Be concise: give only **Approach** (2–3 lines naming the pattern), **Code**, **Complexity** (one line), and **Edge cases** (one line). Skip the walkthrough and extra tests unless asked.",
+  system_design: "Be concise: requirements and assumptions in 3 bullets, a component list with data flow, the key trade-off, and the first bottleneck. No estimates unless numbers were given.",
+  review: "Be concise: the top 3 issues as bullets with line references, then the improved code.",
+};
+
+export interface TechnicalOptions {
+  level?: TechnicalLevel;
+  detail?: TechnicalDetail;
+}
+
+export function technicalPrompt(task: TechnicalTask, language: Language, problem: ParsedProblem | null, userText: string, opts: TechnicalOptions = {}): string {
   const lang = LANGUAGES.find((l) => l.id === language)!;
+  const concise = opts.detail !== "full" ? CONCISE[task] : undefined;
   const lines = [
     userText.trim() ? `My request: ${userText.trim()}` : "",
-    `Task: ${task}. Language: ${lang.label} (fence code as \`\`\`${lang.fence}).`,
+    task === "system_design" ? `Task: system design. If code is useful, use ${lang.label} (fence as \`\`\`${lang.fence}).` : `Task: ${task}. Language: ${lang.label} (fence code as \`\`\`${lang.fence}).`,
     TASK_SPEC[task],
-    LANG_RULES[language],
+    concise ?? "",
+    task === "system_design" ? "" : LANG_RULES[language],
+    LEVEL_RULE[opts.level ?? "mid"],
   ];
   if (problem) {
     if (problem.missing.length) {
@@ -98,6 +130,7 @@ export function technicalPrompt(task: TechnicalTask, language: Language, problem
     if (problem.complexityHint) lines.push(problem.complexityHint);
   }
   lines.push(
+    "Keep facts from context and your own assumptions separate: label anything not stated in the problem as “Assumption:”.",
     "Base the analysis only on the problem/code in context (cite it [Cn]). If something is unreadable or absent, ask for it rather than guessing. Never claim code was run: say “not executed” when giving expected outputs.",
   );
   return lines.filter(Boolean).join("\n\n");

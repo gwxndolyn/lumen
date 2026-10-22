@@ -19,6 +19,7 @@ import path from "node:path";
 import { z } from "zod";
 import { AppCore } from "../src/core/app";
 import { ShortcutManager, type ShortcutAction } from "../src/core/shortcuts";
+import { formatFromPath, markdownToText, sessionToMarkdown } from "../src/core/exportFormat";
 import { TesseractOcr } from "../src/core/ocr";
 import { SUPPORTED_DOC_EXTENSIONS, extractDocumentText } from "../src/core/knowledge";
 import type { Store } from "../src/core/storage/db";
@@ -93,6 +94,15 @@ function shortcutHandlers(): Record<ShortcutAction, () => void> {
     askAboutScreen: () => void askAboutScreen(),
     askAboutSelection: () => void askAboutSelection(),
     openMainWindow: () => windows.openMain(),
+    cancelResponse: () => {
+      const n = core.cancelAllAnswers();
+      if (n) toast("info", n === 1 ? "Answer stopped." : `${n} answers stopped.`);
+    },
+    toggleAudio: () => {
+      const r = core.toggleTranscriptPause();
+      if (r === "none") toast("info", "No live transcript is running.");
+      else toast("info", r === "paused" ? "Audio paused — nothing is being sent." : "Audio resumed.");
+    },
   };
 }
 
@@ -332,11 +342,17 @@ function registerIpc() {
     const data = store.exportSession(id.parse(sid));
     if (!data) throw new Error("Session not found.");
     const res = await dialog.showSaveDialog(winOf(e), {
-      defaultPath: `lumen-session-${data.session.title.replace(/[^\w-]+/g, "-").slice(0, 40)}.json`,
-      filters: [{ name: "JSON", extensions: ["json"] }],
+      defaultPath: `lumen-session-${data.session.title.replace(/[^\w-]+/g, "-").slice(0, 40)}.md`,
+      filters: [
+        { name: "Markdown", extensions: ["md"] },
+        { name: "Plain text", extensions: ["txt"] },
+        { name: "JSON (full backup)", extensions: ["json"] },
+      ],
     });
     if (res.canceled || !res.filePath) return null;
-    fs.writeFileSync(res.filePath, JSON.stringify(data, null, 2), { mode: 0o600 });
+    const fmt = formatFromPath(res.filePath);
+    const md = fmt === "json" ? "" : sessionToMarkdown(data);
+    writeFileAtomic(res.filePath, fmt === "json" ? JSON.stringify(data, null, 2) : fmt === "txt" ? markdownToText(md) : md, 0o600);
     return res.filePath;
   });
 
@@ -354,7 +370,7 @@ function registerIpc() {
     // from the renderer are not accepted.
     mode: z
       .discriminatedUnion("kind", [
-        z.object({ kind: z.literal("technical"), task: z.enum(["solve", "explain", "debug", "review", "tests", "complexity", "refactor", "hints"]), language: z.enum(["python", "java", "javascript", "typescript", "cpp", "sql", "go", "csharp", "kotlin", "rust"]), problem: str(60_000).optional() }),
+        z.object({ kind: z.literal("technical"), task: z.enum(["solve", "explain", "debug", "review", "tests", "complexity", "refactor", "hints", "system_design"]), language: z.enum(["python", "java", "javascript", "typescript", "cpp", "sql", "go", "csharp", "kotlin", "rust"]), problem: str(60_000).optional(), detail: z.enum(["concise", "full"]).optional() }),
         z.object({ kind: z.literal("interview"), question: str(4000), length: z.enum(["short", "medium", "detailed"]) }),
       ])
       .optional(),
@@ -362,7 +378,7 @@ function registerIpc() {
   handle("chat:send", (_e, req) => {
     const { mode, ...r } = chatReq.parse(req);
     // Requests are always bound to the active session; a stale renderer cannot target another one.
-    if (mode?.kind === "technical") void core.sendTechnical({ ...r, task: mode.task, language: mode.language, problem: mode.problem });
+    if (mode?.kind === "technical") void core.sendTechnical({ ...r, task: mode.task, language: mode.language, problem: mode.problem, detail: mode.detail });
     else if (mode?.kind === "interview") void core.sendInterview({ ...r, question: mode.question, length: mode.length });
     else void core.send({ ...r, sessionId: core.activeSessionId });
   });
@@ -400,7 +416,7 @@ function registerIpc() {
     const { filename, markdown } = core.exportNotes(id.parse(tid), z.boolean().parse(includeTranscript));
     const res = await dialog.showSaveDialog(winOf(e), { defaultPath: filename, filters: [{ name: "Markdown", extensions: ["md"] }, { name: "Text", extensions: ["txt"] }] });
     if (res.canceled || !res.filePath) return null;
-    writeFileAtomic(res.filePath, markdown, 0o600);
+    writeFileAtomic(res.filePath, formatFromPath(res.filePath) === "txt" ? markdownToText(markdown) : markdown, 0o600);
     return res.filePath;
   });
   handle("history:list", () => store.listConversations(core.activeSessionId));
@@ -885,7 +901,7 @@ function startup() {
         // it may appear in the frame; that is visible to the user and harmless.
         const held = await capture.captureCursorDisplay();
         const f = capture.finalize(held.captureId, null);
-        return { title: f.title, sourceId: f.sourceId, vision: f.vision, ocrPng: f.ocrPng, thumbnailDataUrl: f.thumbnailDataUrl };
+        return { title: f.title, sourceId: f.sourceId, vision: f.vision, ocrPng: f.ocrPng, thumbnailDataUrl: f.thumbnailDataUrl, fingerprint: f.fingerprint };
       },
     },
     settings,

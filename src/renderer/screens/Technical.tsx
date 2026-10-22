@@ -3,7 +3,7 @@ import type { ParsedProblemView } from "../../shared/api";
 import type { Settings } from "../../shared/types";
 import { api } from "../lib/api";
 import { isRecordingStatus, useChat, useContextItems, type LiveTranscript } from "../lib/hooks";
-import { ContextChips, Empty, MessageView, useAction } from "../components/ui";
+import { ContextChips, Empty, MessageView, Segmented, useAction } from "../components/ui";
 
 const LANGS = [
   ["python", "Python"],
@@ -18,7 +18,7 @@ const LANGS = [
   ["rust", "Rust"],
 ] as const;
 
-type Task = "solve" | "explain" | "debug" | "review" | "tests" | "complexity" | "refactor" | "hints";
+type Task = "solve" | "explain" | "debug" | "review" | "tests" | "complexity" | "refactor" | "hints" | "system_design";
 const TASKS: { id: Task; label: string; needsCode?: boolean }[] = [
   { id: "solve", label: "Solve" },
   { id: "hints", label: "Hints only" },
@@ -28,6 +28,7 @@ const TASKS: { id: Task; label: string; needsCode?: boolean }[] = [
   { id: "tests", label: "Tests" },
   { id: "complexity", label: "Complexity" },
   { id: "refactor", label: "Refactor", needsCode: true },
+  { id: "system_design", label: "System design" },
 ];
 
 type Permission = "unknown" | "allowed" | "practice";
@@ -53,15 +54,17 @@ export function TechnicalScreen({ settings, update, live }: { settings: Settings
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
   }, [chat.messages]);
 
-  const go = (task: Task) => {
+  const [lastTask, setLastTask] = useState<Task | null>(null);
+  const go = (task: Task, detail?: "concise" | "full") => {
     if (chat.busy) return;
     if (permission === "practice" && task !== "hints" && task !== "explain" && task !== "complexity") return;
     const label = TASKS.find((t) => t.id === task)!.label;
     void chat.send(request.trim() || `${label}${parsed?.title ? ` — ${parsed.title}` : ""}`, {
       includeLiveTranscript: recording,
-      mode: { kind: "technical", task, language: settings.technical.language, problem: problem.trim() || undefined },
+      mode: { kind: "technical", task, language: settings.technical.language, problem: problem.trim() || undefined, detail },
       label,
     });
+    setLastTask(task);
     setRequest("");
   };
 
@@ -70,6 +73,25 @@ export function TechnicalScreen({ settings, update, live }: { settings: Settings
       <header className="page-header">
         <h1>Technical Assessment</h1>
         <span className="spacer" />
+        <Segmented
+          label="Experience level"
+          value={settings.technical.level}
+          options={[
+            { value: "junior", label: "Junior" },
+            { value: "mid", label: "Mid" },
+            { value: "senior", label: "Senior" },
+          ]}
+          onChange={(v) => void update({ technical: { level: v } })}
+        />
+        <Segmented
+          label="Answer detail"
+          value={settings.technical.detail}
+          options={[
+            { value: "concise", label: "Concise" },
+            { value: "full", label: "Full" },
+          ]}
+          onChange={(v) => void update({ technical: { detail: v } })}
+        />
         <select className="select" style={{ width: 150 }} aria-label="Language" value={settings.technical.language} onChange={(e) => void update({ technical: { language: e.target.value } })}>
           {LANGS.map(([id, l]) => (
             <option key={id} value={id}>
@@ -174,6 +196,11 @@ export function TechnicalScreen({ settings, update, live }: { settings: Settings
                   </button>
                 );
               })}
+              {!chat.busy && lastTask && settings.technical.detail === "concise" && permission !== "practice" && chat.messages.length > 0 && (
+                <button className="btn ghost sm" title="Ask again with the full breakdown (walkthrough, tests, alternatives)" onClick={() => go(lastTask, "full")}>
+                  ⤢ Full explanation
+                </button>
+              )}
               {chat.busy && (
                 <button className="btn danger sm" onClick={chat.cancel}>
                   ■ Stop

@@ -67,6 +67,10 @@ export interface Settings {
   };
   technical: {
     language: "python" | "java" | "javascript" | "typescript" | "cpp" | "sql" | "go" | "csharp" | "kotlin" | "rust";
+    /** Pitch of explanations. */
+    level: "junior" | "mid" | "senior";
+    /** "concise" gives the shortest useful answer; the user can ask for the full breakdown. */
+    detail: "concise" | "full";
   };
   screen: {
     /** Show a preview and require confirmation before a capture can be used. */
@@ -96,6 +100,8 @@ export interface Settings {
     askAboutScreen: string;
     askAboutSelection: string;
     openMainWindow: string;
+    cancelResponse: string;
+    toggleAudio: string;
   };
 
   privacy: {
@@ -474,6 +480,8 @@ export interface LiveScreenState {
   lastCaptureAt: number | null;
   lastError: string | null;
   captures: number;
+  /** Frames skipped because the screen had not changed since the last accepted frame. */
+  skipped: number;
 }
 
 export interface RequestMetric {

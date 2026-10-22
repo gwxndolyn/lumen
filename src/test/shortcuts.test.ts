@@ -62,7 +62,7 @@ describe("registration", () => {
     const { reg, m } = make();
     m.apply();
     expect([...reg.owners.keys()].sort()).toEqual(
-      ["CommandOrControl+Enter", "CommandOrControl+\\", "CommandOrControl+Shift+Enter", "CommandOrControl+Shift+S", "CommandOrControl+Shift+A", "CommandOrControl+Shift+L"].sort(),
+      ["CommandOrControl+Enter", "CommandOrControl+\\", "CommandOrControl+Shift+Enter", "CommandOrControl+Shift+S", "CommandOrControl+Shift+A", "CommandOrControl+Shift+L", "CommandOrControl+Shift+Backspace", "CommandOrControl+Shift+M"].sort(),
     );
     expect(m.status().scrollUp.status).toBe("inactive");
     m.setPanelVisible(true);
@@ -78,6 +78,14 @@ describe("registration", () => {
     m.setPanelVisible(true);
     for (const a of ["CommandOrControl+Enter", "CommandOrControl+\\", "CommandOrControl+Up", "CommandOrControl+Down", "CommandOrControl+Left", "CommandOrControl+Right", "CommandOrControl+Shift+Enter"]) reg.press(a);
     expect(fired).toEqual(["requestAssist", "toggleOverlay", "scrollUp", "scrollDown", "moveLeft", "moveRight", "discreetInput"]);
+  });
+
+  it("registers configurable cancel and audio pause/resume shortcuts", () => {
+    const { reg, m, fired } = make();
+    m.apply();
+    reg.press("CommandOrControl+Shift+Backspace");
+    reg.press("CommandOrControl+Shift+M");
+    expect(fired).toEqual(["cancelResponse", "toggleAudio"]);
   });
 
   it("is idempotent — repeated apply() never double-registers", () => {

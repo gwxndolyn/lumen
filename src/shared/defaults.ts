@@ -22,6 +22,8 @@ export const DEFAULT_SHORTCUTS: Settings["shortcuts"] = {
   askAboutScreen: "CommandOrControl+Shift+S",
   askAboutSelection: "CommandOrControl+Shift+A",
   openMainWindow: "CommandOrControl+Shift+L",
+  cancelResponse: "CommandOrControl+Shift+Backspace",
+  toggleAudio: "CommandOrControl+Shift+M",
 };
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -58,7 +60,7 @@ export const DEFAULT_SETTINGS: Settings = {
     useConversationHistory: true,
   },
   interview: { autoSuggest: true, length: "short", interviewer: "any" },
-  technical: { language: "python" },
+  technical: { language: "python", level: "mid", detail: "concise" },
   screen: {
     requirePreview: true,
     sendImages: true,

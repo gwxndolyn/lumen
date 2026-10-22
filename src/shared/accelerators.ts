@@ -10,6 +10,8 @@ export function formatAccelerator(acc: string, platform: string): string {
     Shift: ["⇧", "Shift"],
     Alt: ["⌥", "Alt"],
     Enter: ["↵", "Enter"],
+    Backspace: ["⌫", "Backspace"],
+    Delete: ["⌦", "Delete"],
     Up: ["↑", "Up"],
     Down: ["↓", "Down"],
     Left: ["←", "Left"],

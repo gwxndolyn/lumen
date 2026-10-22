@@ -3,6 +3,7 @@
 // generated content cannot inject markup, scripts or tracking pixels.
 import { Fragment, useState, type ReactNode } from "react";
 import type { ContextReference } from "../../shared/types";
+import { highlight } from "./highlight";
 
 export type Block =
   | { type: "code"; lang: string; text: string }
@@ -144,7 +145,9 @@ function CodeBlock({ lang, text, onCopy }: { lang: string; text: string; onCopy:
         </button>
       </header>
       <pre>
-        <code>{text}</code>
+        <code>
+          {highlight(text, lang).map((t, i) => (t.kind === "plain" ? t.text : <span key={i} className={`tk-${t.kind}`}>{t.text}</span>))}
+        </code>
       </pre>
     </div>
   );

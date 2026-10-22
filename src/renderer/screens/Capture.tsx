@@ -132,7 +132,7 @@ export function CaptureScreen({ settings, update, go }: { settings: Settings; up
             </div>
             {live?.active && (
               <div className="small faint" style={{ marginTop: 6 }}>
-                {live.captures} frames · {live.lastCaptureAt ? `last ${Math.max(0, Math.round((now - live.lastCaptureAt) / 1000))}s ago` : "starting…"}
+                {live.captures} frames{live.skipped ? ` (${live.skipped} unchanged, skipped)` : ""} · {live.lastCaptureAt ? `last ${Math.max(0, Math.round((now - live.lastCaptureAt) / 1000))}s ago` : "starting…"}
                 {live.lastError && <span style={{ color: "var(--danger)" }}> · {live.lastError}</span>}
               </div>
             )}

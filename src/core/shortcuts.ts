@@ -11,7 +11,9 @@ export type ShortcutAction =
   | "discreetInput"
   | "askAboutScreen"
   | "askAboutSelection"
-  | "openMainWindow";
+  | "openMainWindow"
+  | "cancelResponse"
+  | "toggleAudio";
 
 export type ShortcutBindings = Record<ShortcutAction, string>;
 
@@ -31,6 +33,8 @@ export const SHORTCUT_SCOPE: Record<ShortcutAction, "always" | "visible"> = {
   askAboutScreen: "always",
   askAboutSelection: "always",
   openMainWindow: "always",
+  cancelResponse: "always",
+  toggleAudio: "always",
 };
 
 export const SHORTCUT_ORDER: ShortcutAction[] = [
@@ -44,6 +48,8 @@ export const SHORTCUT_ORDER: ShortcutAction[] = [
   "askAboutScreen",
   "askAboutSelection",
   "openMainWindow",
+  "cancelResponse",
+  "toggleAudio",
 ];
 
 export type ShortcutState =

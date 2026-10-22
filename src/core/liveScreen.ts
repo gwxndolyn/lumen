@@ -6,11 +6,11 @@ import type { LiveScreenState } from "../shared/types";
  */
 export class LiveScreen {
   private timer: ReturnType<typeof setTimeout> | null = null;
-  private state: LiveScreenState = { active: false, paused: false, intervalSec: 10, lastCaptureAt: null, lastError: null, captures: 0 };
+  private state: LiveScreenState = { active: false, paused: false, intervalSec: 10, lastCaptureAt: null, lastError: null, captures: 0, skipped: 0 };
   private busy = false;
 
   constructor(
-    private readonly tick: () => Promise<void>,
+    private readonly tick: () => Promise<boolean>,
     private readonly emit: (s: LiveScreenState) => void,
     private readonly isPermitted: () => boolean,
     private readonly now: () => number = Date.now,
@@ -67,9 +67,10 @@ export class LiveScreen {
     if (!this.busy) {
       this.busy = true;
       try {
-        await this.tick();
-        this.state.lastCaptureAt = this.now();
-        this.state.captures++;
+        if (await this.tick()) {
+          this.state.lastCaptureAt = this.now();
+          this.state.captures++;
+        } else this.state.skipped++;
         this.state.lastError = null;
       } catch (err) {
         this.state.lastError = (err as Error).message;

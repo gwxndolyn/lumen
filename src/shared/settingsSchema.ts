@@ -56,6 +56,8 @@ export const settingsSchema = z.object({
   }),
   technical: z.object({
     language: z.enum(["python", "java", "javascript", "typescript", "cpp", "sql", "go", "csharp", "kotlin", "rust"]),
+    level: z.enum(["junior", "mid", "senior"]),
+    detail: z.enum(["concise", "full"]),
   }),
   screen: z.object({
     requirePreview: z.boolean(),
@@ -90,6 +92,8 @@ export const settingsSchema = z.object({
     askAboutScreen: accelerator,
     askAboutSelection: accelerator,
     openMainWindow: accelerator,
+    cancelResponse: accelerator,
+    toggleAudio: accelerator,
   }),
   privacy: z.object({
     transcriptRetentionDays: z.number().int().min(0).max(3650),

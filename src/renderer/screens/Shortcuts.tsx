@@ -17,6 +17,8 @@ const LABELS: Record<keyof Settings["shortcuts"], { title: string; hint: string;
   askAboutScreen: { group: "Context", title: "Attach screen", hint: "Capture the display under the cursor and attach it to the next question." },
   askAboutSelection: { group: "Context", title: "Attach selection", hint: "Copy text in any app (⌘/Ctrl+C), then press this to attach it as selected text." },
   openMainWindow: { group: "Context", title: "Open full window", hint: "Open the main Lumen window." },
+  cancelResponse: { group: "Assistant", title: "Stop answer", hint: "Stops every answer that is currently being written." },
+  toggleAudio: { group: "Context", title: "Pause / resume audio", hint: "Pauses or resumes the live transcript. Audio is not sent while paused. Does nothing when no transcript is running." },
 };
 
 type Status = Record<string, { status: string; accelerator: string; reason?: string; alternatives?: string[] }>;

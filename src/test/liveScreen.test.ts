@@ -6,7 +6,7 @@ describe("live screen context", () => {
   it("never starts without consent and stops itself when consent is revoked", async () => {
     let permitted = false;
     let ticks = 0;
-    const ls = new LiveScreen(async () => void ticks++, () => undefined, () => permitted);
+    const ls = new LiveScreen(async () => (ticks++, true), () => undefined, () => permitted);
     expect(() => ls.start(3)).toThrow(/off/);
     permitted = true;
     ls.start(3);

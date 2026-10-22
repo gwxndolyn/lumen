@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { desktopCapturer, nativeImage, screen, systemPreferences, type NativeImage } from "electron";
 import { isBlankBitmap } from "./geometry";
+import { FINGERPRINT_SIZE, fingerprint } from "../src/core/frameDiff";
 import type { CaptureCapabilities, CaptureRegion, CaptureSource, OsPermission, PermissionStatus } from "../src/shared/types";
 
 /** Longest edge sent to the vision model; larger images are downscaled (Anthropic guidance). */
@@ -39,6 +40,7 @@ export interface FinalizedCapture {
   thumbnailDataUrl: string;
   width: number;
   height: number;
+  fingerprint: Uint8Array;
 }
 
 /**
@@ -219,6 +221,7 @@ export class CaptureService {
     const oScale = long < OCR_MIN_EDGE ? Math.min(3, OCR_MIN_EDGE / long) : long > OCR_MAX_EDGE ? OCR_MAX_EDGE / long : 1;
     const ocrImg = oScale !== 1 ? img.resize({ width: Math.round(width * oScale), height: Math.round(height * oScale), quality: "best" }) : img;
     const thumb = img.resize({ width: Math.min(240, width) });
+    const tiny = img.resize({ width: FINGERPRINT_SIZE, height: FINGERPRINT_SIZE, quality: "good" });
     return {
       title: p.title,
       sourceId: p.sourceId,
@@ -227,6 +230,7 @@ export class CaptureService {
       thumbnailDataUrl: thumb.toDataURL(),
       width,
       height,
+      fingerprint: fingerprint(tiny.toBitmap(), FINGERPRINT_SIZE, FINGERPRINT_SIZE),
     };
   }
 
