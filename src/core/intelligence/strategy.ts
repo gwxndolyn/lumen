@@ -100,8 +100,10 @@ const CATEGORY_RULE: Record<TaskCategory, Record<Depth, string>> = {
     deep: "Testing: test strategy (unit/integration), cases by category, the tests, fixtures/mocks, and what remains untested.",
   },
   behavioral: {
-    quick: "Behavioral question: a short STAR outline using only the user's own experience from context (cite it). If none is in context, give the structure with [placeholders] and say what to add. Never invent employers, projects, metrics or achievements.",
-    balanced: "Behavioral question: a STAR answer built only from the user's documented experience in context, with citations; use [placeholders] for anything missing. Never invent employers, projects, metrics or achievements.",
+    quick:
+      "Behavioral question: a short STAR outline using only the user's own experience from context (cite it). If none is in context, give the structure with [placeholders] and say what to add. Never invent employers, projects, metrics or achievements.",
+    balanced:
+      "Behavioral question: a STAR answer built only from the user's documented experience in context, with citations; use [placeholders] for anything missing. Never invent employers, projects, metrics or achievements.",
     deep: "Behavioral question: a full STAR answer from the user's documented experience (cited), likely follow-up questions, and what to emphasize. Use [placeholders] for missing facts; never invent experience.",
   },
   project: {
@@ -114,10 +116,13 @@ const CATEGORY_RULE: Record<TaskCategory, Record<Depth, string>> = {
     balanced: "Meeting summary from the transcript only: summary, decisions, action items (owner if stated), open questions. Cite transcript lines.",
     deep: "Meeting summary from the transcript only: summary, discussion points, decisions, action items, open questions and suggested follow-ups, with citations.",
   },
+  // Also the fallback when the rules could not classify the request, so it tells the model to pick
+  // the right shape itself rather than forcing a generic answer onto a technical question.
   general: {
-    quick: "Answer directly.",
-    balanced: "Answer, with the key reasoning.",
-    deep: "Answer thoroughly, including caveats and alternatives.",
+    quick:
+      "Answer directly. If this is actually a coding, debugging, design or interview question, use the shortest structure that fits it (e.g. cause + fix for a bug, approach + code for a problem).",
+    balanced: "Answer, with the key reasoning. If this is a coding, debugging, system-design or behavioral question, structure it the way that task needs (e.g. root cause → fix → test for a bug).",
+    deep: "Answer thoroughly, including caveats and alternatives. If this is a technical task, use the structure that task needs (requirements → design → trade-offs for design; approach → code → complexity → edge cases for algorithms).",
   },
 };
 
@@ -127,7 +132,8 @@ const RELATION_RULE: Record<TurnRelation, string | null> = {
   simplify: "The user wants your previous answer simpler: restate it in plain language, shorter, with one concrete example and no new material.",
   elaborate: "The user wants you to elaborate on your previous answer: go deeper on the same topic without repeating it verbatim.",
   correction: "The user is correcting an earlier assumption or answer: acknowledge the correction in one line, drop the wrong assumption, and redo the answer under the corrected premise.",
-  screen: "The user is asking about what is on their screen: base the answer on the captured screen sources in <context> and reference the captured code or text (quote it) rather than inventing a different implementation. If the capture is incomplete or unreadable, say exactly what is missing and ask for a clearer capture. You only see what was captured — not other tabs, windows, files or screens.",
+  screen:
+    "The user is asking about what is on their screen: base the answer on the captured screen sources in <context> and reference the captured code or text (quote it) rather than inventing a different implementation. If the capture is incomplete or unreadable, say exactly what is missing and ask for a clearer capture. You only see what was captured — not other tabs, windows, files or screens.",
   revise_code: "The user wants the code from your previous answer revised: apply the requested change to that code, show the updated code, and list what changed.",
 };
 
@@ -145,7 +151,10 @@ export function buildStrategy(turn: ResolvedTurn, category: TaskCategory, prefs:
   const lines: string[] = [];
   const relationRule = RELATION_RULE[turn.relation];
   if (relationRule) lines.push(relationRule);
-  if (turn.ambiguous) lines.push("The message is too short or vague to answer reliably and there is no earlier turn it could refer to: ask one short clarifying question (offer 2–3 likely interpretations) instead of guessing.");
+  if (turn.ambiguous)
+    lines.push(
+      "The message is too short or vague to answer reliably and there is no earlier turn it could refer to: ask one short clarifying question (offer 2–3 likely interpretations) instead of guessing.",
+    );
   if (turn.requestedLanguage) {
     const l = LANGUAGES.find((x) => x.id === turn.requestedLanguage)!;
     lines.push(`The user asked for ${l.label}: use ${l.label} for code in this answer (fence as \`\`\`${l.fence}).`);

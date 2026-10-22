@@ -41,19 +41,22 @@ const RULES: [TaskCategory, RegExp][] = [
   ["project", /\b(walk (me )?through (my|your|a|the) project|my project|project (deep dive|discussion)|on my resume|what i built|my role (in|on))\b/i],
   [
     "debugging",
-    /\b(bug|debug|error|exception|traceback|stack ?trace|crash(es|ing)?|fails?|failing|doesn'?t work|not working|wrong (answer|output|result)|segfault|undefined is not|npe)\b|\w*(exception|error)\b|null ?pointer/i,
+    /\b(bug|debug|error|exception|traceback|stack ?trace|crash(es|ing)?|fails?|failing|doesn'?t work|not working|wrong (answer|output|result)|segfault|undefined is not|npe|seg(mentation)? ?fault|off[- ]by[- ]one)\b|\w*(exception|error)\b|null ?pointer/i,
   ],
   ["testing", /\b(unit tests?|test cases?|write tests|integration tests?|e2e|end-to-end tests?|mock(ing)?|test coverage|tdd|jest|pytest|junit|vitest|qa)\b/i],
-  ["database_sql", /\b(sql|query|queries|select .* from|join|group by|index(es|ing)?|postgres(ql)?|mysql|sqlite|database|schema|normali[sz]|transaction isolation|nosql|mongodb|dynamo)\b/i],
+  [
+    "database_sql",
+    /\b(sql|query|queries|select .* from|join|group by|index(es|ing)?|postgres(ql)?|mysql|sqlite|database|schema|normali[sz]|transaction isolation|nosql|mongodb|dynamo|group (sales|rows|records|orders|users) by|by month|per month)\b/i,
+  ],
   [
     "system_design",
-    /\b(design (a|an|the) (system|service|platform|url shortener|chat|feed|rate limiter|cache|notification)|system design|scal(e|ability|able) to|at (high|large|massive) scale|distributed|shard(ing)?|load balanc|high availability|consistency model|cap theorem|million (users|requests))\b/i,
+    /\b(design (a|an|the) (system|service|platform|url shortener|chat|feed|rate limiter|cache|notification)|system design|scal(e|ability|able) to|at (high|large|massive )?scale|distributed|shard(ing)?|load balanc|high availability|consistency model|cap theorem|million (users|requests))\b/i,
   ],
   ["api_backend", /\b(rest(ful)? api|api (design|endpoint)|endpoints?|grpc|graphql|backend|microservices?|authentication|oauth|jwt|middleware|rate limit|idempoten|webhook|http status)\b/i],
   ["frontend", /\b(react|vue|angular|svelte|css|html|dom|component|hooks?|useeffect|usestate|frontend|front-end|browser|layout|flexbox|grid layout|accessibility|a11y|jetpack compose|swiftui)\b/i],
   [
     "code_explanation",
-    /\b(explain (this|the|what this) (code|function|snippet|method|class|query)|what does (this|the) (code|function|line|snippet) do|how does this (code|function) work|walk me through (this|the) code)\b/i,
+    /\b(explain (this|the|what this) (code|function|snippet|method|class|query)|what does (this|the) (code|function|line|snippet|regex|regular expression|script|command) do|how does this (code|function) work|walk me through (this|the) code)\b/i,
   ],
   [
     "algorithm",

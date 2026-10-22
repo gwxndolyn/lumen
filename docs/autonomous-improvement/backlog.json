@@ -182,8 +182,10 @@
         "New holdout category accuracy > 74% with no tuned-set regression"
       ],
       "verification": "intentEval.test.ts",
-      "status": "open",
-      "notes": "Consider a provider-backed classifier only for low-confidence cases if rules plateau; that costs a model call and latency, so measure first."
+      "status": "done-partial",
+      "notes": "Consider a provider-backed classifier only for low-confidence cases if rules plateau; that costs a model call and latency, so measure first.",
+      "evidence_of_completion": "Protocol followed: holdout #1 folded into tuned set; holdout #2 written BEFORE tuning. Tuned set: relations 96%, ambiguity 100%, categories 99%. Holdout #2 (untouched): relations 78%, categories 42%. Rule fixes on tuned misses did not move holdout #2 at all (10/24 before and after) \u2014 keyword rules do not generalise to new phrasings. Mitigation shipped: the 'general' fallback strategy now tells the model to choose the task's structure itself, so a miss degrades to a reasonable answer instead of a generic one. Floors set at measured holdout values.",
+      "lesson": "Stop tuning keyword rules; each rule fixes only the phrasing it was written for."
     },
     {
       "id": "LUM-010",
@@ -203,6 +205,44 @@
       "verification": "npm run format:all; npm run check",
       "status": "open",
       "notes": "Do it on its own so the diff is reviewable as pure formatting; ask before merging if other branches are in flight."
+    },
+    {
+      "id": "LUM-011",
+      "title": "Measure whether classification misses hurt answers before replacing the rules",
+      "category": "high-value",
+      "subsystem": "core/intelligence",
+      "problem": "Category recall on unseen phrasing is 42%, but misses fall back to 'general', which now asks the model to pick the structure. Unknown: does a miss actually produce a worse answer? If not, a model-based classifier would add cost and latency for nothing.",
+      "evidence": "LUM-009 results",
+      "benefit": "Decide with data whether a classifier call is worth its latency/cost.",
+      "impact": 3,
+      "confidence": 0.5,
+      "effort": 3,
+      "risk": "low",
+      "acceptance": [
+        "With an API key: run the same 24 holdout prompts with forced-correct vs actual category; grade answer structure with a rubric (not an LLM judge alone); record cost/latency of an extra classifier call"
+      ],
+      "verification": "live eval script (requires key)",
+      "status": "blocked",
+      "blocker": "Requires an API key (see LUM-007)."
+    },
+    {
+      "id": "LUM-012",
+      "title": "'Memory leak in my Node server' routed to language_framework",
+      "category": "ux",
+      "subsystem": "core/intelligence",
+      "problem": "The only miss that picks a wrong specialised template instead of falling back. 'node' matches language_framework before any debugging cue.",
+      "evidence": "holdout #2",
+      "impact": 2,
+      "confidence": 0.7,
+      "effort": 1,
+      "risk": "low",
+      "acceptance": [
+        "Symptom words (leak, freeze, hang, slow) rank debugging above language mentions",
+        "No tuned-set regression; re-measure on a NEW holdout"
+      ],
+      "verification": "intentEval.test.ts",
+      "status": "open",
+      "notes": "Holdout #2 is now contaminated for this case once fixed; write holdout #3 first."
     }
   ]
 }

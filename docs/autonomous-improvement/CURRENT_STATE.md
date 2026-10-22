@@ -44,10 +44,10 @@ Intent accuracy, from `src/test/intentEval.test.ts` (synthetic labels):
 
 | Set | Relations | Ambiguity | Categories |
 |---|---|---|---|
-| Tuned set | 100% | 100% | 100% |
-| Held-out set | 89% | 100% | 74% |
+| Tuned set (incl. former holdout #1) | 96% | 100% | 99% |
+| Held-out set #2 (written before tuning) | 78% | 100% | 42% |
 
-The held-out set is the honest number.
+The held-out set is the honest number. Tuning the rules on known misses did not move held-out #2 at all, so keyword rules have plateaued. Misses fall back to "general", which now asks the model to choose the task's structure itself.
 
 ## Cycles completed
 
@@ -59,6 +59,7 @@ The held-out set is the honest number.
 | 4 | LUM-005 audit advisories | done via a shipped-code audit gate; negative test confirms it fails when an exclusion is removed |
 | 5 | LUM-002 CI workflow | written and YAML-validated; **unverified** until first push |
 | 6 | LUM-006 intent evaluation | done; baseline, then targeted fixes, then a held-out measurement |
+| 7 | LUM-009 category recall | partial; rules stopped generalising (held-out #2: 42% before and after); the general fallback was made safer. Next step needs a key (LUM-011) |
 
 ## Blockers (need the user)
 
@@ -69,9 +70,11 @@ The held-out set is the honest number.
 
 ## Next recommended action
 
-LUM-009 (category recall on unseen phrasing). First write a new held-out set, then fold the current one into the tuned set, then tune. After that, LUM-010 (a one-off formatting commit).
+- **With an API key:** LUM-011. Measure whether classification misses actually produce worse answers before adding a model call.
+- **Without one:** LUM-012 (small), then LUM-010 (a one-off formatting commit; ask before merging).
 
 ## Lessons
 
 - Every gate needs a negative test. The first audit-gate version passed even with the exclusions removed: the packaged asar was still present, and its check also matched a commented line.
 - Measure on data you didn't tune on. Tuned-set accuracy went to 100%, while the held-out set shows 74% for categories.
+- Keyword rules only fix the phrasing they were written for. Held-out #2 stayed at 42% after rule changes. Stop tuning rules; measure the impact instead (LUM-011).
