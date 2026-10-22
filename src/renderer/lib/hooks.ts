@@ -114,7 +114,7 @@ export interface UiMessage {
   references: ContextReference[];
   status: "done" | "streaming" | "error" | "cancelled";
   error?: { message: string; code: ErrorCode; retryable: boolean };
-  meta?: { model?: string; isMock?: boolean; costUsd?: number; ttftMs?: number | null; totalMs?: number; fallback?: string | null; style?: AnswerStyle };
+  meta?: { model?: string; isMock?: boolean; costUsd?: number; ttftMs?: number | null; totalMs?: number; fallback?: string | null; style?: AnswerStyle; stopReason?: string };
   warnings?: string[];
   availability?: SourceAvailability;
   retryNote?: string;
@@ -127,7 +127,7 @@ function fromStored(m: ChatMessage): UiMessage {
     content: m.content,
     references: m.references,
     status: m.meta.cancelled ? "cancelled" : "done",
-    meta: { model: m.meta.model, isMock: m.meta.isMock, costUsd: m.meta.estimatedCostUsd, ttftMs: m.meta.ttftMs, totalMs: m.meta.totalMs, style: m.meta.style },
+    meta: { model: m.meta.model, isMock: m.meta.isMock, costUsd: m.meta.estimatedCostUsd, ttftMs: m.meta.ttftMs, totalMs: m.meta.totalMs, style: m.meta.style, stopReason: m.meta.stopReason },
   };
 }
 
@@ -187,7 +187,7 @@ export function useChat(settings: Settings | null) {
               cur.status = "done";
               cur.retryNote = undefined;
               cur.references = cur.references.filter((r) => e.citedLabels.includes(r.label));
-              cur.meta = { ...cur.meta, costUsd: e.usage.estimatedCostUsd, ttftMs: e.ttftMs, totalMs: e.totalMs, fallback: e.servedByFallback };
+              cur.meta = { ...cur.meta, costUsd: e.usage.estimatedCostUsd, ttftMs: e.ttftMs, totalMs: e.totalMs, fallback: e.servedByFallback, stopReason: e.stopReason };
               break;
             case "error":
               if (e.conversationId) setConversationId(e.conversationId);
@@ -266,9 +266,25 @@ export function useChat(settings: Settings | null) {
   );
 
   const load = useCallback(async (id: string | null) => {
+    if (reqRef.current) return; // never swap threads under a streaming answer
     setConversationId(id);
     setMessages(id ? (await api.getMessages(id)).map(fromStored) : []);
+    void api.setOpenConversation(id);
   }, []);
+
+  // Restore the conversation that was open in this session (after restart, reload or switch).
+  const restore = useCallback(async () => {
+    const id = await api.openConversation().catch(() => null);
+    if (!id || reqRef.current) return;
+    const msgs = await api.getMessages(id).catch(() => null);
+    if (!msgs || reqRef.current) return;
+    setConversationId(id);
+    setMessages(msgs.map(fromStored));
+  }, []);
+  useEffect(() => void restore(), [restore]);
+  useAppEvent((e) => {
+    if (e.type === "session-switched") void restore();
+  });
 
   return { conversationId, messages, busy: activeRequest !== null, send, cancel, retry, load };
 }
@@ -277,7 +293,9 @@ export interface LiveTranscript extends Omit<TranscriptState, "segments"> {
   detail: string | null;
   action: "retry" | "settings" | "microphone" | "permissions" | null;
   segments: TranscriptSegment[];
+  /** Latest partial result per channel ("mic" / "system" / "mono"). */
   interim: { text: string; speaker: string | null } | null;
+  interims: Record<string, { text: string; speaker: string | null }>;
   audio: AudioInputState | null;
   /** Recording is running in a different session than the one shown. */
   elsewhere: boolean;
@@ -294,6 +312,7 @@ const EMPTY: LiveTranscript = {
   action: null,
   segments: [],
   interim: null,
+  interims: {},
   audio: null,
   elsewhere: false,
 };
@@ -337,15 +356,24 @@ export function useLiveTranscript(): LiveTranscript {
               action: e.action ?? null,
               segments: fresh ? [] : p.segments,
               interim: e.status === "stopped" || e.status === "error" ? null : p.interim,
+              interims: e.status === "stopped" || e.status === "error" || fresh ? {} : p.interims,
               audio: e.status === "stopped" || e.status === "error" ? null : p.audio,
             };
           }
           if (p.elsewhere) return p;
-          if (e.type === "interim") return e.sessionId === p.sessionId ? { ...p, interim: { text: e.text, speaker: e.speaker } } : p;
+          if (e.type === "interim") {
+            if (e.sessionId !== p.sessionId) return p;
+            const interims = { ...p.interims, [e.channel ?? "mono"]: { text: e.text, speaker: e.speaker } };
+            return { ...p, interims, interim: Object.values(interims).at(-1) ?? null };
+          }
           if (e.segment.sessionId !== p.sessionId) return p;
           // Guard against duplicate delivery of the same segment.
           if (p.segments.some((s) => s.id === e.segment.id)) return p;
-          return { ...p, interim: null, segments: [...p.segments, e.segment] };
+          // A final only clears the partial for its own channel.
+          const interims = { ...p.interims };
+          delete interims[e.segment.channel ?? "mono"];
+          const segments = [...p.segments, e.segment].sort((a, b) => a.startMs - b.startMs);
+          return { ...p, interims, interim: Object.values(interims).at(-1) ?? null, segments };
         });
       }),
     [],

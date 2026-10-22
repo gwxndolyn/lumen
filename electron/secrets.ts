@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { writeFileAtomic } from "../src/core/fsutil";
 
 import type { SecretName } from "../src/shared/types";
 export type { SecretName };
@@ -21,6 +22,8 @@ const ENV: Record<SecretName, string> = { anthropic: "ANTHROPIC_API_KEY", deepgr
 export class SecretStore {
   private readonly file: string;
   private memory = new Map<SecretName, string>();
+  /** Keys that exist on disk but could not be decrypted (e.g. keychain reset, profile copied). */
+  readonly unreadable = new Set<SecretName>();
 
   constructor(
     dir: string,
@@ -43,8 +46,11 @@ export class SecretStore {
     const enc = this.readDisk()[name];
     if (enc && this.cipher.isEncryptionAvailable()) {
       try {
-        return this.cipher.decryptString(Buffer.from(enc, "base64"));
+        const v = this.cipher.decryptString(Buffer.from(enc, "base64"));
+        this.unreadable.delete(name);
+        return v;
       } catch {
+        this.unreadable.add(name);
         return null;
       }
     }
@@ -65,7 +71,7 @@ export class SecretStore {
     }
     const disk = this.readDisk();
     disk[name] = this.cipher.encryptString(v).toString("base64");
-    fs.writeFileSync(this.file, JSON.stringify(disk), { mode: 0o600 });
+    writeFileAtomic(this.file, JSON.stringify(disk));
     this.memory.delete(name);
   }
 
@@ -73,7 +79,7 @@ export class SecretStore {
     this.memory.delete(name);
     const disk = this.readDisk();
     delete disk[name];
-    fs.writeFileSync(this.file, JSON.stringify(disk), { mode: 0o600 });
+    writeFileAtomic(this.file, JSON.stringify(disk));
   }
 
   get encryptionAvailable() {

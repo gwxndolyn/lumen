@@ -27,6 +27,9 @@ type TesseractWorker = {
 export class TesseractOcr implements OcrEngine {
   private worker: Promise<TesseractWorker> | null = null;
   private queue: Promise<unknown> = Promise.resolve();
+  private pending = 0;
+  /** Captures waiting for OCR beyond this are rejected immediately instead of queueing forever. */
+  static readonly MAX_PENDING = 4;
 
   constructor(
     private readonly opts: { langPath?: string; timeoutMs?: number; cachePath?: string } = {},
@@ -55,6 +58,8 @@ export class TesseractOcr implements OcrEngine {
   }
 
   recognize(image: Buffer): Promise<OcrResult> {
+    if (this.pending >= TesseractOcr.MAX_PENDING) return Promise.reject(new Error("text recognition is busy — try again in a moment"));
+    this.pending++;
     const job = this.queue.then(async () => {
       const started = Date.now();
       const worker = await this.start();
@@ -77,7 +82,7 @@ export class TesseractOcr implements OcrEngine {
       }
     });
     this.queue = job.catch(() => undefined);
-    return job;
+    return job.finally(() => this.pending--);
   }
 
   async dispose() {

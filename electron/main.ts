@@ -7,6 +7,7 @@ import {
   ipcMain,
   Menu,
   nativeImage,
+  powerMonitor,
   safeStorage,
   session,
   shell,
@@ -17,12 +18,15 @@ import fs from "node:fs";
 import path from "node:path";
 import { z } from "zod";
 import { AppCore } from "../src/core/app";
+import { ShortcutManager, type ShortcutAction } from "../src/core/shortcuts";
 import { TesseractOcr } from "../src/core/ocr";
 import { SUPPORTED_DOC_EXTENSIONS, extractDocumentText } from "../src/core/knowledge";
-import { Store } from "../src/core/storage/db";
+import type { Store } from "../src/core/storage/db";
+import { openStore } from "../src/core/storage/open";
+import { cleanupTempFiles } from "../src/core/fsutil";
 import type { AppEvent } from "../src/shared/api";
-import { loadSettings, modeEnum, styleEnum, toneEnum, effortEnum } from "../src/shared/settingsSchema";
-import type { AudioInputState, Diagnostics, Settings } from "../src/shared/types";
+import { loadSettingsJson, modeEnum, styleEnum, toneEnum, effortEnum } from "../src/shared/settingsSchema";
+import type { AudioInputState, Diagnostics } from "../src/shared/types";
 import { CaptureService, IMAGE_EXTENSIONS, permissionSettingsUrl, permissionStatus, requestMicrophone } from "./capture";
 import { Logger } from "./logger";
 import { SecretStore } from "./secrets";
@@ -58,41 +62,86 @@ function emitApp(e: AppEvent) {
 }
 
 // ---------------- shortcuts ----------------
-function registerShortcuts() {
-  globalShortcut.unregisterAll();
-  const map: [keyof Settings["shortcuts"], () => void][] = [
-    ["toggleOverlay", () => windows.toggleOverlay()],
-    ["askAboutScreen", () => void askAboutScreen()],
-    ["askAboutSelection", () => void askAboutSelection()],
-    ["openMainWindow", () => windows.openMain()],
-  ];
-  for (const [name, fn] of map) {
-    const acc = core.settings.shortcuts[name];
-    let ok = false;
+/** Native registrar backed by Electron's globalShortcut (macOS, Windows, X11 Linux). */
+const electronRegistrar = {
+  register: (acc: string, fn: () => void) => globalShortcut.register(acc, fn),
+  unregister: (acc: string) => {
     try {
-      ok = globalShortcut.register(acc, fn);
+      globalShortcut.unregister(acc);
     } catch {
-      ok = false;
+      /* invalid accelerators were never registered */
     }
-    shortcutStatus[name] = ok;
-    if (!ok) logger.warn("shortcut registration failed", { name, accelerator: acc });
+  },
+};
+
+let shortcuts: ShortcutManager;
+
+function shortcutHandlers(): Record<ShortcutAction, () => void> {
+  return {
+    requestAssist: () => void requestAssist(),
+    // Toggle without stealing focus from the app the user is working in.
+    toggleOverlay: () => windows.toggleOverlay({ focus: false }),
+    scrollUp: () => emitApp({ type: "scroll", direction: "up" }),
+    scrollDown: () => emitApp({ type: "scroll", direction: "down" }),
+    moveLeft: () => windows.nudge("left"),
+    moveRight: () => windows.nudge("right"),
+    discreetInput: () => toggleDiscreet(),
+    askAboutScreen: () => void askAboutScreen(),
+    askAboutSelection: () => void askAboutSelection(),
+    openMainWindow: () => windows.openMain(),
+  };
+}
+
+function initShortcuts() {
+  shortcuts = new ShortcutManager(electronRegistrar, process.platform, core.settings.shortcuts, shortcutHandlers(), (status) => {
+    for (const [k, v] of Object.entries(status)) shortcutStatus[k] = v.status === "active" || v.status === "inactive";
+    emitApp({ type: "shortcut-status", status });
+    for (const [k, v] of Object.entries(status)) if (v.status === "conflict" || v.status === "invalid") logger.warn("shortcut unavailable", { name: k, accelerator: v.accelerator, status: v.status });
+  });
+  windows.onVisibilityChange = (visible) => shortcuts.setPanelVisible(visible);
+  shortcuts.setPanelVisible(windows.overlayVisible);
+  shortcuts.apply();
+}
+
+function registerShortcuts() {
+  shortcuts?.setBindings(core.settings.shortcuts);
+}
+
+/**
+ * ⌘/Ctrl+Enter. The panel decides: if a question is typed it is submitted; otherwise it calls
+ * `assist:prepare`, which gathers whatever context is authorized (a fresh screen capture when
+ * screen context is on, the live transcript when recording) and returns the prompt to send.
+ */
+async function requestAssist() {
+  if (!windows.overlayVisible) windows.showOverlay({ focus: false });
+  if (windows.mode === "compact") windows.setMode("expanded");
+  emitApp({ type: "assist-request", source: "shortcut" });
+}
+
+function toggleDiscreet() {
+  if (windows.mode === "discreet" && windows.overlayVisible) {
+    windows.setDiscreet(false);
+    return;
   }
+  // Discreet input needs keyboard focus to type, but only the slim bar is shown.
+  windows.showOverlay({ focus: true });
+  windows.setDiscreet(true);
 }
 
 function toast(level: "info" | "error", message: string) {
   emitApp({ type: "toast", level, message });
 }
 
-async function captureAndAttach(sourceId: string | null, region: null = null) {
-  const wasVisible = windows.overlay?.isVisible();
-  windows.hideOverlay(); // never capture our own panel
+async function captureAndAttach(sourceId: string | null, region: null = null, opts: { restoreFocus?: boolean } = {}) {
+  const wasVisible = windows.overlayVisible;
+  windows.hideOverlay(); // the panel must not appear in its own capture
   await new Promise((r) => setTimeout(r, 150));
   try {
     const held = sourceId ? await capture.capture(sourceId) : await capture.captureCursorDisplay();
     const f = capture.finalize(held.captureId, region);
     return core.addCapture({ title: `Screen — ${f.title}`, sourceId: f.sourceId, vision: f.vision, ocrPng: f.ocrPng, thumbnailDataUrl: f.thumbnailDataUrl }).record;
   } finally {
-    if (wasVisible !== false) windows.showOverlay();
+    if (wasVisible) windows.showOverlay({ focus: opts.restoreFocus ?? false });
   }
 }
 
@@ -104,9 +153,9 @@ async function askAboutScreen() {
   }
   try {
     await captureAndAttach(null);
-    windows.showOverlay();
+    windows.showOverlay({ focus: false });
   } catch (err) {
-    windows.showOverlay();
+    windows.showOverlay({ focus: false });
     toast("error", (err as Error).message);
   }
 }
@@ -119,12 +168,12 @@ async function askAboutScreen() {
 async function askAboutSelection() {
   const text = (await clipboard.readText()).slice(0, 200_000);
   if (!text.trim()) {
-    windows.showOverlay();
+    windows.showOverlay({ focus: false });
     toast("info", "Copy the text you want to ask about (⌘/Ctrl+C), then press the shortcut again.");
     return;
   }
   core.addText("selected_text", `Selection — ${text.replace(/\s+/g, " ").slice(0, 40)}`, text);
-  windows.showOverlay();
+  windows.showOverlay({ focus: false });
 }
 
 // ---------------- tray ----------------
@@ -222,7 +271,20 @@ function registerIpc() {
     registerShortcuts();
     return s;
   });
-  handle("settings:shortcutStatus", () => shortcutStatus);
+  handle("settings:shortcutStatus", () => shortcuts.status());
+  handle("assist:prepare", async () => {
+    // Capture only when screen context is authorized; otherwise rely on other authorized sources.
+    let shot: { captured: boolean; pending: string | null; error: string | null } = { captured: false, pending: null, error: null };
+    if (core.settings.consent.screen) {
+      try {
+        const rec = await captureAndAttach(null, null, { restoreFocus: false });
+        shot = { captured: true, pending: rec.status === "pending" ? rec.id : null, error: null };
+      } catch (err) {
+        shot = { captured: false, pending: null, error: (err as Error).message };
+      }
+    }
+    return { ...core.assistPlan(), capture: shot };
+  });
 
   // ---- secrets & providers ----
   const secretsStatus = () => ({
@@ -289,6 +351,10 @@ function registerIpc() {
   });
   handle("chat:cancel", (_e, rid) => core.chat.cancel(id.parse(rid)));
   handle("history:list", () => store.listConversations(core.activeSessionId));
+  handle("history:openConversation", () => core.openConversation());
+  handle("history:setOpenConversation", (_e, cid) => core.setOpenConversation(id.nullable().parse(cid)));
+  handle("usage:today", () => core.spendToday());
+  handle("app:info", () => ({ packaged: app.isPackaged, devModeAllowed: core.devModeAllowed, version: app.getVersion() }));
   handle("history:messages", (_e, cid) => {
     assertConversationInActive(id.parse(cid));
     return store.listMessages(String(cid));
@@ -487,8 +553,13 @@ function registerIpc() {
     assertTranscriptInActive(id.parse(tid));
     return core.liveSegments(String(tid)) ?? store.listSegments(String(tid));
   });
-  handle("transcript:updateSegment", (_e, segId, text, speaker) => store.updateSegment(id.parse(segId), str(10_000).parse(text), str(60).nullable().parse(speaker)));
-  handle("transcript:deleteSegment", (_e, segId) => store.deleteSegment(id.parse(segId)));
+  const ownSegment = (segId: unknown) => {
+    const sid = id.parse(segId);
+    if (store.segmentOwner(sid) !== core.activeSessionId) throw new Error("That transcript belongs to another session.");
+    return sid;
+  };
+  handle("transcript:updateSegment", (_e, segId, text, speaker) => store.updateSegment(ownSegment(segId), str(10_000).parse(text), str(60).nullable().parse(speaker)));
+  handle("transcript:deleteSegment", (_e, segId) => store.deleteSegment(ownSegment(segId)));
   handle("transcript:rename", (_e, tid, title) => {
     assertTranscriptInActive(id.parse(tid));
     store.renameTranscriptSession(String(tid), str(200).parse(title));
@@ -575,11 +646,12 @@ function registerIpc() {
     if (/^https:\/\//.test(u)) await shell.openExternal(u);
   });
   handle("overlay:action", (_e, action) => {
-    const a = z.enum(["hide", "toggle", "expand", "compact", "reset-position"]).parse(action);
+    const a = z.enum(["hide", "toggle", "expand", "compact", "discreet", "reset-position"]).parse(action);
     if (a === "hide") windows.hideOverlay();
-    else if (a === "toggle") windows.toggleOverlay();
+    else if (a === "toggle") windows.toggleOverlay({ focus: true });
     else if (a === "expand") windows.setMode("expanded");
     else if (a === "compact") windows.setMode("compact");
+    else if (a === "discreet") windows.setDiscreet(windows.mode !== "discreet");
     else windows.resetPosition();
   });
   handle("overlay:setSize", (_e, w, h) => windows.setOverlaySize(z.number().parse(w), z.number().parse(h)));
@@ -624,7 +696,7 @@ function applyCsp() {
       responseHeaders: {
         ...details.responseHeaders,
         "Content-Security-Policy": [
-          "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws://localhost:*; object-src 'none'; base-uri 'none'; frame-src 'none'",
+          "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-src 'none'; form-action 'none'",
         ],
       },
     });
@@ -658,12 +730,39 @@ function applyCsp() {
 }
 
 app.on("second-instance", () => windows?.showOverlay());
+
+/**
+ * Graceful shutdown: stop capture first (releases mic and screen), cancel in-flight answers and
+ * give them a bounded moment to write their final state, then close the database. `will-quit`
+ * is synchronous, so the async part runs in `before-quit` and re-triggers quit when done.
+ */
+let shuttingDown = false;
+let shutdownDone = false;
+app.on("before-quit", (e) => {
+  if (shutdownDone || !core) return;
+  e.preventDefault();
+  if (shuttingDown) return;
+  shuttingDown = true;
+  void (async () => {
+    try {
+      shortcuts?.releaseAll();
+      globalShortcut.unregisterAll();
+      core.stopTranscript();
+      core.stopLiveScreen();
+      await core.shutdown(1500);
+      await ocr.dispose();
+      store?.close();
+      logger.info("shutdown complete");
+    } catch (err) {
+      logger.error("shutdown error", { message: (err as Error).message });
+    } finally {
+      shutdownDone = true;
+      app.quit();
+    }
+  })();
+});
 app.on("will-quit", () => {
   globalShortcut.unregisterAll();
-  core?.stopTranscript();
-  core?.stopLiveScreen();
-  void ocr.dispose();
-  store?.close();
 });
 app.on("window-all-closed", () => {
   /* keep running in the tray */
@@ -675,10 +774,30 @@ process.on("unhandledRejection", (err) => logger.error("unhandled rejection", { 
 
 const ocr = new TesseractOcr({ timeoutMs: 30_000 });
 
-void app.whenReady().then(() => {
-  store = new Store(path.join(userData, "lumen.db"));
-  const raw = store.getKv("settings");
-  const settings = loadSettings(raw ? JSON.parse(raw) : null);
+function fatalStartup(err: unknown) {
+  const message = (err as Error)?.message ?? String(err);
+  logger.error("startup failed", { message });
+  dialog.showErrorBox(
+    "Lumen could not start",
+    /newer Lumen/.test(message)
+      ? "Your data was created by a newer version of Lumen. Install the latest version to open it. Your data has not been changed."
+      : `Lumen could not open its data folder:\n\n${userData}\n\n${message.replace(userData, "<data folder>")}\n\nCheck that the disk is not full and that the folder is writable, then try again.`,
+  );
+  app.exit(1);
+}
+
+void app.whenReady().then(startup).catch(fatalStartup);
+
+function startup() {
+  cleanupTempFiles(userData);
+  const opened = openStore(path.join(userData, "lumen.db"));
+  store = opened.store;
+  if (opened.outcome.kind === "migrated") logger.info("database migrated", { from: opened.outcome.from, to: opened.outcome.to });
+  if (opened.outcome.kind === "recovered") {
+    logger.error("database recovered", { reason: opened.outcome.reason });
+    startupNotice = `Lumen's database could not be opened (${opened.outcome.reason}), so a fresh one was created. The previous file was kept at ${opened.outcome.quarantined} and was not deleted.`;
+  }
+  const settings = loadSettingsJson(store.getKv("settings"));
   logger.level = settings.diagnostics.logLevel;
 
   core = new AppCore(
@@ -696,6 +815,7 @@ void app.whenReady().then(() => {
         if (e.type === "live-screen") updateTray();
       },
       log: (level, msg, data) => logger.log(level, msg, data),
+      devModeAllowed: !app.isPackaged || process.env.LUMEN_ALLOW_DEV_MODE === "1",
       liveScreenCapture: async () => {
         // Live sampling captures the display under the cursor. The overlay is a normal window, so
         // it may appear in the frame; that is visible to the user and harmless.
@@ -719,12 +839,45 @@ void app.whenReady().then(() => {
   );
   applyCsp();
   registerIpc();
-  registerShortcuts();
+  initShortcuts();
   createTray();
   if (process.platform === "darwin") app.dock?.hide();
   windows.createOverlay();
   if (!core.settings.onboardingComplete) windows.openMain("/main/onboarding");
   else windows.showOverlay();
 
-  if (process.env.LUMEN_SMOKE_TEST) void import("./smoke.js").then((m) => m.runSmokeTest({ app, core, store, windows, capture, shortcutStatus }));
-});
+  registerLifecycle();
+  if (startupNotice) {
+    const notice = startupNotice;
+    setTimeout(() => void dialog.showMessageBox({ type: "warning", title: "Lumen recovered your data", message: "Lumen started with a fresh database", detail: notice }), 800);
+  }
+  if (process.env.LUMEN_SMOKE_TEST) void import("./smoke.js").then((m) => m.runSmokeTest({ app, core, store, windows, capture, shortcutStatus, shortcuts }));
+}
+
+let startupNotice: string | null = null;
+
+/** Sleep/resume, display changes and renderer crashes. */
+function registerLifecycle() {
+  let wasRecording = false;
+  powerMonitor.on("suspend", () => {
+    // Audio devices and network sockets do not survive sleep reliably; pause rather than
+    // silently losing audio, and tell the user on wake.
+    wasRecording = !!core.live && ["recording", "reconnecting", "connecting"].includes(core.live.status);
+    if (wasRecording) core.pauseTranscript();
+    if (core.liveScreenState.active && !core.liveScreenState.paused) core.liveScreen.pause();
+    logger.info("system suspend", { wasRecording });
+  });
+  powerMonitor.on("resume", () => {
+    windows.ensureOverlayVisible();
+    if (wasRecording) toast("info", "Recording was paused while your computer slept. Press Resume to continue.");
+    wasRecording = false;
+    logger.info("system resume");
+  });
+  windows.onRendererGone = (role, reason) => {
+    logger.error("renderer gone", { role, reason });
+    // The overlay hosts audio capture; if it died the microphone stream is gone too.
+    if (role === "overlay" && core.live && core.live.status !== "stopped") {
+      core.stopTranscript("The assistant panel restarted unexpectedly, so recording stopped. Your transcript so far was kept.");
+    }
+  };
+}

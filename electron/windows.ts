@@ -1,21 +1,31 @@
-import { BrowserWindow, screen, shell, type Rectangle } from "electron";
+import { app, BrowserWindow, screen, shell, type Rectangle } from "electron";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import type { Settings, WindowRole } from "../src/shared/types";
 import { defaultOverlayRect, moveToDisplay, presetRect, resizeAnchored, resolveBounds } from "./geometry";
 
-const DEV_URL = process.env.LUMEN_DEV_URL;
+/** A dev-server URL is honoured only in unpackaged development builds. */
+const DEV_URL = !app.isPackaged ? process.env.LUMEN_DEV_URL : undefined;
+const RENDERER_FILE = pathToFileURL(path.join(__dirname, "../../dist-renderer/index.html")).href;
 export const COMPACT_HEIGHT = 176;
+/** Discreet-input mode: a single slim input bar. */
+export const DISCREET_HEIGHT = 76;
+export const DISCREET_WIDTH = 520;
+/** Distance moved per ⌘/Ctrl+Left/Right press. */
+export const MOVE_STEP = 64;
 const MIN_WIDTH = 380;
-const MIN_HEIGHT = 140;
+const MIN_HEIGHT = 56;
 
 export function rendererUrl(route: string): string {
   if (DEV_URL) return `${DEV_URL}#${route}`;
-  return `file://${path.join(__dirname, "../../dist-renderer/index.html")}#${route}`;
+  return `${RENDERER_FILE}#${route}`;
 }
 
+/** Only our exact bundled renderer document (any #route) is trusted for privileged IPC. */
 export function isTrustedUrl(url: string): boolean {
-  if (DEV_URL) return url.startsWith(DEV_URL);
-  return url.startsWith("file://") && url.includes("/dist-renderer/index.html");
+  if (DEV_URL) return url === DEV_URL || url.startsWith(`${DEV_URL}#`) || url.startsWith(`${DEV_URL}/`);
+  const base = url.split("#")[0];
+  return base === RENDERER_FILE;
 }
 
 function hardenWebContents(win: BrowserWindow) {
@@ -51,15 +61,19 @@ function webPreferences(role: WindowRole): Electron.WebPreferences {
 export class WindowManager {
   overlay: BrowserWindow | null = null;
   main: BrowserWindow | null = null;
-  mode: "compact" | "expanded" = "compact";
+  mode: "compact" | "expanded" | "discreet" = "compact";
+  /** Size to return to when leaving discreet mode. */
+  private preDiscreet: { mode: "compact" | "expanded"; width: number } | null = null;
+  onVisibilityChange: (visible: boolean) => void = () => undefined;
   private saveTimer: NodeJS.Timeout | null = null;
+  onRendererGone: (role: "overlay" | "main", reason: string) => void = () => undefined;
   /** Ignore move/resize events we caused ourselves when deciding whether the user customized position. */
   private programmatic = false;
 
   constructor(
     private readonly getSettings: () => Settings,
     private readonly saveBounds: (b: Settings["overlay"]["bounds"], patch?: Partial<Settings["overlay"]>) => void,
-    private readonly onModeChange: (mode: "compact" | "expanded") => void = () => undefined,
+    private readonly onModeChange: (mode: "compact" | "expanded" | "discreet") => void = () => undefined,
   ) {
     const relayout = () => this.ensureOverlayVisible();
     screen.on("display-removed", relayout);
@@ -115,8 +129,21 @@ export class WindowManager {
     this.applyOverlaySettings(win, s);
     win.on("moved", () => this.scheduleSave("move"));
     win.on("resized", () => this.scheduleSave("resize"));
+    win.on("show", () => this.onVisibilityChange(true));
+    win.on("hide", () => this.onVisibilityChange(false));
     win.on("closed", () => {
       this.overlay = null;
+      this.onVisibilityChange(false);
+    });
+    win.webContents.on("render-process-gone", (_e, d) => {
+      this.onRendererGone("overlay", d.reason);
+      if (d.reason === "clean-exit") return;
+      // Recreate the panel so the user is never left without a working assistant.
+      const wasVisible = win.isVisible();
+      win.destroy();
+      this.overlay = null;
+      const fresh = this.createOverlay();
+      if (wasVisible) fresh.once("ready-to-show", () => fresh.show());
     });
     void win.loadURL(rendererUrl("/overlay"));
     this.overlay = win;
@@ -167,7 +194,12 @@ export class WindowManager {
     }
   }
 
-  showOverlay() {
+  /**
+   * Show the panel. With `focus: false` the panel appears without taking keyboard focus from the
+   * app the user is working in (used by the visibility toggle and capture shortcuts).
+   */
+  showOverlay(opts: { focus?: boolean } = {}) {
+    const focus = opts.focus ?? true;
     const w = this.overlay ?? this.createOverlay();
     const s = this.getSettings();
     if (s.overlay.followCursorDisplay) {
@@ -183,24 +215,74 @@ export class WindowManager {
       }
     }
     this.ensureOverlayVisible();
-    if (w.webContents.isLoading()) w.once("ready-to-show", () => w.show());
-    else w.show();
-    w.focus();
-    w.webContents.send("lumen:app", { type: "focus-input" });
+    const reveal = () => {
+      if (focus) {
+        w.show();
+        w.focus();
+        w.webContents.send("lumen:app", { type: "focus-input" });
+      } else w.showInactive();
+      this.onVisibilityChange(true);
+    };
+    if (w.webContents.isLoading()) w.once("ready-to-show", reveal);
+    else reveal();
+  }
+
+  get overlayVisible(): boolean {
+    return !!this.overlay && !this.overlay.isDestroyed() && this.overlay.isVisible();
   }
 
   hideOverlay() {
-    this.overlay?.hide();
+    if (!this.overlay || this.overlay.isDestroyed()) return;
+    this.overlay.hide();
+    // "hide" is not emitted when the window was already hidden; report state explicitly too.
+    this.onVisibilityChange(false);
   }
 
-  toggleOverlay() {
-    if (this.overlay?.isVisible() && this.overlay.isFocused()) this.hideOverlay();
-    else this.showOverlay();
+  /**
+   * Visibility toggle. Hiding never cancels a streaming answer (the renderer keeps running);
+   * showing restores the previous position, size and mode without stealing focus.
+   */
+  toggleOverlay(opts: { focus?: boolean } = {}) {
+    if (this.overlayVisible) this.hideOverlay();
+    else this.showOverlay({ focus: opts.focus ?? false });
+  }
+
+  /** Move the panel horizontally within its display (⌘/Ctrl+Left/Right). Returns the new bounds. */
+  nudge(direction: "left" | "right", step = MOVE_STEP) {
+    const w = this.overlay;
+    if (!w || w.isDestroyed()) return null;
+    const b = w.getBounds();
+    const area = screen.getDisplayMatching(b).workArea;
+    const x = Math.min(Math.max(b.x + (direction === "left" ? -step : step), area.x), area.x + area.width - b.width);
+    if (x === b.x) return b;
+    w.setBounds({ ...b, x }); // user-initiated: saved as a custom position via the "moved" event
+    return w.getBounds();
+  }
+
+  /** Enter or leave the slim discreet-input bar, restoring the previous layout on exit. */
+  setDiscreet(on: boolean) {
+    const w = this.overlay;
+    if (!w || w.isDestroyed()) return;
+    if (on && this.mode !== "discreet") {
+      this.preDiscreet = { mode: this.mode, width: w.getBounds().width };
+      this.mode = "discreet";
+      const b = w.getBounds();
+      const area = screen.getDisplayMatching(b).workArea;
+      this.setBounds(resizeAnchored(b, area, Math.min(DISCREET_WIDTH, b.width), DISCREET_HEIGHT));
+      this.onModeChange("discreet");
+    } else if (!on && this.mode === "discreet") {
+      const prev = this.preDiscreet ?? { mode: "compact" as const, width: 560 };
+      this.preDiscreet = null;
+      const b = w.getBounds();
+      this.setBounds({ ...b, width: prev.width });
+      this.setMode(prev.mode);
+    }
   }
 
   setMode(mode: "compact" | "expanded") {
     const w = this.overlay;
     if (!w || w.isDestroyed()) return;
+    if (this.mode === "discreet") this.preDiscreet = null;
     this.mode = mode;
     const b = w.getBounds();
     const area = screen.getDisplayMatching(b).workArea;
@@ -247,6 +329,10 @@ export class WindowManager {
     win.once("ready-to-show", () => win.show());
     win.on("closed", () => {
       this.main = null;
+    });
+    win.webContents.on("render-process-gone", (_e, d) => {
+      this.onRendererGone("main", d.reason);
+      if (d.reason !== "clean-exit" && !win.isDestroyed()) win.reload();
     });
     void win.loadURL(rendererUrl(route));
     this.main = win;

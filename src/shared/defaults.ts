@@ -7,8 +7,18 @@ export const MODELS = [
   { id: "claude-fable-5-1", label: "Claude Fable 5.1", note: "Most capable, slowest and most expensive" },
 ] as const;
 
+/**
+ * Defaults follow Cluely's documented conventions (⌘ on macOS, Ctrl on Windows/Linux). Arrow-key
+ * shortcuts are only registered while the panel is visible (see core/shortcuts.ts SHORTCUT_SCOPE).
+ */
 export const DEFAULT_SHORTCUTS: Settings["shortcuts"] = {
-  toggleOverlay: "CommandOrControl+Shift+Space",
+  requestAssist: "CommandOrControl+Enter",
+  toggleOverlay: "CommandOrControl+\\",
+  scrollUp: "CommandOrControl+Up",
+  scrollDown: "CommandOrControl+Down",
+  moveLeft: "CommandOrControl+Left",
+  moveRight: "CommandOrControl+Right",
+  discreetInput: "CommandOrControl+Shift+Enter",
   askAboutScreen: "CommandOrControl+Shift+S",
   askAboutSelection: "CommandOrControl+Shift+A",
   openMainWindow: "CommandOrControl+Shift+L",
@@ -28,6 +38,7 @@ export const DEFAULT_SETTINGS: Settings = {
     timeoutMs: 120_000,
     idleTimeoutMs: 45_000,
     openaiCompat: { baseUrl: "http://localhost:11434/v1", model: "llama3.1" },
+    dailySpendLimitUsd: 5,
   },
   transcription: {
     kind: "deepgram",

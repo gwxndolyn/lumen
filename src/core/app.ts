@@ -2,6 +2,7 @@ import type { AppEvent } from "../shared/api";
 import { DEFAULT_SHORTCUTS } from "../shared/defaults";
 import { applySettingsPatch } from "../shared/settingsSchema";
 import type {
+  AnswerStyle,
   AssistantMode,
   ChatEvent,
   ChatSendRequest,
@@ -28,6 +29,7 @@ import { AnthropicProvider } from "./providers/anthropic";
 import { MockProvider } from "./providers/mock";
 import { OpenAICompatProvider } from "./providers/openaiCompat";
 import { ProviderError, type AIProvider } from "./providers/types";
+import { toUserError } from "./errors";
 import type { Store } from "./storage/db";
 import { DeepgramProvider } from "./transcription/deepgram";
 import { segmentsToText, TranscriptSession } from "./transcription/session";
@@ -62,6 +64,29 @@ export interface AppCoreDeps {
   now?: () => number;
   /** Max time chat waits for in-progress OCR before answering without it. */
   ocrWaitMs?: number;
+  /**
+   * Whether the labelled development (mock) provider may be used. False in packaged builds unless
+   * explicitly enabled, so production never silently answers with simulated output.
+   */
+  devModeAllowed?: boolean;
+}
+
+/**
+ * Endpoint overrides (used by the smoke test and self-hosted gateways) must be HTTPS, or plain
+ * HTTP/WS only to loopback, so a stray environment variable cannot send keys over the network
+ * in clear text.
+ */
+export function safeEndpoint(url: string | undefined, kind: "http" | "ws"): string | undefined {
+  if (!url) return undefined;
+  try {
+    const u = new URL(url);
+    const loopback = ["127.0.0.1", "localhost", "[::1]"].includes(u.hostname);
+    const secure = kind === "http" ? u.protocol === "https:" : u.protocol === "wss:";
+    const plain = kind === "http" ? u.protocol === "http:" : u.protocol === "ws:";
+    return secure || (plain && loopback) ? url : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export function defaultProviderFactory(kind: Settings["provider"]["kind"], secrets: SecretReader, settings: Settings): AIProvider | null {
@@ -70,7 +95,7 @@ export function defaultProviderFactory(kind: Settings["provider"]["kind"], secre
     return new OpenAICompatProvider({ baseUrl: settings.provider.openaiCompat.baseUrl, model: settings.provider.openaiCompat.model, apiKey: secrets.get("openai_compat") });
   }
   const key = secrets.get("anthropic");
-  return key ? new AnthropicProvider({ apiKey: key, baseURL: process.env.LUMEN_ANTHROPIC_BASE_URL || undefined }) : null;
+  return key ? new AnthropicProvider({ apiKey: key, baseURL: safeEndpoint(process.env.LUMEN_ANTHROPIC_BASE_URL, "http") }) : null;
 }
 
 /**
@@ -122,6 +147,10 @@ export class AppCore {
         if (e.type === "done" || e.type === "cancelled" || e.type === "error") deps.emitApp({ type: "history-changed" });
       },
       onProviderResult: (ok, code, message) => this.recordHealth(ok, code, message),
+      checkBudget: () => this.checkBudget(),
+      onUsage: (model, usage, cost) => {
+        if (cost > 0) deps.store.recordUsage(model, usage.inputTokens, usage.outputTokens, cost, this.now());
+      },
       log: deps.log,
     });
     this.liveScreen = new LiveScreen(
@@ -142,7 +171,11 @@ export class AppCore {
 
   updateSettings(patch: unknown): Settings {
     const prev = this.settings;
-    this.settings = applySettingsPatch(this.settings, patch);
+    const next = applySettingsPatch(this.settings, patch);
+    if (next.provider.kind === "mock" && prev.provider.kind !== "mock" && !this.devModeAllowed) {
+      throw new Error("Development mode is not available in this build.");
+    }
+    this.settings = next;
     this.persist(this.settings);
     this.engine.configure({ screenTtlMinutes: this.settings.privacy.screenContextTtlMinutes, redactSensitive: this.settings.privacy.redactSensitive });
     // Revocations take effect immediately: stop the source and discard what it captured.
@@ -175,16 +208,44 @@ export class AppCore {
     return this.updateSettings({ shortcuts: DEFAULT_SHORTCUTS });
   }
 
+  // ---------------- spend limit ----------------
+
+  /** Estimated spend since local midnight, from the persisted ledger (survives restarts). */
+  spendToday(): { costUsd: number; requests: number; limitUsd: number } {
+    const d = new Date(this.now());
+    d.setHours(0, 0, 0, 0);
+    return { ...this.deps.store.spendSince(d.getTime()), limitUsd: this.settings.provider.dailySpendLimitUsd };
+  }
+
+  private checkBudget() {
+    const limit = this.settings.provider.dailySpendLimitUsd;
+    if (!limit || this.settings.provider.kind === "mock") return;
+    const { costUsd } = this.spendToday();
+    if (costUsd >= limit) {
+      throw new ProviderError(
+        `Today's estimated AI spend ($${costUsd.toFixed(2)}) reached your daily limit of $${limit.toFixed(2)}. Raise or remove the limit in AI provider settings.`,
+        "spend_limit",
+        false,
+      );
+    }
+  }
+
   // ---------------- providers ----------------
+
+  get devModeAllowed(): boolean {
+    return this.deps.devModeAllowed ?? true;
+  }
 
   providerFor(session?: Session | null): AIProvider | null {
     void session;
+    if (this.settings.provider.kind === "mock" && !this.devModeAllowed) return null;
     return (this.deps.providerFactory ?? defaultProviderFactory)(this.settings.provider.kind, this.deps.secrets, this.settings);
   }
 
   private initialHealth(): ProviderHealth {
     const kind = this.settings.provider.kind;
     const model = kind === "openai_compat" ? this.settings.provider.openaiCompat.model : kind === "mock" ? "mock" : this.settings.provider.model;
+    if (kind === "mock" && !this.devModeAllowed) return { kind, model, state: "unconfigured", message: "Development mode is not available in this build. Choose an AI provider.", checkedAt: null, latencyMs: null };
     if (kind === "mock") return { kind, model, state: "mock", message: "Development mode — answers are mock responses, not AI.", checkedAt: null, latencyMs: null };
     if (kind === "anthropic" && !this.deps.secrets.has("anthropic")) return { kind, model, state: "unconfigured", message: "No Anthropic API key configured.", checkedAt: null, latencyMs: null };
     return { kind, model, state: "unknown", message: "Not checked yet.", checkedAt: null, latencyMs: null };
@@ -283,6 +344,20 @@ export class AppCore {
     this.deps.emitApp({ type: "history-changed" });
   }
 
+  /** Remember which conversation is open so a restart (or panel reload) restores it. */
+  setOpenConversation(conversationId: string | null) {
+    const sid = this.activeSessionId;
+    if (conversationId) {
+      const c = this.deps.store.getConversation(conversationId);
+      if (!c || c.sessionId !== sid) return;
+    }
+    this.deps.store.setLastConversation(sid, conversationId);
+  }
+
+  openConversation(): string | null {
+    return this.deps.store.getLastConversation(this.activeSessionId);
+  }
+
   // ---------------- context ----------------
 
   addText(source: "note" | "clipboard" | "selected_text" | "document", title: string, text: string, opts: { pinned?: boolean; sourceId?: string } = {}) {
@@ -372,10 +447,70 @@ export class AppCore {
     return addKnowledgeText(this.deps.store, title, text, scope === "session" ? this.activeSessionId : null);
   }
 
+  // ---------------- one-key assistance ----------------
+
+  /**
+   * What ⌘/Ctrl+Enter should ask when the input is empty, chosen from the context that actually
+   * exists for the active session. Never claims a source that is not available.
+   */
+  assistPlan(): { prompt: string | null; sources: string[]; missing: string | null; style: AnswerStyle } {
+    const sid = this.activeSessionId;
+    const session = this.deps.store.getSession(sid);
+    const live = this.transcriptContext(sid);
+    const recording = !!this.live && this.live.workspaceSessionId === sid && ["recording", "paused", "reconnecting"].includes(this.live.status);
+    const items = this.engine.active(sid);
+    const pending = this.engine.list(sid).filter((r) => r.status === "pending");
+    const screen = items.filter((r) => r.source === "screenshot" || r.source === "ocr");
+    const sources: string[] = [];
+    if (recording && live?.text.trim()) sources.push("live transcript");
+    if (screen.length) sources.push(`${screen.length} screen capture${screen.length > 1 ? "s" : ""}`);
+    const other = items.length - screen.length;
+    if (other) sources.push(`${other} note/document${other > 1 ? "s" : ""}`);
+    const type = session?.type ?? "general";
+    if (recording && live?.text.trim()) {
+      return {
+        prompt: type === "interview"
+          ? "Based on the live transcript, what is the most recent question I was asked, and how should I answer it?"
+          : "Based on the live transcript, what was just discussed and what should I say or do next?",
+        sources,
+        missing: null,
+        style: type === "interview" ? "suggest" : "quick",
+      };
+    }
+    if (screen.length) {
+      return {
+        prompt: type === "coding" || type === "technical"
+          ? "Look at what is on my screen. Identify the problem or code shown and help me with it."
+          : "Look at what is on my screen and tell me what I most likely need to know or do next.",
+        sources,
+        missing: null,
+        style: "quick",
+      };
+    }
+    if (pending.length) return { prompt: null, sources, missing: "Review the screen capture in the panel first (Use this capture), then press ⌘/Ctrl+Enter again.", style: "quick" };
+    return {
+      prompt: null,
+      sources,
+      missing: this.settings.consent.screen
+        ? "There is nothing to work from yet. Type a question, or start a live transcript."
+        : "Type a question, or enable screen context in Permissions so ⌘/Ctrl+Enter can look at your screen.",
+      style: "quick",
+    };
+  }
+
   // ---------------- chat ----------------
 
-  send(req: Omit<ChatSendRequest, "sessionId"> & { sessionId?: string }) {
-    return this.chat.send({ ...req, sessionId: req.sessionId ?? this.activeSessionId });
+  async send(req: Omit<ChatSendRequest, "sessionId"> & { sessionId?: string }) {
+    let sessionId: string;
+    try {
+      sessionId = req.sessionId ?? this.activeSessionId;
+    } catch (err) {
+      // Resolving the session itself failed (e.g. DB error): still end the request visibly.
+      const pe = toUserError(err);
+      this.deps.emitChat({ type: "error", requestId: req.requestId, message: pe.message, code: pe.code, retryable: pe.retryable, conversationId: null });
+      return;
+    }
+    return this.chat.send({ ...req, sessionId });
   }
 
   // ---------------- transcription ----------------
@@ -402,7 +537,7 @@ export class AppCore {
     if (!key) throw new ProviderError("Add a Deepgram API key in Settings → AI provider to record a live transcript.", "missing_credentials", false);
     const systemAudio = (opts.systemAudio ?? this.settings.transcription.captureSystemAudio) && this.settings.consent.systemAudio;
     const sessionId = this.activeSessionId;
-    const provider = (this.deps.transcriptionFactory ?? ((k) => new DeepgramProvider(k, undefined, undefined, process.env.LUMEN_DEEPGRAM_URL || undefined)))(key);
+    const provider = (this.deps.transcriptionFactory ?? ((k) => new DeepgramProvider(k, undefined, undefined, safeEndpoint(process.env.LUMEN_DEEPGRAM_URL, "ws"))))(key);
     this.live = new TranscriptSession(
       provider,
       this.deps.store,
@@ -472,6 +607,13 @@ export class AppCore {
     this.deps.emitApp({ type: "session-switched", sessionId: s.id });
     this.deps.emitApp({ type: "sessions-changed" });
     this.deps.emitApp({ type: "history-changed" });
+  }
+
+  /** Cancel in-flight answers and wait (bounded) for them to record their final state. */
+  async shutdown(timeoutMs = 1500) {
+    this.chat.cancelAll();
+    const end = Date.now() + timeoutMs;
+    while (this.chat.activeRequests > 0 && Date.now() < end) await new Promise((r) => setTimeout(r, 25));
   }
 
   sweep() {

@@ -46,6 +46,7 @@ export class TranscriptSession {
   private lastAudioAt = 0;
   private pausedAt: number | null = null;
   private segments: TranscriptSegment[] = [];
+  private dropped = 0;
   private readonly opts: Required<Omit<SessionOptions, "title" | "workspaceSessionId">> & { title: string };
 
   constructor(
@@ -97,9 +98,7 @@ export class TranscriptSession {
       {
         onOpen: () => {
           this.reconnects = 0;
-          for (const chunk of this.buffer) this.stream?.sendAudio(chunk);
-          this.buffer = [];
-          this.bufferedBytes = 0;
+          this.flush();
           this.startKeepAlive();
           if (this.status !== "paused") this.setStatus("recording");
         },
@@ -133,7 +132,7 @@ export class TranscriptSession {
   private onResult(r: RecognitionResult) {
     const channel = r.channel === null ? (this.opts.channels === 1 ? "mic" : null) : (CHANNEL_NAMES[r.channel] ?? null);
     if (!r.isFinal) {
-      this.emit({ type: "interim", sessionId: this.id, text: r.text, speaker: this.label(r.speaker, channel) });
+      this.emit({ type: "interim", sessionId: this.id, text: r.text, speaker: this.label(r.speaker, channel), channel });
       return;
     }
     const startMs = Math.round(this.streamOffsetMs + r.startSec * 1000);
@@ -141,7 +140,10 @@ export class TranscriptSession {
     if (this.isDuplicate(r.text, startMs, endMs, channel)) return;
     const base = { sessionId: this.id, startMs, endMs, speaker: this.label(r.speaker, channel), channel, text: r.text, confidence: r.confidence };
     const seg: TranscriptSegment = this.persisted ? this.store.addSegment(base) : { ...base, id: randomUUID(), edited: false };
-    this.segments.push(seg);
+    // Keep chronological order even when channels finalize out of order.
+    let i = this.segments.length;
+    while (i > 0 && this.segments[i - 1]!.startMs > seg.startMs) i--;
+    this.segments.splice(i, 0, seg);
     if (this.segments.length > 2000) this.segments.shift();
     const latency = this.lastAudioAt ? Math.max(0, this.opts.now() - this.lastAudioAt) : null;
     if (latency !== null) this.onLatency?.(latency);
@@ -193,15 +195,36 @@ export class TranscriptSession {
     if (this.status === "paused" || this.status === "stopped" || this.status === "error") return;
     this.lastAudioAt = this.opts.now();
     if (this.stream && this.status === "recording") {
-      this.stream.sendAudio(pcm);
-      return;
+      // Keep order: drain the backlog first; if the transport is congested, buffer instead.
+      if (this.buffer.length) this.flush();
+      if (!this.buffer.length && this.stream.sendAudio(pcm)) return;
     }
-    // Not connected yet / reconnecting: buffer, dropping the oldest audio past the cap.
+    // Not connected, reconnecting or congested: buffer, dropping the oldest audio past the cap.
     this.buffer.push(pcm);
     this.bufferedBytes += pcm.byteLength;
     while (this.bufferedBytes > this.opts.maxBufferBytes && this.buffer.length) {
       this.bufferedBytes -= this.buffer.shift()!.byteLength;
+      this.dropped++;
     }
+  }
+
+  /** Send buffered audio in order until the transport pushes back. */
+  private flush() {
+    while (this.buffer.length && this.stream) {
+      const chunk = this.buffer[0]!;
+      if (!this.stream.sendAudio(chunk)) break;
+      this.buffer.shift();
+      this.bufferedBytes -= chunk.byteLength;
+    }
+  }
+
+  /** Audio chunks discarded because the buffer cap was reached (exposed for diagnostics). */
+  get droppedChunks() {
+    return this.dropped;
+  }
+
+  get bufferedAudioBytes() {
+    return this.bufferedBytes;
   }
 
   pause() {

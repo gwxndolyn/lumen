@@ -9,6 +9,8 @@ import type {
 } from "./types";
 
 const OPEN = 1;
+/** Stop handing audio to the socket once this much is queued but unsent (≈ 4 s of mono audio). */
+export const MAX_SOCKET_BUFFER_BYTES = 128_000;
 
 export const defaultSocketFactory: SocketFactory = (url, protocols) => new WebSocket(url, protocols) as unknown as SocketLike;
 
@@ -69,7 +71,10 @@ export class DeepgramProvider implements TranscriptionProvider {
     };
     return {
       sendAudio(pcm) {
-        if (ws.readyState === OPEN) ws.send(pcm);
+        if (ws.readyState !== OPEN) return false;
+        if ((ws.bufferedAmount ?? 0) > MAX_SOCKET_BUFFER_BYTES) return false;
+        ws.send(pcm);
+        return true;
       },
       keepAlive() {
         if (ws.readyState === OPEN) ws.send(JSON.stringify({ type: "KeepAlive" }));

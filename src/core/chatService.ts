@@ -6,7 +6,8 @@ import { redact } from "./context/sensitivity";
 import { truncate } from "./context/text";
 import type { Metrics } from "./metrics";
 import { estimateCostUsd } from "./providers/pricing";
-import { CancelledError, ProviderError, type AIProvider, type ProviderMessage } from "./providers/types";
+import { toUserError } from "./errors";
+import { CancelledError, ProviderError, type AIProvider, type GenerateUsage, type ProviderMessage } from "./providers/types";
 import type { Store } from "./storage/db";
 
 export interface LiveTranscriptContext {
@@ -31,6 +32,9 @@ export interface ChatDeps {
   awaitPending?: (sessionId: string) => Promise<void>;
   emit: (event: ChatEvent) => void;
   onProviderResult?: (ok: boolean, code?: ErrorCode, message?: string) => void;
+  /** Throws a ProviderError("spend_limit") when the configured daily budget is exhausted. */
+  checkBudget?: () => void;
+  onUsage?: (model: string, usage: GenerateUsage, costUsd: number) => void;
   log?: (level: "info" | "warn" | "error" | "debug", msg: string, data?: Record<string, unknown>) => void;
 }
 
@@ -91,18 +95,20 @@ export class ChatService {
       emit({ type: "error", requestId: req.requestId, message: pe.message, code: pe.code, retryable: pe.retryable || pe.code === "refusal", conversationId });
     };
 
-    const session = store.getSession(req.sessionId);
-    if (!session) return fail(new ProviderError("This session no longer exists.", "bad_request", false));
-
     // One generation per conversation at a time keeps turn order intact.
     for (const f of this.inflight.values()) {
       if (conversationId && f.conversationId === conversationId) {
         return fail(new ProviderError("Wait for the current answer to finish, or stop it first.", "busy", false));
       }
     }
-    this.inflight.set(req.requestId, { ctrl, conversationId, sessionId: session.id });
+    this.inflight.set(req.requestId, { ctrl, conversationId, sessionId: req.sessionId });
 
+    // Everything below runs inside try so that every request ends with exactly one terminal event
+    // (done / error / cancelled) — the UI never waits forever on a request that failed early.
     try {
+      const session = store.getSession(req.sessionId);
+      if (!session) throw new ProviderError("This session no longer exists.", "bad_request", false);
+      this.deps.checkBudget?.();
       const provider = this.deps.getProvider(session);
       if (!provider) {
         throw new ProviderError(
@@ -196,6 +202,7 @@ export class ChatService {
         userMessageId = store.addMessage({ conversationId: convId, role: "user", content: question, references: [], meta: { attachments, style } }).id;
       }
       store.touchSession(session.id);
+      store.setLastConversation(session.id, convId);
 
       emit({
         type: "start",
@@ -234,7 +241,11 @@ export class ChatService {
         },
       );
 
+      if (!result.text.trim()) {
+        throw new ProviderError("The AI returned an empty answer. Try again, or rephrase the question.", "empty_response", true);
+      }
       const cost = estimateCostUsd(result.model, result.usage);
+      this.deps.onUsage?.(result.model, result.usage, cost);
       const cited = citedLabels(result.text, built.references);
       const totalMs = Date.now() - started;
       const saved = store.addMessage({
@@ -272,15 +283,19 @@ export class ChatService {
       const totalMs = Date.now() - started;
       if (err instanceof CancelledError || ctrl.signal.aborted) {
         let partialMessageId: string | null = null;
-        if (partial && conversationId && store.getConversation(conversationId)) {
-          partialMessageId = store.addMessage({ conversationId, role: "assistant", content: partial, references: [], meta: { model, cancelled: true } }).id;
+        try {
+          if (partial && conversationId && store.getConversation(conversationId)) {
+            partialMessageId = store.addMessage({ conversationId, role: "assistant", content: partial, references: [], meta: { model, cancelled: true } }).id;
+          }
+        } catch (saveErr) {
+          this.deps.log?.("warn", "could not save stopped answer", { code: toUserError(saveErr).code });
         }
         metrics.recordRequest({ at: started, model, ttftMs: null, totalMs, contextPrepMs, retries: 0, inputTokens: 0, outputTokens: 0, estimatedCostUsd: 0, outcome: "cancelled" });
         emit({ type: "cancelled", requestId: req.requestId, partialMessageId });
         return;
       }
-      const pe = err instanceof ProviderError ? err : new ProviderError("Something went wrong generating the answer.", "unknown", false);
-      this.deps.log?.("warn", "chat request failed", { code: pe.code, message: pe.message });
+      const pe = toUserError(err);
+      this.deps.log?.("warn", "chat request failed", { code: pe.code, message: pe.message, cause: err instanceof ProviderError ? undefined : String((err as Error)?.name ?? "error") });
       metrics.recordRequest({ at: started, model, ttftMs: null, totalMs, contextPrepMs, retries: 0, inputTokens: 0, outputTokens: 0, estimatedCostUsd: 0, outcome: "error", errorCode: pe.code });
       if (["network", "timeout", "overloaded", "auth", "rate_limited"].includes(pe.code)) this.deps.onProviderResult?.(false, pe.code, pe.message);
       fail(pe);

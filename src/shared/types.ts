@@ -36,6 +36,8 @@ export interface Settings {
     /** Abort a stream that produces no events for this long. */
     idleTimeoutMs: number;
     openaiCompat: { baseUrl: string; model: string };
+    /** Daily estimated-spend cap in USD; 0 = no limit. */
+    dailySpendLimitUsd: number;
   };
   transcription: {
     kind: TranscriptionKind;
@@ -68,12 +70,20 @@ export interface Settings {
     position: OverlayPosition;
     expandedHeight: number;
   };
+  /** Global shortcuts (Electron accelerators). Empty string = disabled. */
   shortcuts: {
+    requestAssist: string;
     toggleOverlay: string;
+    scrollUp: string;
+    scrollDown: string;
+    moveLeft: string;
+    moveRight: string;
+    discreetInput: string;
     askAboutScreen: string;
     askAboutSelection: string;
     openMainWindow: string;
   };
+
   privacy: {
     /** 0 means "keep until I delete it" — an explicit user choice. */
     transcriptRetentionDays: number;
@@ -242,6 +252,9 @@ export type ErrorCode =
   | "refusal"
   | "bad_request"
   | "busy"
+  | "storage"
+  | "empty_response"
+  | "spend_limit"
   | "context_too_large"
   | "unknown";
 
@@ -329,7 +342,7 @@ export type TranscriptEvent =
       detail?: string;
       action?: "retry" | "settings" | "microphone" | "permissions";
     }
-  | { type: "interim"; sessionId: string; text: string; speaker: string | null }
+  | { type: "interim"; sessionId: string; text: string; speaker: string | null; channel: "mic" | "system" | null }
   | { type: "segment"; segment: TranscriptSegment; latencyMs: number | null }
   | { type: "audio"; state: AudioInputState };
 

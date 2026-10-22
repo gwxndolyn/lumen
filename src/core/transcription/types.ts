@@ -19,8 +19,11 @@ export interface TranscriptionStreamHandlers {
 }
 
 export interface TranscriptionStream {
-  /** 16 kHz signed 16-bit little-endian PCM, interleaved when `channels` = 2. */
-  sendAudio(pcm: Uint8Array): void;
+  /**
+   * 16 kHz signed 16-bit little-endian PCM, interleaved when `channels` = 2. Returns false when
+   * the transport is congested (or closed) and the chunk was NOT sent, so the caller can buffer.
+   */
+  sendAudio(pcm: Uint8Array): boolean;
   keepAlive(): void;
   close(): void;
 }
@@ -42,6 +45,7 @@ export interface TranscriptionProvider {
 /** Minimal WebSocket surface we depend on, so tests can inject a fake. */
 export interface SocketLike {
   readyState: number;
+  bufferedAmount?: number;
   binaryType: string;
   send(data: string | ArrayBufferLike | Uint8Array): void;
   close(code?: number, reason?: string): void;

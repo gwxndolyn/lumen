@@ -35,12 +35,25 @@ export function formatTs(ms: number): string {
 }
 
 export function prettyAccelerator(acc: string, platform = api?.platform): string {
+  if (!acc) return "Off";
   const mac = platform === "darwin";
+  const map: Record<string, [string, string]> = {
+    CommandOrControl: ["⌘", "Ctrl"],
+    CmdOrCtrl: ["⌘", "Ctrl"],
+    Command: ["⌘", "Win"],
+    Control: ["⌃", "Ctrl"],
+    Shift: ["⇧", "Shift"],
+    Alt: ["⌥", "Alt"],
+    Enter: ["↵", "Enter"],
+    Up: ["↑", "Up"],
+    Down: ["↓", "Down"],
+    Left: ["←", "Left"],
+    Right: ["→", "Right"],
+    Space: ["Space", "Space"],
+  };
   return acc
     .split("+")
-    .map((p) =>
-      p === "CommandOrControl" || p === "CmdOrCtrl" ? (mac ? "⌘" : "Ctrl") : p === "Shift" ? (mac ? "⇧" : "Shift") : p === "Alt" ? (mac ? "⌥" : "Alt") : p,
-    )
+    .map((p) => (map[p] ? map[p]![mac ? 0 : 1] : p))
     .join(mac ? "" : "+");
 }
 

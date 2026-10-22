@@ -20,7 +20,10 @@ export function Overlay() {
   const health = useProviderHealth();
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [text, setText] = useState("");
-  const [mode, setMode] = useState<"compact" | "expanded">("compact");
+  const [mode, setMode] = useState<"compact" | "expanded" | "discreet">("compact");
+  const [notice, setNotice] = useState<string | null>(null);
+  // Set below once `assist` is defined; the app-event handler always calls the latest version.
+  const assistRef = useRef<() => Promise<void>>(async () => undefined);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [useLive, setUseLive] = useState(true);
@@ -39,7 +42,20 @@ export function Overlay() {
 
   useAppEvent((e) => {
     if (e.type === "focus-input") inputRef.current?.focus();
-    if (e.type === "overlay-mode") setMode(e.mode);
+    if (e.type === "overlay-mode") {
+      setMode(e.mode);
+      if (e.mode === "discreet") setTimeout(() => inputRef.current?.focus(), 0);
+    }
+    if (e.type === "assist-request") void assistRef.current();
+    if (e.type === "scroll") {
+      // Scroll Lumen's own response area — never the underlying application.
+      const el = scrollRef.current;
+      if (el) {
+        const step = Math.max(80, Math.round(el.clientHeight * 0.8));
+        el.scrollBy({ top: e.direction === "up" ? -step : step, behavior: "smooth" });
+        pinnedToBottom.current = e.direction === "down" && el.scrollHeight - el.scrollTop - el.clientHeight - step < 40;
+      }
+    }
     if (e.type === "sessions-changed" || e.type === "session-switched") loadSessions();
     if (e.type === "audio-command") {
       if (e.command === "start") void audio.start(e.micDeviceId, e.systemAudio);
@@ -52,11 +68,35 @@ export function Overlay() {
     if ((live.status === "stopped" || live.status === "error" || live.status === "idle") && audio.active) void audio.stop();
   }, [live.status]);
 
-  // Expand automatically for answers / previews; the user can collapse with ⌘E.
+  // Expand automatically for answers / previews; the user can collapse with ⌘E. Discreet mode
+  // stays slim — its answers are read in the bar or by leaving discreet mode.
   const needsRoom = chat.messages.length > 0 || pendingCaptures;
   useEffect(() => {
     if (needsRoom && mode === "compact") void api.overlay("expand");
   }, [needsRoom]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /**
+   * ⌘/Ctrl+Enter: submit typed text, otherwise ask the main process which authorized context is
+   * available (capturing the screen if, and only if, screen context is enabled) and ask about it.
+   */
+  const assist = async () => {
+    setNotice(null);
+    if (chat.busy) return;
+    if (text.trim()) return submit();
+    try {
+      const plan = await api.assistPrepare();
+      if (plan.capture.error) setNotice(`Screen capture failed: ${plan.capture.error}`);
+      if (!plan.prompt) {
+        setNotice((n) => n ?? plan.missing);
+        inputRef.current?.focus();
+        return;
+      }
+      pinnedToBottom.current = true;
+      void chat.send(plan.prompt, { includeLiveTranscript: liveActive && useLive, style: plan.style });
+    } catch (err) {
+      setError(errMsg(err));
+    }
+  };
 
   // Follow streaming output unless the user scrolled up to read.
   useEffect(() => {
@@ -72,7 +112,16 @@ export function Overlay() {
     void chat.send(q, { includeLiveTranscript: liveActive && useLive, style });
   };
 
+  useEffect(() => {
+    assistRef.current = assist;
+  });
+
   const onKey = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && !e.nativeEvent.isComposing) {
+      e.preventDefault();
+      void assist();
+      return;
+    }
     if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault();
       submit();
@@ -99,6 +148,7 @@ export function Overlay() {
       const mod = e.metaKey || e.ctrlKey;
       if (e.key === "Escape") {
         if (chat.busy) chat.cancel();
+        else if (mode === "discreet") void api.overlay("discreet");
         else void api.overlay("hide");
       } else if (mod && e.key.toLowerCase() === "n") {
         e.preventDefault();
@@ -139,6 +189,51 @@ export function Overlay() {
   if (!settings) return null;
   const lastAssistant = chat.messages.findLast((m) => m.role === "assistant");
   const expanded = mode === "expanded";
+
+  if (mode === "discreet") {
+    // Minimal input bar: one line in, a short live preview of the latest answer out.
+    const latest = chat.messages.findLast((m) => m.role === "assistant");
+    const preview = latest?.status === "error" ? latest.error?.message : latest?.content.replace(/\s+/g, " ").slice(-160);
+    return (
+      <div className="overlay discreet" role="dialog" aria-label="Lumen discreet input">
+        <div className="discreet-bar">
+          <span className="mode-tag" title="Discreet input mode — Esc or ⌘/Ctrl+Shift+Enter to leave">Discreet</span>
+          <input
+            ref={inputRef as unknown as React.RefObject<HTMLInputElement>}
+            className="discreet-input"
+            aria-label="Ask Lumen (discreet input)"
+            placeholder={chat.busy ? "Answering…" : "Ask quietly… ↵ to send"}
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.nativeEvent.isComposing) {
+                e.preventDefault();
+                if (e.metaKey || e.ctrlKey) void assist();
+                else submit();
+              }
+            }}
+          />
+          {chat.busy ? (
+            <button className="btn danger sm" onClick={chat.cancel} aria-label="Stop generating">
+              ■
+            </button>
+          ) : (
+            <button className="btn ghost sm" onClick={() => void api.overlay("discreet")} title="Open the full panel" aria-label="Leave discreet mode">
+              ⤢
+            </button>
+          )}
+          <button className="btn ghost sm" onClick={() => void api.overlay("hide")} aria-label="Hide assistant">
+            ✕
+          </button>
+        </div>
+        {(preview || notice) && (
+          <div className="discreet-preview" aria-live="polite">
+            {notice ?? preview}
+          </div>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div className={`overlay ${expanded ? "expanded" : "compact"}`} role="dialog" aria-label="Lumen assistant">
@@ -217,6 +312,11 @@ export function Overlay() {
               </p>
               <div className="kbd-hints">
                 <span>↵ send</span>
+                <span>⌘↵ assist with current context</span>
+                <span>⌘\\ show/hide</span>
+                <span>⌘↑/↓ scroll</span>
+                <span>⌘←/→ move</span>
+                <span>⌘⇧↵ discreet</span>
                 <span>Esc stop/hide</span>
                 <span>⌘E expand</span>
                 <span>⌥1–7 answer style</span>
@@ -231,6 +331,14 @@ export function Overlay() {
         {error && (
           <div className="alert error small" role="alert">
             {error}
+          </div>
+        )}
+        {notice && (
+          <div className="alert info small" role="status">
+            {notice}
+            <button className="btn ghost sm" onClick={() => setNotice(null)} aria-label="Dismiss">
+              ×
+            </button>
           </div>
         )}
         <ContextChips items={items} compact />

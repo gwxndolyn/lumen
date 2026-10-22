@@ -4,9 +4,8 @@ import type { Settings } from "./types";
 
 const accelerator = z
   .string()
-  .min(1)
   .max(64)
-  .regex(/^[A-Za-z0-9+.]+$/, "Shortcut may only contain letters, digits and '+'");
+  .regex(/^$|^[A-Za-z0-9+.\\[\];',/`=-]+$/, "Shortcut contains unsupported characters");
 
 const httpUrl = z
   .string()
@@ -31,6 +30,7 @@ export const settingsSchema = z.object({
     timeoutMs: z.number().int().min(5_000).max(600_000),
     idleTimeoutMs: z.number().int().min(5_000).max(300_000),
     openaiCompat: z.object({ baseUrl: httpUrl, model: z.string().min(1).max(120) }),
+    dailySpendLimitUsd: z.number().min(0).max(10_000),
   }),
   transcription: z.object({
     kind: z.enum(["deepgram", "none"]),
@@ -69,7 +69,13 @@ export const settingsSchema = z.object({
     expandedHeight: z.number().int().min(240).max(2000),
   }),
   shortcuts: z.object({
+    requestAssist: accelerator,
     toggleOverlay: accelerator,
+    scrollUp: accelerator,
+    scrollDown: accelerator,
+    moveLeft: accelerator,
+    moveRight: accelerator,
+    discreetInput: accelerator,
     askAboutScreen: accelerator,
     askAboutSelection: accelerator,
     openMainWindow: accelerator,
@@ -106,14 +112,22 @@ export function deepMerge<T>(base: T, patch: unknown): T {
   return out as T;
 }
 
-/** v0.1 stored `assistant.length`; map it onto the new answer style. */
+/** Upgrade settings written by older versions. */
 function upgradeLegacy(stored: Record<string, unknown>): Record<string, unknown> {
-  const a = stored.assistant;
+  let out = stored;
+  const a = out.assistant;
+  // v0.1 stored `assistant.length`; map it onto the answer style.
   if (isPlainObject(a) && "length" in a && !("style" in a)) {
     const { length, ...rest } = a;
-    return { ...stored, assistant: { ...rest, style: length === "detailed" ? "detailed" : "quick" } };
+    out = { ...out, assistant: { ...rest, style: length === "detailed" ? "detailed" : "quick" } };
   }
-  return stored;
+  // ≤0.2 toggled the panel with ⌘/Ctrl+Shift+Space. Keep a user's custom choice; move the old
+  // default to the new ⌘/Ctrl+\ default.
+  const sc = out.shortcuts;
+  if (isPlainObject(sc) && sc.toggleOverlay === "CommandOrControl+Shift+Space" && !("requestAssist" in sc)) {
+    out = { ...out, shortcuts: { ...sc, toggleOverlay: DEFAULT_SETTINGS.shortcuts.toggleOverlay } };
+  }
+  return out;
 }
 
 /** Strip keys that are not in the schema so stale fields from older versions do not linger. */
@@ -150,4 +164,14 @@ export function applySettingsPatch(current: Settings, patch: unknown): Settings 
     throw new Error(`Invalid setting ${issue?.path.join(".")}: ${issue?.message}`);
   }
   return parsed.data as Settings;
+}
+
+/** Parse persisted settings text; corrupt JSON yields defaults rather than a startup crash. */
+export function loadSettingsJson(raw: string | null): Settings {
+  if (!raw) return loadSettings(null);
+  try {
+    return loadSettings(JSON.parse(raw));
+  } catch {
+    return loadSettings(null);
+  }
 }

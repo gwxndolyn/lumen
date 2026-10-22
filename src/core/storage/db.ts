@@ -93,6 +93,11 @@ export const MIGRATIONS: string[] = [
    CREATE TRIGGER chunks_au AFTER UPDATE OF text ON knowledge_chunks BEGIN
      INSERT INTO chunks_fts(chunks_fts, rowid, text) VALUES ('delete', old.rowid, old.text);
      INSERT INTO chunks_fts(rowid, text) VALUES (new.rowid, new.text); END;`,
+  // 5: usage ledger (no content: model, token counts, cost only) and last-open conversation
+  `CREATE TABLE usage_ledger (id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, model TEXT NOT NULL,
+     input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL, cost_usd REAL NOT NULL);
+   CREATE INDEX idx_usage_at ON usage_ledger(at);
+   ALTER TABLE sessions ADD COLUMN last_conversation_id TEXT;`,
 ];
 
 type Row = Record<string, unknown>;
@@ -136,10 +141,18 @@ export interface PersistedContextItem {
 export class Store {
   readonly db: DatabaseSync;
 
-  constructor(readonly path: string) {
+  constructor(
+    readonly path: string,
+    migrations: string[] = MIGRATIONS,
+  ) {
     this.db = new DatabaseSync(path);
-    this.db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA secure_delete = ON;");
-    this.migrate();
+    try {
+      this.db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA secure_delete = ON; PRAGMA busy_timeout = 3000;");
+      this.migrate(migrations);
+    } catch (err) {
+      this.db.close();
+      throw err;
+    }
   }
 
   close() {
@@ -163,6 +176,16 @@ export class Store {
         throw new Error(`Database migration ${v + 1} failed: ${(err as Error).message}`, { cause: err });
       }
     }
+  }
+
+  /**
+   * Make deletions physical. `secure_delete` zeroes freed table pages, but FTS5 keeps deleted
+   * terms (and their positions) inside its segment b-tree until the index is merged, and WAL keeps
+   * old page images until a checkpoint. Run after any user-initiated deletion.
+   */
+  purgeDeleted() {
+    for (const t of ["messages_fts", "segments_fts", "chunks_fts"]) this.db.exec(`INSERT INTO ${t}(${t}) VALUES('optimize')`);
+    this.db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
   }
 
   private tx<T>(fn: () => T): T {
@@ -199,7 +222,7 @@ export class Store {
       ai: input.ai ?? {},
     };
     this.db
-      .prepare("INSERT INTO sessions VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+      .prepare("INSERT INTO sessions (id, title, type, notes, created_at, updated_at, context_ttl_minutes, ai) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
       .run(s.id, s.title, s.type, s.notes, s.createdAt, s.updatedAt, s.contextTtlMinutes, JSON.stringify(s.ai));
     return s;
   }
@@ -246,7 +269,9 @@ export class Store {
 
   /** Deletes the session and, by cascade, its conversations, messages, transcripts, segments, insights, documents, chunks and stored context. */
   deleteSession(id: string): boolean {
-    return Number(this.db.prepare("DELETE FROM sessions WHERE id = ?").run(id).changes) > 0;
+    const ok = Number(this.db.prepare("DELETE FROM sessions WHERE id = ?").run(id).changes) > 0;
+    this.purgeDeleted();
+    return ok;
   }
 
   exportSession(id: string) {
@@ -263,11 +288,34 @@ export class Store {
     };
   }
 
+  setLastConversation(sessionId: string, conversationId: string | null) {
+    this.db.prepare("UPDATE sessions SET last_conversation_id = ? WHERE id = ?").run(conversationId, sessionId);
+  }
+
+  /** Last conversation the user had open in a session, if it still exists and belongs to it. */
+  getLastConversation(sessionId: string): string | null {
+    const r = this.db
+      .prepare("SELECT c.id FROM sessions s JOIN conversations c ON c.id = s.last_conversation_id AND c.session_id = s.id WHERE s.id = ?")
+      .get(sessionId) as Row | undefined;
+    return r ? String(r.id) : null;
+  }
+
+  // ---- usage ledger (spend limits; no content) ----
+  recordUsage(model: string, inputTokens: number, outputTokens: number, costUsd: number, at = Date.now()) {
+    this.db.prepare("INSERT INTO usage_ledger (at, model, input_tokens, output_tokens, cost_usd) VALUES (?, ?, ?, ?, ?)").run(at, model, inputTokens, outputTokens, costUsd);
+    this.db.prepare("DELETE FROM usage_ledger WHERE at < ?").run(at - 90 * 86_400_000);
+  }
+
+  spendSince(since: number): { costUsd: number; requests: number } {
+    const r = this.db.prepare("SELECT COALESCE(SUM(cost_usd), 0) AS c, COUNT(*) AS n FROM usage_ledger WHERE at >= ?").get(since) as Row;
+    return { costUsd: Number(r.c), requests: Number(r.n) };
+  }
+
   // ---- persisted session context (text only; images are never stored) ----
   saveContextItem(c: PersistedContextItem) {
     this.db
       .prepare(
-        `INSERT INTO context_items VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO context_items (id, session_id, source, source_id, title, text, created_at, expires_at, pinned, enabled, hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET title = excluded.title, text = excluded.text, created_at = excluded.created_at,
            expires_at = excluded.expires_at, pinned = excluded.pinned, enabled = excluded.enabled, hash = excluded.hash`,
       )
@@ -276,6 +324,11 @@ export class Store {
 
   deleteContextItem(id: string) {
     this.db.prepare("DELETE FROM context_items WHERE id = ?").run(id);
+  }
+
+  /** Physically drop freed pages for deleted context items (no FTS involved). */
+  checkpoint() {
+    this.db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
   }
 
   listContextItems(sessionId?: string): PersistedContextItem[] {
@@ -331,12 +384,13 @@ export class Store {
 
   deleteConversation(id: string) {
     this.db.prepare("DELETE FROM conversations WHERE id = ?").run(id);
+    this.purgeDeleted();
   }
 
   addMessage(m: Omit<ChatMessage, "id" | "createdAt"> & { id?: string; createdAt?: number }): ChatMessage {
     const msg: ChatMessage = { ...m, id: m.id ?? randomUUID(), createdAt: m.createdAt ?? Date.now() };
     this.db
-      .prepare("INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .prepare("INSERT INTO messages (id, conversation_id, role, content, created_at, refs, meta) VALUES (?, ?, ?, ?, ?, ?, ?)")
       .run(msg.id, msg.conversationId, msg.role, msg.content, msg.createdAt, JSON.stringify(msg.references), JSON.stringify(msg.meta));
     this.db.prepare("UPDATE conversations SET updated_at = ? WHERE id = ?").run(msg.createdAt, msg.conversationId);
     return msg;
@@ -401,10 +455,20 @@ export class Store {
 
   updateSegment(id: string, text: string, speaker: string | null) {
     this.db.prepare("UPDATE transcript_segments SET text = ?, speaker = ?, edited = 1 WHERE id = ?").run(text, speaker, id);
+    this.purgeDeleted(); // the edited-away text must not linger in the index
   }
 
   deleteSegment(id: string) {
     this.db.prepare("DELETE FROM transcript_segments WHERE id = ?").run(id);
+    this.purgeDeleted();
+  }
+
+  /** Workspace session that owns a transcript segment (for authorization checks). */
+  segmentOwner(segmentId: string): string | null {
+    const r = this.db
+      .prepare("SELECT s.session_id FROM transcript_segments g JOIN transcript_sessions s ON s.id = g.session_id WHERE g.id = ?")
+      .get(segmentId) as Row | undefined;
+    return r ? String(r.session_id) : null;
   }
 
   listSegments(transcriptId: string): TranscriptSegment[] {
@@ -423,11 +487,12 @@ export class Store {
 
   deleteTranscriptSession(id: string) {
     this.db.prepare("DELETE FROM transcript_sessions WHERE id = ?").run(id);
+    this.purgeDeleted();
   }
 
   saveInsights(transcriptId: string, data: unknown) {
     this.db
-      .prepare("INSERT INTO meeting_insights VALUES (?, ?, ?) ON CONFLICT(session_id) DO UPDATE SET data = excluded.data, created_at = excluded.created_at")
+      .prepare("INSERT INTO meeting_insights (session_id, data, created_at) VALUES (?, ?, ?) ON CONFLICT(session_id) DO UPDATE SET data = excluded.data, created_at = excluded.created_at")
       .run(transcriptId, JSON.stringify(data), Date.now());
   }
 
@@ -455,7 +520,7 @@ export class Store {
       this.db
         .prepare("INSERT INTO knowledge_docs (id, title, source, chars, created_at, session_id, format, content_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
         .run(id, input.title, input.source, chars, now, sessionId, input.format ?? "text", input.hash ?? null);
-      const ins = this.db.prepare("INSERT INTO knowledge_chunks VALUES (?, ?, ?, ?)");
+      const ins = this.db.prepare("INSERT INTO knowledge_chunks (id, doc_id, ord, text) VALUES (?, ?, ?, ?)");
       input.chunks.forEach((c, i) => ins.run(randomUUID(), id, i, c));
     });
     return { id, title: input.title, source: input.source, sessionId, format: input.format ?? "text", chars, chunkCount: input.chunks.length, createdAt: now };
@@ -476,6 +541,7 @@ export class Store {
 
   deleteKnowledgeDoc(id: string) {
     this.db.prepare("DELETE FROM knowledge_docs WHERE id = ?").run(id);
+    this.purgeDeleted();
   }
 
   /** BM25-ranked knowledge passages visible to `sessionId` (global + that session's documents only). */
@@ -561,7 +627,9 @@ export class Store {
         this.db.prepare("DELETE FROM transcript_sessions WHERE COALESCE(ended_at, started_at) < ?").run(now - transcriptDays * 86_400_000).changes,
       );
     }
-    return { conversations, transcripts, context: this.deleteExpiredContext(now) };
+    const context = this.deleteExpiredContext(now);
+    if (conversations || transcripts || context) this.purgeDeleted();
+    return { conversations, transcripts, context };
   }
 
   counts() {
@@ -587,8 +655,11 @@ export class Store {
 
   deleteAll() {
     this.db.exec(
-      "BEGIN; DELETE FROM sessions; DELETE FROM conversations; DELETE FROM transcript_sessions; DELETE FROM knowledge_docs; DELETE FROM meeting_insights; DELETE FROM context_items; COMMIT; VACUUM;",
+      "BEGIN; DELETE FROM sessions; DELETE FROM conversations; DELETE FROM transcript_sessions; DELETE FROM knowledge_docs; DELETE FROM meeting_insights; DELETE FROM context_items; COMMIT;",
     );
+    this.purgeDeleted();
+    this.db.exec("VACUUM");
+    this.db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
   }
 }
 

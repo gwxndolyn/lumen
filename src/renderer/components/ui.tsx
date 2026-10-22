@@ -187,10 +187,18 @@ export function MessageView({ m, onRetry, onCopy }: { m: UiMessage; onRetry?: ()
           <Markdown text={m.content} refs={m.references} streaming={streaming} onCopy={onCopy} onLink={(u) => void api.openExternal(u)} />
         </div>
       )}
+      {m.status === "done" && m.meta?.stopReason === "max_tokens" && (
+        <div className="alert warning small">This answer was cut off at the output limit. Ask “continue”, or raise Max output tokens in AI provider settings.</div>
+      )}
       {m.status === "error" && m.error && (
         <div className="alert error" role="alert">
           <div>{m.error.message}</div>
           <div className="row" style={{ marginTop: 6 }}>
+            {m.error.code === "spend_limit" && (
+              <button className="btn sm" onClick={() => void api.openMain("/main/provider")}>
+                Adjust spend limit
+              </button>
+            )}
             {(m.error.code === "missing_credentials" || m.error.code === "auth") && (
               <button className="btn sm" onClick={() => void api.openMain("/main/provider")}>
                 Open AI provider settings

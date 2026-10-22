@@ -1,4 +1,5 @@
 import type {
+  AnswerStyle,
   AssistantMode,
   CaptureCapabilities,
   CaptureRegion,
@@ -43,7 +44,10 @@ export type AppEvent =
   | { type: "permission-revoked"; permission: ContextPermission }
   | { type: "provider-health"; health: ProviderHealth }
   | { type: "live-screen"; state: LiveScreenState }
-  | { type: "overlay-mode"; mode: "compact" | "expanded" }
+  | { type: "overlay-mode"; mode: "compact" | "expanded" | "discreet" }
+  | { type: "assist-request"; source: "shortcut" }
+  | { type: "scroll"; direction: "up" | "down" }
+  | { type: "shortcut-status"; status: Record<string, { status: string; accelerator: string; reason?: string; alternatives?: string[] }> }
   | { type: "audio-command"; command: "start" | "stop" | "system-off"; micDeviceId: string | null; systemAudio: boolean }
   | { type: "toast"; level: "info" | "error"; message: string };
 
@@ -73,7 +77,7 @@ export interface LumenApi {
   getSettings(): Promise<Settings>;
   updateSettings(patch: unknown): Promise<Settings>;
   resetShortcuts(): Promise<Settings>;
-  getShortcutStatus(): Promise<Record<string, boolean>>;
+  getShortcutStatus(): Promise<Record<string, { status: string; accelerator: string; reason?: string; alternatives?: string[] }>>;
 
   secretsStatus(): Promise<SecretsStatus>;
   setSecret(name: SecretName, value: string): Promise<SecretsStatus>;
@@ -92,6 +96,10 @@ export interface LumenApi {
   chatSend(req: Omit<ChatSendRequest, "sessionId"> & { sessionId?: string }): Promise<void>;
   chatCancel(requestId: string): Promise<boolean>;
   listConversations(sessionId?: string): Promise<Conversation[]>;
+  openConversation(): Promise<string | null>;
+  setOpenConversation(id: string | null): Promise<void>;
+  spendToday(): Promise<{ costUsd: number; requests: number; limitUsd: number }>;
+  appInfo(): Promise<{ packaged: boolean; devModeAllowed: boolean; version: string }>;
   getMessages(conversationId: string): Promise<ChatMessage[]>;
   renameConversation(id: string, title: string): Promise<void>;
   deleteConversation(id: string): Promise<void>;
@@ -114,6 +122,7 @@ export interface LumenApi {
   attachCapture(captureId: string, region: CaptureRegion | null, title: string): Promise<ContextItemSummary[]>;
   discardCapture(captureId: string): Promise<void>;
   quickCapture(): Promise<ContextItemSummary[]>;
+  assistPrepare(): Promise<{ prompt: string | null; sources: string[]; missing: string | null; style: AnswerStyle; capture: { captured: boolean; pending: string | null; error: string | null } }>;
   liveScreen(action: "start" | "pause" | "resume" | "stop"): Promise<LiveScreenState>;
   liveScreenState(): Promise<LiveScreenState>;
 
@@ -151,7 +160,7 @@ export interface LumenApi {
 
   copyText(text: string): Promise<void>;
   openExternal(url: string): Promise<void>;
-  overlay(action: "hide" | "toggle" | "expand" | "compact" | "reset-position"): Promise<void>;
+  overlay(action: "hide" | "toggle" | "expand" | "compact" | "discreet" | "reset-position"): Promise<void>;
   openMain(route?: string): Promise<void>;
   setOverlaySize(width: number, height: number): Promise<void>;
 

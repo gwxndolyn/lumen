@@ -55,7 +55,7 @@ describe("migrations", () => {
 
   it("rolls back a failing migration and leaves the version unchanged", () => {
     const s = new Store(":memory:");
-    expect(() => s.migrate([...MIGRATIONS, "CREATE TABLE broken (;"])).toThrow(/migration 5 failed/);
+    expect(() => s.migrate([...MIGRATIONS, "CREATE TABLE broken (;"])).toThrow(new RegExp(`migration ${MIGRATIONS.length + 1} failed`));
     expect(s.schemaVersion()).toBe(MIGRATIONS.length);
   });
 });

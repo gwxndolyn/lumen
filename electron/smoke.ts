@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { AppCore } from "../src/core/app";
 import type { Store } from "../src/core/storage/db";
+import type { ShortcutManager } from "../src/core/shortcuts";
 import type { CaptureService } from "./capture";
 import type { WindowManager } from "./windows";
 
@@ -14,6 +15,7 @@ interface Ctx {
   windows: WindowManager;
   capture: CaptureService;
   shortcutStatus: Record<string, boolean>;
+  shortcuts: ShortcutManager;
 }
 
 /**
@@ -23,7 +25,13 @@ interface Ctx {
  * a Deepgram-compatible WebSocket via LUMEN_DEEPGRAM_URL) when available; otherwise the labelled
  * mock provider is used. Screenshots are written to LUMEN_SMOKE_SHOTS.
  */
-export async function runSmokeTest({ app, core, store, windows, capture, shortcutStatus }: Ctx) {
+function BrowserWindowFocused(): string {
+  const { BrowserWindow } = require("electron") as typeof import("electron");
+  const f = BrowserWindow.getFocusedWindow();
+  return f ? (f.getTitle() === "Lumen" && f.isAlwaysOnTop() ? "overlay" : "main") : "none";
+}
+
+export async function runSmokeTest({ app, core, store, windows, capture, shortcutStatus, shortcuts }: Ctx) {
   const result: Record<string, unknown> = {};
   const failures: string[] = [];
   const check = (name: string, ok: boolean, detail?: unknown) => {
@@ -57,7 +65,7 @@ export async function runSmokeTest({ app, core, store, windows, capture, shortcu
     check("bridge", (await js("window.lumen.role")) === "main");
     check("nodeIsolated", (await js("typeof require + '/' + typeof process")) === "undefined/undefined");
     check("shortcuts", Object.values(shortcutStatus).every(Boolean), { ...shortcutStatus });
-    check("schemaVersion", store.schemaVersion() === 4, store.schemaVersion());
+    check("schemaVersion", store.schemaVersion() === 5, store.schemaVersion());
 
     // Provider: an Anthropic-wire-compatible local server when provided, else labelled mock.
     if (realProvider) {
@@ -93,7 +101,7 @@ export async function runSmokeTest({ app, core, store, windows, capture, shortcu
     await shot(ov, "02-overlay-cancelled");
 
     // ---- B: real capture pipeline (image -> on-device OCR -> question) ----
-    const fixture = path.join(app.getAppPath(), "src/test/fixtures/invoice.png");
+    const fixture = path.join(process.env.LUMEN_SMOKE_FIXTURES ?? path.join(app.getAppPath(), "src/test/fixtures"), "invoice.png");
     const held = await capture.importImage(fixture);
     const f = capture.finalize(held.captureId, null);
     const { record, ocr } = core.addCapture({ title: "Invoice", sourceId: f.sourceId, vision: f.vision, ocrPng: f.ocrPng, thumbnailDataUrl: f.thumbnailDataUrl }, { pending: true });
@@ -180,7 +188,120 @@ export async function runSmokeTest({ app, core, store, windows, capture, shortcu
     windows.overlay!.setBounds({ x: -5000, y: -5000, width: 560, height: 176 });
     windows.ensureOverlayVisible();
     const b = windows.overlay!.getBounds();
-    check("overlayRecoversOffscreen", b.x > -1000 && b.y > -1000, b);
+    const { screen } = await import("electron");
+    const displays = screen.getAllDisplays().map((d) => ({ id: d.id, ...d.workArea }));
+    const inside = displays.some((a) => b.x >= a.x && b.y >= a.y && b.x + b.width <= a.x + a.width && b.y + b.height <= a.y + a.height);
+    check("overlayRecoversOffscreen", inside, { bounds: b, displays });
+
+    // ---- Hotkeys (native registration + the exact handlers an accelerator invokes) ----
+    // macOS does not allow this environment to synthesize keystrokes (no Accessibility grant), so
+    // the physical keypress itself is not simulated: we verify the OS registration via
+    // globalShortcut.isRegistered and then dispatch the same handler the OS would call.
+    {
+      const { globalShortcut } = await import("electron");
+      const keys = core.settings.shortcuts;
+      windows.hideOverlay();
+      await wait(200);
+      const hiddenReg = {
+        requestAssist: globalShortcut.isRegistered(keys.requestAssist),
+        toggleOverlay: globalShortcut.isRegistered(keys.toggleOverlay),
+        discreetInput: globalShortcut.isRegistered(keys.discreetInput),
+        scrollUp: globalShortcut.isRegistered(keys.scrollUp),
+        moveLeft: globalShortcut.isRegistered(keys.moveLeft),
+      };
+      check("HK_registeredWhileHidden", hiddenReg.requestAssist && hiddenReg.toggleOverlay && hiddenReg.discreetInput && !hiddenReg.scrollUp && !hiddenReg.moveLeft, hiddenReg);
+
+      // Toggle shows the panel without taking focus, and arrow shortcuts become registered.
+      const focusedBefore = BrowserWindowFocused();
+      shortcuts.trigger("toggleOverlay");
+      await wait(400);
+      check("HK_toggleShows", windows.overlayVisible, { visible: windows.overlayVisible });
+      check("HK_toggleNoFocusSteal", !windows.overlay!.isFocused() || focusedBefore === "overlay", { overlayFocused: windows.overlay!.isFocused(), focusedBefore });
+      check("HK_arrowsRegisteredWhenVisible", globalShortcut.isRegistered(keys.scrollUp) && globalShortcut.isRegistered(keys.moveRight));
+
+      // Hiding mid-stream must not interrupt the answer: the request stays active and the hidden
+      // renderer keeps receiving deltas, which are all present when the panel is shown again.
+      windows.setMode("expanded");
+      await wait(300);
+      await ojs("document.querySelector('button[aria-label=\"New conversation\"]')?.click()");
+      await wait(200);
+      await ask("Explain streaming in detail please, slowly.");
+      await until(() => core.chat.activeRequests === 1, 4000);
+      await wait(600);
+      shortcuts.trigger("toggleOverlay");
+      await wait(150);
+      const hiddenMid = !windows.overlayVisible;
+      const lenHidden0 = (await lastAnswer()).length;
+      const stillActive = core.chat.activeRequests === 1;
+      await wait(1200);
+      const lenHidden1 = (await lastAnswer()).length; // renderer keeps updating while hidden
+      await until(() => core.chat.activeRequests === 0, 15000);
+      shortcuts.trigger("toggleOverlay");
+      await wait(400);
+      const finalText = await lastAnswer();
+      const lastReq = core.metrics.snapshot().requests[0];
+      check("HK_hideDoesNotCancel", hiddenMid && stillActive && lenHidden1 > lenHidden0 && lastReq?.outcome === "ok" && /word79/.test(finalText) && !/Stopped/.test(finalText), {
+        hiddenMid,
+        stillActive,
+        lenHidden0,
+        lenHidden1,
+        outcome: lastReq?.outcome,
+        complete: /word79/.test(finalText),
+      });
+
+      // Scroll operates on Lumen's own response area (the long answer above overflows it).
+      windows.setMode("expanded");
+      await wait(300);
+      const scrollable = await ojs<{ sh: number; ch: number }>("(() => { const el = document.querySelector('.overlay-body-scroll'); el.scrollTop = el.scrollHeight; return { sh: el.scrollHeight, ch: el.clientHeight }; })()");
+      if (scrollable.sh <= scrollable.ch) throw new Error(`response area not scrollable (${JSON.stringify(scrollable)})`);
+      const top0 = await ojs<number>("document.querySelector('.overlay-body-scroll').scrollTop");
+      shortcuts.trigger("scrollUp");
+      await wait(500);
+      const top1 = await ojs<number>("document.querySelector('.overlay-body-scroll').scrollTop");
+      shortcuts.trigger("scrollDown");
+      await wait(500);
+      const top2 = await ojs<number>("document.querySelector('.overlay-body-scroll').scrollTop");
+      check("HK_scroll", top1 < top0 && top2 > top1, { top0, top1, top2 });
+
+      // Move left/right moves the native window within its display.
+      windows.overlay!.setPosition(Math.round(windows.overlay!.getBounds().x), windows.overlay!.getBounds().y);
+      const x0 = windows.overlay!.getBounds().x;
+      shortcuts.trigger("moveRight");
+      await wait(100);
+      const x1 = windows.overlay!.getBounds().x;
+      shortcuts.trigger("moveLeft");
+      shortcuts.trigger("moveLeft");
+      await wait(100);
+      const x2 = windows.overlay!.getBounds().x;
+      check("HK_move", x1 > x0 && x2 < x1, { x0, x1, x2 });
+
+      // ⌘/Ctrl+Enter with typed text submits it; with empty input it uses available context.
+      await ojs("document.querySelector('button[aria-label=\"New conversation\"]')?.click()");
+      await wait(200);
+      await ojs(`(() => { const ta = document.querySelector('textarea'); const set = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set; set.call(ta, 'What is the total due on the invoice?'); ta.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+      await wait(100);
+      const n0 = core.metrics.snapshot().requests.length;
+      shortcuts.trigger("requestAssist");
+      await until(async () => core.metrics.snapshot().requests.length > n0 && (await idle()), 15000);
+      check("HK_assistSubmitsTyped", (await ojs<string>("[...document.querySelectorAll('.msg.user')].at(-1)?.innerText ?? ''")).includes("total due"));
+      await ojs("document.querySelector('button[aria-label=\"New conversation\"]')?.click()");
+      await wait(200);
+      shortcuts.trigger("requestAssist");
+      await wait(800);
+      // Screen consent was revoked earlier (F), nothing is recording: Lumen must explain, not invent.
+      const emptyAssist = await ojs<string>("document.body.innerText");
+      check("HK_assistEmptyExplains", /Type a question|enable screen context/i.test(emptyAssist) && !/\$1,250/.test(emptyAssist));
+
+      // Discreet mode: distinct slim bar, preserves the conversation, toggles back.
+      shortcuts.trigger("discreetInput");
+      await wait(400);
+      const dh = windows.overlay!.getBounds().height;
+      const dTag = await ojs<boolean>("!!document.querySelector('.overlay.discreet .mode-tag')");
+      await shot(ov, "06-discreet");
+      shortcuts.trigger("discreetInput");
+      await wait(400);
+      check("HK_discreet", dTag && dh <= 90 && windows.mode !== "discreet" && windows.overlay!.getBounds().height > 100, { dh, dTag, mode: windows.mode });
+    }
 
     // ---- H: delete session removes data incl. index ----
     const fts0 = store.ftsCounts();

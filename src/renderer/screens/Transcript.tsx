@@ -229,7 +229,7 @@ export function TranscriptScreen({ settings, live, go }: { settings: Settings; l
               Let others know when you are recording.
             </Empty>
           ) : (
-            <SessionDetail sessionId={sessionId} segments={shown} interim={viewingLive ? live.interim : null} live={viewingLive && active} onChanged={refresh} endRef={endRef} setError={setError} />
+            <SessionDetail sessionId={sessionId} segments={shown} interims={viewingLive ? Object.values(live.interims) : []} live={viewingLive && active} onChanged={refresh} endRef={endRef} setError={setError} />
           )}
         </div>
       </div>
@@ -240,7 +240,7 @@ export function TranscriptScreen({ settings, live, go }: { settings: Settings; l
 function SessionDetail({
   sessionId,
   segments,
-  interim,
+  interims,
   live,
   onChanged,
   endRef,
@@ -248,7 +248,7 @@ function SessionDetail({
 }: {
   sessionId: string;
   segments: TranscriptSegment[];
-  interim: LiveTranscript["interim"];
+  interims: { text: string; speaker: string | null }[];
   live: boolean;
   onChanged: () => void;
   endRef: React.RefObject<HTMLDivElement | null>;
@@ -302,7 +302,7 @@ function SessionDetail({
 
       {insights && <Insights insights={insights} />}
 
-      {local.length === 0 && !interim && <div className="muted small" style={{ padding: 8 }}>{live ? "Listening… speak to see the transcript." : "This transcript is empty."}</div>}
+      {local.length === 0 && !interims.length && <div className="muted small" style={{ padding: 8 }}>{live ? "Listening… speak to see the transcript." : "This transcript is empty."}</div>}
       <div role="log" aria-live="polite" aria-label="Transcript">
         {local.map((s) =>
           editing?.id === s.id ? (
@@ -353,12 +353,12 @@ function SessionDetail({
             </div>
           ),
         )}
-        {interim && (
-          <div className="interim">
+        {interims.map((interim, i) => (
+          <div key={i} className="interim">
             {interim.speaker ? `${interim.speaker}: ` : ""}
             {interim.text}
           </div>
-        )}
+        ))}
         <div ref={endRef} />
       </div>
     </div>

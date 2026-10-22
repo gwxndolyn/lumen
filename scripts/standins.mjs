@@ -18,7 +18,7 @@ function answerFor(body) {
     return total ? `The total due is ${total} [C1], due ${m(/November \d+/) ?? "(date not visible)"} [C1].` : "I don't see an invoice in the provided context.";
   }
   if (/launch/i.test(q)) return /thursday/i.test(text) ? "Transcript: the team agreed to launch on Thursday [C1]." : "There is no transcript in context.";
-  if (/slowly/i.test(q)) return Array.from({ length: 80 }, (_, i) => `word${i}`).join(" ");
+  if (/slowly/i.test(q)) return Array.from({ length: 80 }, (_, i) => `word${i}${i % 8 === 7 ? "\n\n" : " "}`).join("");
   return "General knowledge: here is an answer.";
 }
 
