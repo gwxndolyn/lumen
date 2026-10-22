@@ -34,17 +34,35 @@ export const TASK_LABELS: Record<TaskCategory, string> = {
 
 const RULES: [TaskCategory, RegExp][] = [
   ["meeting_summary", /\b(summari[sz]e (the |this )?(meeting|call|discussion|conversation|transcript)|meeting (summary|notes|recap)|action items|what did we (agree|decide|discuss)|recap)\b/i],
-  ["behavioral", /\b(tell me about a time|describe a (time|situation)|give me an example of a time|conflict with|disagree(d)? with|biggest (failure|mistake|weakness|strength)|star (method|format)|behaviou?ral|leadership|tell me about yourself|why (do you want|this company|should we hire))\b/i],
+  [
+    "behavioral",
+    /\b(tell me about a time|describe a (time|situation)|give me an example of a time|conflict with|disagree(d)? with|biggest (failure|mistake|weakness|strength)|star (method|format|answer|story)|behaviou?ral|leadership|tell me about yourself|why (do you want|this company|should we hire))\b/i,
+  ],
   ["project", /\b(walk (me )?through (my|your|a|the) project|my project|project (deep dive|discussion)|on my resume|what i built|my role (in|on))\b/i],
-  ["debugging", /\b(bug|debug|error|exception|traceback|stack ?trace|crash(es|ing)?|fails?|failing|doesn'?t work|not working|wrong (answer|output|result)|segfault|undefined is not|npe)\b|\w*(exception|error)\b|null ?pointer/i],
+  [
+    "debugging",
+    /\b(bug|debug|error|exception|traceback|stack ?trace|crash(es|ing)?|fails?|failing|doesn'?t work|not working|wrong (answer|output|result)|segfault|undefined is not|npe)\b|\w*(exception|error)\b|null ?pointer/i,
+  ],
   ["testing", /\b(unit tests?|test cases?|write tests|integration tests?|e2e|end-to-end tests?|mock(ing)?|test coverage|tdd|jest|pytest|junit|vitest|qa)\b/i],
   ["database_sql", /\b(sql|query|queries|select .* from|join|group by|index(es|ing)?|postgres(ql)?|mysql|sqlite|database|schema|normali[sz]|transaction isolation|nosql|mongodb|dynamo)\b/i],
-  ["system_design", /\b(design (a|an|the) (system|service|platform|url shortener|chat|feed|rate limiter|cache|notification)|system design|scal(e|ability|able) to|distributed|sharding|load balanc|high availability|consistency model|cap theorem|million (users|requests))\b/i],
+  [
+    "system_design",
+    /\b(design (a|an|the) (system|service|platform|url shortener|chat|feed|rate limiter|cache|notification)|system design|scal(e|ability|able) to|at (high|large|massive) scale|distributed|shard(ing)?|load balanc|high availability|consistency model|cap theorem|million (users|requests))\b/i,
+  ],
   ["api_backend", /\b(rest(ful)? api|api (design|endpoint)|endpoints?|grpc|graphql|backend|microservices?|authentication|oauth|jwt|middleware|rate limit|idempoten|webhook|http status)\b/i],
   ["frontend", /\b(react|vue|angular|svelte|css|html|dom|component|hooks?|useeffect|usestate|frontend|front-end|browser|layout|flexbox|grid layout|accessibility|a11y|jetpack compose|swiftui)\b/i],
-  ["code_explanation", /\b(explain (this|the|what this) (code|function|snippet|method|class|query)|what does (this|the) (code|function|line|snippet) do|how does this (code|function) work|walk me through (this|the) code)\b/i],
-  ["algorithm", /\b(algorithm|leetcode|two sum|array|linked list|binary (tree|search)|bst|graph|bfs|dfs|dynamic programming|\bdp\b|recursion|recursive|iterative|sort(ing|ed)?|heap|priority queue|hash ?map|sliding window|two pointers|backtracking|greedy|trie|substring|subarray|palindrome|time complexity|big[- ]o|o\(n)/i],
-  ["language_framework", /\b(python|java|javascript|typescript|kotlin|c\+\+|c#|golang|rust|spring|django|flask|express|node(\.js)?|\.net|generics|closures?|async|await|coroutines?|goroutines?|garbage collect|memory model|difference between)\b/i],
+  [
+    "code_explanation",
+    /\b(explain (this|the|what this) (code|function|snippet|method|class|query)|what does (this|the) (code|function|line|snippet) do|how does this (code|function) work|walk me through (this|the) code)\b/i,
+  ],
+  [
+    "algorithm",
+    /\b(algorithm|leetcode|two sum|array|linked list|binary (tree|search)|bst|graph|bfs|dfs|dynamic programming|\bdp\b|recursion|recursive|iterative|sort(ing|ed)?|heap|priority queue|hash ?map|sliding window|two pointers|backtracking|greedy|trie|substring|subarray|palindrome|time complexity|big[- ]o|o\(n|o\(1\)|o\(log|lru cache|lfu cache|data structure)/i,
+  ],
+  [
+    "language_framework",
+    /\b(python|java|javascript|typescript|kotlin|c\+\+|c#|golang|rust|spring|django|flask|express|node(\.js)?|\.net|generics|closures?|async|await|coroutines?|goroutines?|garbage collect|memory model|difference between)\b/i,
+  ],
 ];
 
 export interface Classification {

@@ -55,16 +55,21 @@ export function requestedLanguage(text: string): Language | null {
   return null;
 }
 
-const SCREEN_REF = /\b(on (my|the) screen|this (code|function|method|class|error|diagram|page|problem|question|output|query|snippet)|what('s| is) (shown|visible|here)|see here|the (code|error|problem) (above|here|shown)|this one|line \d+)\b/i;
-const CORRECTION = /^(actually|no[,.!]|nope|not quite|that'?s (wrong|not right|incorrect)|wrong|incorrect|i meant|you assumed|correction)\b|\b(that'?s (wrong|incorrect)|you misunderstood|the constraint is actually|it should (be|return)|i said|not what i asked)\b/i;
-const SIMPLIFY = /^(simplify|simpler|in simple(r)? terms|eli5|explain (it )?like i'?m (five|5)|too (long|complicated|complex)|shorter|tl;?dr|summari[sz]e (that|it|this))\b|\b(simpler|more simply|plain english|less jargon)\b/i;
+const SCREEN_REF =
+  /\b(on (my|the) screen|this (code|function|method|class|error|diagram|page|problem|question|output|query|snippet)|what('s| is) (shown|visible|here)|see here|the (code|error|problem) (above|here|shown)|this one|line \d+)\b/i;
+const CORRECTION =
+  /^(actually|no[,.!]|nope|not quite|that'?s (wrong|not right|incorrect)|wrong|incorrect|i meant|you assumed|correction)\b|\b(that'?s (wrong|incorrect)|you misunderstood|the constraint is actually|it should (be|return)|i said|i meant|not what i asked)\b/i;
+const SIMPLIFY =
+  /^(simplify|simpler|in simple(r)? terms|eli5|explain (it )?like i'?m (five|5)|too (long|complicated|complex)|shorter|tl;?dr|summari[sz]e (that|it|this))\b|\b(simpler|more simply|plain english|less jargon|too (long|complicated|complex|technical)|shorter( please)?)\b/i;
 /** References that only make sense with an antecedent ("fix it", "why?"). */
 const DANGLING = /^(it|this|that|those|them|why|how|and|so|then|what about it|fix it|do it|again|more|same)\??$/i;
-const ELABORATE = /^(why\??|how so\??|explain (that|this|it|more|further)|more (detail|details)|go deeper|elaborate|can you (expand|elaborate)|tell me more|walk me through (it|that|this)|break (it|that) down|in more detail)\b/i;
+const ELABORATE =
+  /^(why\??|how so\??|explain (that|this|it|more|further)|more (detail|details)|go deeper|elaborate|can you (expand|elaborate)|tell me more|walk me through (it|that|this)|break (it|that) down|in more detail)\b/i;
 const REVISE_VERB = /\b(change|modify|update|rewrite|refactor|fix|optimi[sz]e|simplify|convert|translate|port|make|add|remove|rename|handle|support|use)\b/i;
 const CODE_REF = /\b(it|that|this|the (code|solution|function|query|implementation|method|loop)|your (code|solution|answer|function))\b/i;
 const CONVERT = /\b(rewrite|convert|translate|port|write|redo|show)\b.*\b(in|to|into|using)\b|\binstead\b|\b(version|equivalent)\b/i;
-const FOLLOW_UP = /^(what about|how about|and (if|what|how|for)|what if|but (what|how|if|why)|then|so|also|same (but|for|with)|ok(ay)?,? (and|so|what|how))\b|\b(it|that|this|those|them|the same|iterative|recursive|another (way|approach)|other approach|alternative|better approach|space complexity|time complexity|edge cases?|follow-?up)\b/i;
+const FOLLOW_UP =
+  /^(what about|how about|and (if|what|how|for)|what if|but (what|how|if|why)|then|so|also|same (but|for|with)|ok(ay)?,? (and|so|what|how))\b|\b(it|that|this|those|them|the same|iterative|recursive|another (way|approach)|other approach|alternative|better approach|space complexity|time complexity|edge cases?|follow-?up)\b/i;
 
 /**
  * Classify the relation of `text` to the previous turn. Without a previous turn everything is new,
