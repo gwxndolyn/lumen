@@ -104,7 +104,7 @@ export function PrivacyScreen({ settings, update }: Props) {
           <h3>Export</h3>
           <div className="row">
             <span className="grow small muted">Download all conversations, transcripts, meeting notes and knowledge documents as JSON.</span>
-            <button className="btn" onClick={() => void api.exportData().then((p) => p && setStatus(`Exported to ${p}`)).catch((e) => setStatus(errMsg(e)))}>
+            <button className="btn" onClick={() => void api.exportData().then((p) => p && setStatus(`Exported to ${p}`)).catch((e) => setStatus(`Export failed: ${errMsg(e)}`))}>
               Export data
             </button>
           </div>
@@ -119,10 +119,13 @@ export function PrivacyScreen({ settings, update }: Props) {
               className="btn danger solid"
               disabled={confirmText !== "DELETE"}
               onClick={() =>
-                void api.deleteAllData().then(() => {
-                  setConfirmText("");
-                  setStatus("All data deleted.");
-                })
+                void api
+                  .deleteAllData()
+                  .then(() => {
+                    setConfirmText("");
+                    setStatus("All data deleted.");
+                  })
+                  .catch((e) => setStatus(`Delete failed: ${errMsg(e)}. Nothing was reported as deleted; try again or check Diagnostics.`))
               }
             >
               Delete everything
@@ -130,7 +133,7 @@ export function PrivacyScreen({ settings, update }: Props) {
           </div>
         </div>
         {status && (
-          <div className="alert info" role="status" style={{ marginTop: 12 }}>
+          <div className={`alert ${/^(Export failed|Could not|Delet\w* failed)/.test(status) ? "error" : "info"}`} role="status" style={{ marginTop: 12 }}>
             {status}
           </div>
         )}

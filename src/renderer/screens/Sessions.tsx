@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { MODE_LABELS, MODELS, STYLE_LABELS } from "../../shared/defaults";
 import type { AnswerStyle, AssistantMode, Effort, SessionSummary } from "../../shared/types";
-import { api, formatTime } from "../lib/api";
+import { api, errMsg, formatTime } from "../lib/api";
 import { useActiveSession, useAppEvent } from "../lib/hooks";
 import { Empty, useAction } from "../components/ui";
 
@@ -144,7 +144,7 @@ export function SessionsScreen() {
       </header>
       <div className="page narrow">
         {status && (
-          <div className="alert info small" role="status" style={{ marginBottom: 12 }}>
+          <div className={`alert ${/^(Export failed|Could not)/.test(status) ? "error" : "info"} small`} role="status" style={{ marginBottom: 12 }}>
             {status}
           </div>
         )}
@@ -221,14 +221,23 @@ export function SessionsScreen() {
                     <button className="btn sm" onClick={() => setEditing(s.id)}>
                       Edit
                     </button>
-                    <button className="btn sm" onClick={() => void api.exportSession(s.id).then((p) => p && setStatus(`Exported to ${p}`))}>
+                    <button className="btn sm" onClick={() =>
+                        void api
+                          .exportSession(s.id)
+                          .then((p) => p && setStatus(`Exported to ${p}`))
+                          .catch((e) => setStatus(`Export failed: ${errMsg(e)}`))
+                      }
+                    >
                       Export
                     </button>
                     <button
                       className="btn sm danger"
                       onClick={() => {
                         if (confirm(`Delete “${s.title}”?\n\nThis permanently deletes its conversations, transcripts, meeting notes, session documents and saved context, including their search index. Global knowledge documents are not affected.`))
-                          void api.deleteSession(s.id).then(() => setStatus(`Deleted “${s.title}”.`));
+                          void api
+                            .deleteSession(s.id)
+                            .then(() => setStatus(`Deleted “${s.title}”.`))
+                            .catch((e) => setStatus(`Could not delete “${s.title}”: ${errMsg(e)}`));
                       }}
                     >
                       Delete

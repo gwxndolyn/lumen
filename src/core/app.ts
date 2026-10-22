@@ -359,6 +359,7 @@ export class AppCore {
       this.copilot.questions.length = 0;
     }
     if (this.liveScreen.snapshot.active && this.settings.activeSessionId === id) this.liveScreen.stop();
+    if (!this.deps.store.getSession(id)) throw new Error("That session no longer exists.");
     this.engine.dropSession(id);
     this.deps.store.deleteSession(id);
     if (this.settings.activeSessionId === id) {
