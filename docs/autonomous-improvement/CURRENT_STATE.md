@@ -10,7 +10,16 @@ Verified on resume: `npm run check` 346 passed / 4 skipped; `format`, `audit:pro
 
 Note: vitest and the smoke run need to write to `node_modules/.vite-temp`; under the Claude Code sandbox they must run unsandboxed.
 
-**Next:** Prompt 8 Evaluation Lab, not started. Build on `src/core/intelligence/evaluate.ts`, `src/test/fixtures/intent-*.json`, `src/test/engine.test.ts` and `test:live`.
+## Prompt 8: Evaluation Lab (2026-10-23, committed)
+
+- `src/core/eval/`: benchmark v1.0.0 (64 synthetic cases, 12 categories), runner on the real AppCore pipeline (isolated in-memory store), scripted provider for deterministic mode, scoring across 8 separate metrics, JSON run history (`userData/evaluations`), baseline comparison, experiments (verification, context budget, prompt version).
+- UI: Evaluation Lab screen (Run / Results / Compare / Cases). Live runs need a confirmation checkbox and show a worst-case cost estimate.
+- CLI: `npm run eval` (deterministic; exit 1 on failures), `--baseline run.json` (exit 1 on regressions), `npm run eval:live -- --yes` (needs `ANTHROPIC_API_KEY`). CI runs the deterministic benchmark.
+- The benchmark found 2 real bugs, now fixed in `chatService.ts`: retrieved conversation history and memories with no keyword overlap were dropped by the ranker's relevance cut.
+- Deterministic: 64/64 pass. Ablations detected by the gate: verification off → 7 regressions; minimal prompt → 1 (inj-005). An 8k context budget → 0 (no case is sensitive to it yet).
+- **Not run: live mode against a real provider** (no API key here). Answer-quality checks are regex/structure only; no LLM judge.
+
+**Next:** run `npm run eval:live -- --yes --max-cost 1` with a key, then set it as the baseline (LUM-011). Add a budget-sensitive case.
 
 ## How to resume (any session, no chat history needed)
 
@@ -43,7 +52,7 @@ Lumen is an Electron + React desktop AI assistant (macOS and Windows; Linux buil
 |---|---|
 | `npm run typecheck` | pass |
 | `npm run lint` | pass (warnings denied) |
-| `npm test` | 346 passed, 4 skipped (live-provider tests; need API keys) — 2026-10-23 |
+| `npm test` | 388 passed, 4 skipped (live-provider tests; need API keys) — 2026-10-23 |
 | `npm run audit:prod` | pass: 3 advisories, all in modules excluded from the asar |
 | `npm run format` | pass (changed files) |
 | `npm run smoke` | pass on this branch (after the error-boundary change) |

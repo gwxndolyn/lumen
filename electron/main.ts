@@ -8,6 +8,8 @@ import { ShortcutManager, type ShortcutAction } from "../src/core/shortcuts";
 import { formatFromPath, markdownToText, sessionToMarkdown } from "../src/core/exportFormat";
 import { buildSupportBundle } from "../src/core/supportBundle";
 import { singleFlight } from "../src/core/singleFlight";
+import { EvalService } from "../src/core/eval/service";
+import { EvalStore } from "../src/core/eval/store";
 import { TesseractOcr } from "../src/core/ocr";
 import { SUPPORTED_DOC_EXTENSIONS, extractDocumentText } from "../src/core/knowledge";
 import type { Store } from "../src/core/storage/db";
@@ -40,6 +42,7 @@ const capture = new CaptureService();
 const shortcutStatus: Record<string, boolean> = {};
 let store: Store;
 let core: AppCore;
+let evals: EvalService;
 let windows: WindowManager;
 let tray: Tray | null = null;
 /** Latest microphone/system-audio state reported by the overlay renderer (for diagnostics). */
@@ -472,6 +475,55 @@ function registerIpc() {
   );
   handle("memory:update", (_e, mid, patch) => core.memory.update(id.parse(mid), z.object({ text: str(2000).optional(), kind: memoryKind.optional() }).parse(patch)));
   handle("memory:delete", (_e, mid) => core.memory.delete(id.parse(mid)));
+  // ---- evaluation lab (synthetic benchmark; live runs need explicit confirmation) ----
+  const limitsSchema = z
+    .object({
+      maxCases: z.number().int().min(1).max(500),
+      concurrency: z.number().int().min(1).max(4),
+      maxOutputTokens: z.number().int().min(64).max(8000),
+      maxCostUsd: z.number().min(0).max(25),
+      caseTimeoutMs: z.number().int().min(1000).max(300_000),
+    })
+    .partial();
+  const variantSchema = z.object({
+    name: z.string().min(1).max(60),
+    promptVersion: z.string().max(40).optional(),
+    contextBudgetChars: z.number().int().min(1000).max(200_000).optional(),
+    verification: z.boolean().optional(),
+    model: z.string().max(100).optional(),
+  });
+  const startSchema = z.object({
+    mode: z.enum(["deterministic", "live"]),
+    caseIds: z.array(z.string().max(40)).max(500).optional(),
+    categories: z.array(z.string().max(40)).max(20).optional(),
+    repeat: z.number().int().min(1).max(5).optional(),
+    limits: limitsSchema.optional(),
+    variant: variantSchema.optional(),
+    label: z.string().max(80).optional(),
+    confirmLive: z.boolean().optional(),
+    experiment: z.object({ name: z.string().min(1).max(80), variants: z.array(variantSchema).min(2).max(4) }).optional(),
+  });
+  handle("eval:catalog", () => evals.catalog());
+  handle("eval:estimate", (_e, req) => evals.estimate(startSchema.parse(req)));
+  handle("eval:start", (_e, req) => {
+    const r = startSchema.parse(req);
+    if (r.mode === "live") logger.info("live evaluation started", { cases: r.caseIds?.length ?? null, categories: r.categories?.length ?? null, repeat: r.repeat ?? 1 });
+    evals.start(r);
+  });
+  handle("eval:stop", () => evals.stop());
+  handle("eval:status", () => ({ running: evals.running }));
+  handle("eval:list", () => evals.list());
+  handle("eval:get", (_e, rid) => evals.get(id.parse(rid)));
+  handle("eval:delete", (_e, rid) => evals.delete(id.parse(rid)));
+  handle("eval:setBaseline", (_e, rid) => evals.setBaseline(rid === null ? null : id.parse(rid)));
+  handle("eval:compare", (_e, a, b) => evals.compare(id.parse(a), id.parse(b)));
+  handle("eval:export", async (e, rid) => {
+    const json = evals.exportRun(id.parse(rid));
+    const res = await dialog.showSaveDialog(winOf(e), { defaultPath: `lumen-eval-${new Date().toISOString().slice(0, 10)}.json`, filters: [{ name: "JSON", extensions: ["json"] }] });
+    if (res.canceled || !res.filePath) return null;
+    writeFileAtomic(res.filePath, json, 0o600);
+    return res.filePath;
+  });
   handle("history:search", (_e, q, scope) => store.search(str(500).parse(q), z.enum(["session", "all"]).parse(scope) === "all" ? null : core.activeSessionId));
 
   // ---- context ----
@@ -737,6 +789,8 @@ function registerIpc() {
   handle("data:deleteAll", () => {
     capture.clearAll();
     core.deleteAll();
+    evals.stop();
+    evals.clearHistory();
     updateTray();
     logger.info("all user data deleted");
   });
@@ -973,6 +1027,12 @@ function startup() {
     settings,
     (s) => store.setKv("settings", JSON.stringify(s)),
   );
+  evals = new EvalService({
+    store: new EvalStore(path.join(userData, "evaluations"), os.homedir()),
+    getSettings: () => core.settings,
+    getProvider: () => core.providerFor(),
+    emit: (e) => windows?.broadcast("lumen:eval", e),
+  });
   store.setKv("settings", JSON.stringify(core.settings));
   const purged = core.sweep();
   logger.info("app ready", { version: app.getVersion(), platform: process.platform, purged, schema: store.schemaVersion() });

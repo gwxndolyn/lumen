@@ -32,6 +32,14 @@ import type {
   TranscriptStatus,
   WindowRole,
 } from "./types";
+import type { EvalEvent, EvalService, StartRequest as EvalStartRequest } from "../core/eval/service";
+import type { EvalRun, RunListItem } from "../core/eval/types";
+import type { RunComparison } from "../core/eval/compare";
+
+type EvalCatalog = ReturnType<EvalService["catalog"]>;
+type EvalEstimate = ReturnType<EvalService["estimate"]>;
+
+export type { EvalEvent, EvalStartRequest, EvalCatalog, EvalEstimate, EvalRun, RunListItem, RunComparison };
 
 export type AppEvent =
   | { type: "settings"; settings: Settings }
@@ -195,6 +203,21 @@ export interface LumenApi {
   deleteMemory(id: string): Promise<void>;
   /** Save a support file (technical metadata + log tail, no content). Returns the path or null if cancelled. */
   saveSupportBundle(): Promise<string | null>;
+
+  // Evaluation Lab
+  evalCatalog(): Promise<EvalCatalog>;
+  evalEstimate(req: EvalStartRequest): Promise<EvalEstimate>;
+  evalStart(req: EvalStartRequest): Promise<void>;
+  evalStop(): Promise<boolean>;
+  evalStatus(): Promise<{ running: boolean }>;
+  evalList(): Promise<RunListItem[]>;
+  evalGet(id: string): Promise<EvalRun | null>;
+  evalDelete(id: string): Promise<void>;
+  evalSetBaseline(id: string | null): Promise<void>;
+  evalCompare(baselineId: string, candidateId: string): Promise<RunComparison>;
+  /** Returns the saved path, or null if cancelled. */
+  evalExport(id: string): Promise<string | null>;
+  onEval(fn: (e: EvalEvent) => void): () => void;
   /** Renderer crash report: error type and component names only. */
   reportCrash(report: { name: string; components: string }): Promise<void>;
 

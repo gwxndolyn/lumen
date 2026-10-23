@@ -31,7 +31,9 @@
     "release:check": "npm run check && npm run check:secrets && npm run audit:prod && npm run build",
     "check:secrets": "node scripts/check-secrets.mjs",
     "format:all": "prettier --check \"electron/**/*.ts\" \"src/**/*.{ts,tsx}\" \"scripts/**/*.mjs\"",
-    "audit:raw": "npm audit --omit=dev --audit-level=high"
+    "audit:raw": "npm audit --omit=dev --audit-level=high",
+    "eval": "npm run build:main && node scripts/eval.mjs",
+    "eval:live": "npm run build:main && node scripts/eval.mjs --live"
   },
   "license": "UNLICENSED",
   "dependencies": {

@@ -1,6 +1,6 @@
 import type { ChatEvent, ChatMessage, ChatSendRequest, ErrorCode, Session, Settings } from "../shared/types";
 import { citedLabels, type ContextEngine } from "./context/engine";
-import { buildPrompt, DEFAULT_BUDGET } from "./context/promptBuilder";
+import { buildPrompt, DEFAULT_BUDGET, type PromptBudget } from "./context/promptBuilder";
 import type { Candidate } from "./context/ranker";
 import { redact } from "./context/sensitivity";
 import { truncate } from "./context/text";
@@ -43,6 +43,15 @@ export interface ChatDeps {
   log?: (level: "info" | "warn" | "error" | "debug", msg: string, data?: Record<string, unknown>) => void;
   /** Durable user-saved memory relevant to a query (bounded). */
   retrieveMemory?: (query: string) => { id: string; kind: string; text: string; updatedAt: number }[];
+  /** Pipeline variations for the Evaluation Lab. Unset in the app, which always uses the defaults. */
+  overrides?: PipelineOverrides;
+}
+
+export interface PipelineOverrides {
+  basePrompt?: string;
+  budget?: PromptBudget;
+  /** false skips the post-generation answer checks. */
+  verification?: boolean;
 }
 
 const HISTORY_CHARS = 24_000;
@@ -214,20 +223,25 @@ export class ChatService {
       }
       if (settings.assistant.useProjectMemory) {
         for (const m of this.deps.retrieveMemory?.(query) ?? []) {
-          extra.push({ id: `mem:${m.id}`, kind: "memory", title: m.kind.replace("_", " "), text: m.text, createdAt: m.updatedAt, sourceId: m.id, retrieved: true });
+          // MemoryService has already chosen and bounded these (keyword matches plus standing
+          // preferences/conventions), so the ranker must not drop the ones with no keyword overlap.
+          extra.push({ id: `mem:${m.id}`, kind: "memory", title: m.kind.replace("_", " "), text: m.text, createdAt: m.updatedAt, sourceId: m.id, retrieved: true, explicit: true });
         }
       }
       if (settings.assistant.useConversationHistory) {
         for (const hit of store.search(query, session.id, 6, "any")) {
           if (hit.kind !== "message" || hit.parentId === convId) continue;
           const m = store.getMessage(hit.itemId);
-          if (m) extra.push({ id: `hist:${m.id}`, kind: "history", title: hit.parentTitle, text: m.content, createdAt: m.createdAt, sourceId: m.id });
+          // Found by the full-text index, so it keeps the retrieved floor like knowledge passages.
+          if (m) extra.push({ id: `hist:${m.id}`, kind: "history", title: hit.parentTitle, text: m.content, createdAt: m.createdAt, sourceId: m.id, retrieved: true });
         }
       }
 
       const prepared = context.prepare(session.id, query, extra, { sendImages: settings.screen.sendImages && provider.supportsImages });
       contextPrepMs = prepared.prepMs;
       const style = session.ai.style ?? req.style;
+      const overrides = this.deps.overrides ?? {};
+      const budget = overrides.budget ?? DEFAULT_BUDGET;
       const built = buildPrompt(question, prepared.ranked, {
         mode: session.type,
         style,
@@ -235,6 +249,8 @@ export class ChatService {
         availability: prepared.availability,
         sessionTitle: session.title,
         query,
+        budget,
+        basePrompt: overrides.basePrompt,
       });
       // Mode-specific task instructions are trusted (built by Lumen, never from captured content)
       // and go in the system blocks, after the cached policy.
@@ -302,7 +318,7 @@ export class ChatService {
           droppedForBudget: built.dropped.length,
           belowRelevance: Math.max(0, prepared.considered - prepared.ranked.length),
           contextChars: built.contextChars,
-          budgetChars: DEFAULT_BUDGET.maxContextChars,
+          budgetChars: budget.maxContextChars,
         },
       });
 
@@ -337,16 +353,19 @@ export class ChatService {
       const cost = estimateCostUsd(result.model, result.usage, hasPricing(result.model) ? null : settings.provider.customPrice);
       this.deps.onUsage?.(result.model, result.usage, cost);
       const cited = citedLabels(result.text, built.references);
-      const checks = verifyAnswer({
-        answer: result.text,
-        references: built.references,
-        category: (plan?.task.category ?? "general") as TaskCategory,
-        depth: plan?.strategy.depth ?? settings.personalization.depth,
-        requestedLanguage: plan?.turn.requestedLanguage ?? null,
-        available: { transcript: prepared.availability.transcript === "live", screen: prepared.availability.screen > 0 },
-        hintsOnly: !!plan?.strategy.hintsOnly,
-        stopReason: result.stopReason,
-      });
+      const checks =
+        overrides.verification === false
+          ? { checksRun: [], findings: [] }
+          : verifyAnswer({
+              answer: result.text,
+              references: built.references,
+              category: (plan?.task.category ?? "general") as TaskCategory,
+              depth: plan?.strategy.depth ?? settings.personalization.depth,
+              requestedLanguage: plan?.turn.requestedLanguage ?? null,
+              available: { transcript: prepared.availability.transcript === "live", screen: prepared.availability.screen > 0 },
+              hintsOnly: !!plan?.strategy.hintsOnly,
+              stopReason: result.stopReason,
+            });
       const verification = { checksRun: checks.checksRun.length, findings: checks.findings };
       if (checks.findings.length) this.deps.log?.("info", "answer checks flagged", { checks: checks.findings.map((f) => f.check) });
       metrics.recordVerification(

@@ -20,6 +20,7 @@ import { TranscriptScreen } from "./screens/Transcript";
 import { InterviewScreen } from "./screens/Interview";
 import { TechnicalScreen } from "./screens/Technical";
 import { MemoryScreen } from "./screens/Memory";
+import { EvaluationScreen } from "./screens/Evaluation";
 
 const MODES: { route: string; label: string; sub: string }[] = [
   { route: "interview", label: "Interview", sub: "Copilot" },
@@ -40,6 +41,7 @@ const NAV: { section?: string; route: string; label: string; icon: string }[] = 
   { route: "permissions", label: "Permissions", icon: "⛉" },
   { route: "privacy", label: "Privacy & data", icon: "◐" },
   { route: "diagnostics", label: "Diagnostics", icon: "≋" },
+  { route: "evaluation", label: "Evaluation Lab", icon: "⚗" },
 ];
 
 function routeFromHash(): string {
@@ -131,6 +133,8 @@ export function MainWindow() {
         return <PrivacyScreen settings={settings} update={update} />;
       case "diagnostics":
         return <DiagnosticsScreen />;
+      case "evaluation":
+        return <EvaluationScreen />;
       default:
         return <AssistantScreen settings={settings} update={update} live={live} />;
     }

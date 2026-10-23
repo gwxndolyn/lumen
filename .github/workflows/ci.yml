@@ -33,6 +33,8 @@ jobs:
       - run: npm run check:secrets
       - run: npm test
       - run: npm run build
+      # Deterministic Evaluation Lab benchmark (no network, no keys). Live evaluations are never run in CI.
+      - run: node scripts/eval.mjs
 
   audit:
     runs-on: ubuntu-latest

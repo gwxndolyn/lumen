@@ -69,9 +69,9 @@ export interface BuiltPrompt {
   contextChars: number;
 }
 
-export function buildSystem(mode: AssistantMode, style: AnswerStyle, tone: Tone, sessionTitle?: string) {
+export function buildSystem(mode: AssistantMode, style: AnswerStyle, tone: Tone, sessionTitle?: string, basePrompt = BASE_SYSTEM_PROMPT) {
   return [
-    { text: BASE_SYSTEM_PROMPT, cache: true },
+    { text: basePrompt, cache: true },
     {
       text: [MODE_PROMPTS[mode], STYLE_PROMPTS[style], TONE_PROMPTS[tone], sessionTitle ? `Session title (user-provided): ${escapeAttr(sessionTitle)}` : ""].filter(Boolean).join("\n"),
       cache: false,
@@ -131,6 +131,8 @@ export function buildPrompt(
     sessionTitle?: string;
     now?: number;
     /** What to match oversized sources against (defaults to the question). */ query?: string;
+    /** Replaces the base policy (evaluation experiments only; production always uses the default). */
+    basePrompt?: string;
   },
 ): BuiltPrompt {
   const now = opts.now ?? Date.now();
@@ -192,7 +194,7 @@ export function buildPrompt(
   const availability = opts.availability ? `${describeAvailability(opts.availability)}\n\n` : "";
 
   return {
-    systemBlocks: buildSystem(opts.mode, opts.style, opts.tone, opts.sessionTitle),
+    systemBlocks: buildSystem(opts.mode, opts.style, opts.tone, opts.sessionTitle, opts.basePrompt),
     userContent: [...images, { type: "text", text: `${availability}${contextBlock}<question>\n${escapeForEnvelope(question)}\n</question>` }],
     references,
     included,

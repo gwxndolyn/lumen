@@ -20,7 +20,7 @@ import type {
   TranscriptEvent,
   TranscriptSegment,
 } from "../shared/types";
-import { ChatService, type LiveTranscriptContext } from "./chatService";
+import { ChatService, type LiveTranscriptContext, type PipelineOverrides } from "./chatService";
 import { ContextEngine, type ContextRecord } from "./context/engine";
 import { addKnowledgeText, importKnowledge } from "./knowledge";
 import { LiveScreen } from "./liveScreen";
@@ -81,6 +81,8 @@ export interface AppCoreDeps {
    * explicitly enabled, so production never silently answers with simulated output.
    */
   devModeAllowed?: boolean;
+  /** Evaluation Lab only: pipeline variations (prompt, budget, verification) for experiments. */
+  pipelineOverrides?: PipelineOverrides;
 }
 
 /**
@@ -177,6 +179,7 @@ export class AppCore {
       },
       log: deps.log,
       retrieveMemory: (q) => this.memory.retrieve(q),
+      overrides: deps.pipelineOverrides,
     });
     this.liveScreen = new LiveScreen(
       () => this.liveScreenTick(),
