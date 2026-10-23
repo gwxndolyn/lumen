@@ -18,6 +18,8 @@ function answerFor(body) {
     return total ? `The total due is ${total} [C1], due ${m(/November \d+/) ?? "(date not visible)"} [C1].` : "I don't see an invoice in the provided context.";
   }
   if (/launch/i.test(q)) return /thursday/i.test(text) ? "Transcript: the team agreed to launch on Thursday [C1]." : "There is no transcript in context.";
+  if (/drop the connection/i.test(q)) return "DROP:" + Array.from({ length: 40 }, (_, i) => `part${i} `).join("");
+  if (/explain this code/i.test(q)) return "This function returns the unique values:\n\n```js\nconst uniq = (xs) => [...new Set(xs)];\n```\n\nIt keeps first occurrences [C1].";
   if (/slowly/i.test(q)) return Array.from({ length: 80 }, (_, i) => `word${i}${i % 8 === 7 ? "\n\n" : " "}`).join("");
   return "General knowledge: here is an answer.";
 }
@@ -31,13 +33,46 @@ const server = http.createServer((req, res) => {
       return;
     }
     const body = JSON.parse(raw || "{}");
+    // Credential behaviour of the real API, so the app's error paths are exercised end to end.
+    const key = req.headers["x-api-key"];
+    if (key === "sk-ant-smoke-invalid-key-0000") {
+      res.writeHead(401, { "content-type": "application/json" }).end(JSON.stringify({ type: "error", error: { type: "authentication_error", message: "invalid x-api-key" } }));
+      return;
+    }
+    if (key === "sk-ant-smoke-quota-key-00000") {
+      res.writeHead(429, { "content-type": "application/json", "retry-after": "0" }).end(JSON.stringify({ type: "error", error: { type: "rate_limit_error", message: "quota exceeded" } }));
+      return;
+    }
+    if (body.model === "claude-does-not-exist") {
+      res.writeHead(404, { "content-type": "application/json" }).end(JSON.stringify({ type: "error", error: { type: "not_found_error", message: "model not found" } }));
+      return;
+    }
     const text = answerFor(body);
     res.writeHead(200, { "content-type": "text/event-stream", "request-id": "req_standin" });
-    sse(res, "message_start", { type: "message_start", message: { id: "msg_s", type: "message", role: "assistant", model: body.model, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 1200, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } });
+    sse(res, "message_start", {
+      type: "message_start",
+      message: {
+        id: "msg_s",
+        type: "message",
+        role: "assistant",
+        model: body.model,
+        content: [],
+        stop_reason: null,
+        stop_sequence: null,
+        usage: { input_tokens: 1200, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+      },
+    });
     sse(res, "content_block_start", { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } });
     const slow = /word0/.test(text);
-    for (const piece of text.match(/.{1,12}/gs) ?? []) {
+    const drop = text.startsWith("DROP:");
+    let sentPieces = 0;
+    for (const piece of (drop ? text.slice(5) : text).match(/.{1,12}/gs) ?? []) {
       if (res.destroyed) return;
+      // Simulate a network drop mid-stream: close the socket after some text has streamed.
+      if (drop && ++sentPieces > 6) {
+        res.socket?.destroy();
+        return;
+      }
       sse(res, "content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: piece } });
       await new Promise((r) => setTimeout(r, slow ? 120 : 15));
     }

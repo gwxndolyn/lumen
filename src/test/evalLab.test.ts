@@ -95,7 +95,7 @@ describe("deterministic run on the real pipeline", () => {
     expect(run.summary.counts.passed).toBe(BENCHMARK.length);
     expect(run.config.model).toBe("scripted");
     expect(run.limitations.join(" ")).toMatch(/scripted provider/);
-  });
+  }, 30_000); // ~0.4 s normally; 64 full-pipeline cases can exceed 5 s on a loaded machine
 
   it("never reports scripted text as model output", async () => {
     const r = await runCase(byId("ctx-001"), { mode: "deterministic", settings, provider: null, overrides: {}, timeoutMs: 5000, attempt: 1 });

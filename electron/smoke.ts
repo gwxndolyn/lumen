@@ -1,5 +1,5 @@
 import type { App, BrowserWindow } from "electron";
-import { nativeImage } from "electron";
+import { nativeImage, clipboard } from "electron";
 import fs from "node:fs";
 import path from "node:path";
 import type { AppCore } from "../src/core/app";
@@ -29,6 +29,111 @@ function BrowserWindowFocused(): string {
   const { BrowserWindow } = require("electron") as typeof import("electron");
   const f = BrowserWindow.getFocusedWindow();
   return f ? (f.getTitle() === "Lumen" && f.isAlwaysOnTop() ? "overlay" : "main") : "none";
+}
+
+/**
+ * Two-launch restart check (LUMEN_SMOKE_PHASE=seed, then =verify on the same profile):
+ * seed writes a session, a conversation, a context note, a setting and a stored key, then quits
+ * through the normal quit path (before-quit → graceful shutdown); verify checks it all came back.
+ */
+export async function runRestartPhase(opts: { app: Electron.App; core: AppCore; store: Store; windows: WindowManager; setSecret: (n: "anthropic", v: string) => void }, phase: "seed" | "verify") {
+  const { app, core, store } = opts;
+  const out = (ok: boolean, data: unknown) => {
+    console.log(`RESTART ${phase.toUpperCase()} ${ok ? "PASS" : "FAIL"} ${JSON.stringify(data)}`);
+  };
+  try {
+    if (phase === "seed") {
+      const s = core.createSession({ title: "Restart check", type: "general" });
+      // Packaged builds refuse development mode, so use the Anthropic-wire stand-in when given.
+      const kind = process.env.LUMEN_ANTHROPIC_BASE_URL ? "anthropic" : "mock";
+      if (kind === "anthropic") opts.setSecret("anthropic", "sk-ant-smoke-test-key-000000");
+      core.updateSettings({ onboardingComplete: true, theme: "light", provider: { kind }, privacy: { conversationRetentionDays: 45 } });
+      core.addText("note", "Restart note", "The deploy window is Friday 18:00.");
+      await core.send({ requestId: "restart-1", conversationId: null, text: "Remember the deploy window", style: "quick", tone: "neutral", includeLiveTranscript: false });
+      const conv = store.listConversations(s.id)[0]!;
+      core.setOpenConversation(conv.id);
+      out(true, { session: s.id, conversation: conv.id, messages: store.listMessages(conv.id).length });
+      app.quit(); // the real quit path, not app.exit()
+      return;
+    }
+    const s = store.listSessions().find((x) => x.title === "Restart check");
+    const conv = s ? store.listConversations(s.id)[0] : undefined;
+    const msgs = conv ? store.listMessages(conv.id) : [];
+    const note = s ? core.engine.list(s.id).find((r) => r.title === "Restart note") : undefined;
+    const data = {
+      session: !!s,
+      active: core.activeSessionId === s?.id,
+      openConversation: s ? core.openConversation() === conv?.id : false,
+      messages: msgs.map((m) => m.role),
+      note: !!note,
+      settings: { theme: core.settings.theme, retention: core.settings.privacy.conversationRetentionDays, onboarding: core.settings.onboardingComplete },
+      walClean: !require("node:fs").existsSync(`${store.path}-wal`) || require("node:fs").statSync(`${store.path}-wal`).size === 0,
+    };
+    const ok =
+      data.session &&
+      data.active &&
+      data.openConversation &&
+      data.messages.join(",") === "user,assistant" &&
+      data.note &&
+      data.settings.theme === "light" &&
+      data.settings.retention === 45 &&
+      data.settings.onboarding;
+    out(ok, data);
+    app.exit(ok ? 0 : 1);
+  } catch (err) {
+    out(false, { error: (err as Error).message });
+    app.exit(1);
+  }
+}
+
+/** Upgrade check: run the current build on a profile created by an older version. */
+export async function runUpgradeCheck(opts: { app: Electron.App; core: AppCore; store: Store }) {
+  const { app, core, store } = opts;
+  try {
+    const sessions = store.listSessions();
+    const s = sessions.find((x) => x.title === "From 0.3.0-old");
+    const conv = s ? store.listConversations(s.id)[0] : undefined;
+    const t = s ? store.listTranscriptSessions(s.id)[0] : undefined;
+    const data = {
+      schema: store.schemaVersion(),
+      latest: MIGRATIONS.length,
+      session: !!s && s.notes === "Old notes",
+      active: core.activeSessionId === s?.id,
+      messages: conv ? store.listMessages(conv.id).map((m) => m.content) : [],
+      transcript: t ? store.listSegments(t.id).map((x) => x.text) : [],
+      memories: core.memory.list().map((m) => m.text),
+      spend: store.spendSince(0).requests,
+      settings: {
+        theme: core.settings.theme,
+        provider: core.settings.provider.kind,
+        limit: core.settings.provider.dailySpendLimitUsd,
+        retention: core.settings.privacy.conversationRetentionDays,
+        onboarding: core.settings.onboardingComplete,
+        inference: core.settings.inference.mode,
+      },
+      search: store.search("Thursday", null).length,
+    };
+    const ok =
+      data.schema === data.latest &&
+      data.session &&
+      data.active &&
+      data.messages.join("|") === "What did we decide?|Ship Thursday." &&
+      data.transcript.join() === "Ship Thursday" &&
+      data.memories.includes("Use Kotlin coroutines") &&
+      data.spend === 1 &&
+      data.settings.theme === "light" &&
+      data.settings.provider === "gemini" &&
+      data.settings.limit === 2 &&
+      data.settings.retention === 0 &&
+      data.settings.onboarding &&
+      data.settings.inference === "manual" &&
+      data.search >= 2;
+    console.log(`UPGRADE ${ok ? "PASS" : "FAIL"} ${JSON.stringify(data)}`);
+    app.exit(ok ? 0 : 1);
+  } catch (err) {
+    console.log(`UPGRADE FAIL ${JSON.stringify({ error: (err as Error).message })}`);
+    app.exit(1);
+  }
 }
 
 export async function runSmokeTest({ app, core, store, windows, capture, shortcutStatus, shortcuts }: Ctx) {
@@ -67,6 +172,37 @@ export async function runSmokeTest({ app, core, store, windows, capture, shortcu
     check("shortcuts", Object.values(shortcutStatus).every(Boolean), { ...shortcutStatus });
     // Every migration applied (not a hard-coded number that goes stale when one is added).
     check("schemaVersion", store.schemaVersion() === MIGRATIONS.length, store.schemaVersion());
+
+    // ---- fresh install: onboarding resumes after a restart, credentials are validated for real ----
+    const onboardingFresh = await js<boolean>("document.body.innerText.includes('Welcome to Lumen')");
+    const secretsBefore = await js<Record<string, boolean>>("window.lumen.secretsStatus()");
+    if (realProvider) {
+      // Wrong key: the test must fail with an auth error, not report "connected".
+      await js("window.lumen.setSecret('anthropic', 'sk-ant-smoke-invalid-key-0000')");
+      await js("window.lumen.updateSettings({ provider: { kind: 'anthropic' } })");
+      const bad = await js<{ ok: boolean; code?: string; message: string }>("window.lumen.testProvider()");
+      const quotaKey = await js("window.lumen.setSecret('anthropic', 'sk-ant-smoke-quota-key-00000')");
+      void quotaKey;
+      const quota = await js<{ ok: boolean; code?: string }>("window.lumen.testProvider()");
+      await js("window.lumen.setSecret('anthropic', 'sk-ant-smoke-test-key-000000')");
+      const health = await js<{ state: string }>("window.lumen.providerHealth()");
+      check("ONB_credentials", onboardingFresh && !secretsBefore.anthropic && !bad.ok && bad.code === "auth" && !quota.ok && quota.code === "rate_limited", {
+        onboardingFresh,
+        bad,
+        quota,
+        healthAfterBad: health.state,
+      });
+      // The key never reaches the renderer: only presence flags are exposed.
+      const exposed = await js<string>("JSON.stringify(window.lumen.secretsStatus ? 'flags-only' : '')");
+      check("ONB_keyNotExposed", exposed === '"flags-only"' && !(await js<string>("JSON.stringify(localStorage)")).includes("sk-ant-"));
+      // Interrupted onboarding resumes at the saved step after a reload.
+      await js("window.lumen.updateSettings({ onboardingStep: 2 })");
+      win.webContents.reload();
+      await new Promise<void>((resolve) => win.webContents.once("did-finish-load", () => resolve()));
+      await wait(600);
+      const resumed = await js<boolean>("document.querySelector('.steps')?.getAttribute('aria-label') === 'Step 3 of 6'");
+      check("ONB_resume", resumed);
+    }
 
     // Provider: an Anthropic-wire-compatible local server when provided, else labelled mock.
     if (realProvider) {
@@ -374,6 +510,41 @@ export async function runSmokeTest({ app, core, store, windows, capture, shortcu
       shortcuts.trigger("discreetInput");
       await wait(400);
       check("HK_discreet", dTag && dh <= 90 && windows.mode !== "discreet" && windows.overlay!.getBounds().height > 100, { dh, dTag, mode: windows.mode });
+    }
+
+    // ---- I: network drop mid-stream, then retry; code block rendering and copy ----
+    if (realProvider) {
+      await js(`location.hash = '/main/assistant'`);
+      await wait(200);
+      await ask("Please drop the connection while answering.");
+      const failed = await until(
+        async () => (await idle()) && (await ojs<boolean>("!!document.querySelector('.msg.assistant .alert.error') || document.body.innerText.includes('Incomplete')")),
+        12000,
+      );
+      const spinnerGone = await idle();
+      const partialKept = await ojs<boolean>("document.body.innerText.includes('part0')");
+      const errText = await ojs<string>("[...document.querySelectorAll('.msg.assistant .alert.error')].at(-1)?.innerText ?? ''");
+      check("I_networkDrop", failed && spinnerGone && partialKept && /interrupted|connection/i.test(errText), { failed, spinnerGone, partialKept, errText: errText.slice(0, 120) });
+      // "Try again" must really resend and settle — no duplicate request, no stuck spinner.
+      const reqsBefore = core.metrics.snapshot().requests.length;
+      await ojs("[...document.querySelectorAll('.msg.assistant .alert.error button')].find((b) => /Try again/.test(b.innerText))?.click()");
+      const settled = await until(async () => (await idle()) && core.metrics.snapshot().requests.length === reqsBefore + 1, 12000);
+      await wait(300);
+      check("I_retryAfterDrop", settled && core.chat.activeRequests === 0 && core.metrics.snapshot().requests.length === reqsBefore + 1, {
+        settled,
+        requests: core.metrics.snapshot().requests.length - reqsBefore,
+      });
+
+      core.addText("selected_text", "uniq.js", "const uniq = (xs) => [...new Set(xs)];");
+      await ask("Explain this code please");
+      await until(async () => (await idle()) && (await ojs<boolean>("!!document.querySelector('.codeblock')")), 8000);
+      const code = await ojs<string>("document.querySelector('.codeblock pre')?.innerText ?? ''");
+      const copied = await ojs<string>(
+        `(async () => { const b = [...document.querySelectorAll('.codeblock button')].at(-1); b?.click(); await new Promise((r) => setTimeout(r, 100)); return b?.innerText ?? ''; })()`,
+      );
+      // Read the system clipboard from the main process (what another app would paste).
+      const clip = await clipboard.readText();
+      check("I_codeCopy", code.trim() === "const uniq = (xs) => [...new Set(xs)];" && clip.trim() === code.trim() && /Copied/.test(copied), { code, clip: clip.slice(0, 80), copied });
     }
 
     // ---- H: delete session removes data incl. index ----

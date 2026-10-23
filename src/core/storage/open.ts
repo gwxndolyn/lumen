@@ -3,10 +3,7 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { MIGRATIONS, Store } from "./db";
 
-export type OpenOutcome =
-  | { kind: "ok" }
-  | { kind: "migrated"; from: number; to: number; backup: string }
-  | { kind: "recovered"; reason: string; quarantined: string };
+export type OpenOutcome = { kind: "ok" } | { kind: "migrated"; from: number; to: number; backup: string } | { kind: "recovered"; reason: string; quarantined: string };
 
 function stamp() {
   return new Date().toISOString().replace(/[:.]/g, "-");
@@ -23,8 +20,24 @@ function moveSidecars(file: string, to: string) {
  *   file and start a fresh database, reporting what happened so the UI can tell the user.
  * User data is never silently deleted — the quarantined copy stays on disk for recovery.
  */
+/**
+ * Conversations, transcripts and notes live in these files: readable by the owner only (other
+ * accounts on a shared computer must not read them). No-op where POSIX modes don't apply (Windows
+ * uses the per-user profile ACLs instead).
+ */
+export function restrictToOwner(file: string) {
+  if (process.platform === "win32") return;
+  for (const f of [file, `${file}-wal`, `${file}-shm`]) {
+    try {
+      if (fs.existsSync(f)) fs.chmodSync(f, 0o600);
+    } catch {
+      /* best effort: a read-only volume still opens */
+    }
+  }
+}
+
 export function openStore(file: string, migrations = MIGRATIONS): { store: Store; outcome: OpenOutcome } {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   let fromVersion = 0;
   let backup: string | null = null;
   try {
@@ -45,6 +58,8 @@ export function openStore(file: string, migrations = MIGRATIONS): { store: Store
       }
     }
     const store = new Store(file, migrations);
+    restrictToOwner(file);
+    if (backup) restrictToOwner(backup);
     if (backup) {
       // Keep only the most recent pre-migration backup.
       for (const f of fs.readdirSync(path.dirname(file))) {
@@ -65,6 +80,7 @@ export function openStore(file: string, migrations = MIGRATIONS): { store: Store
     // A failing migration list cannot produce a usable fresh database either; recover onto the
     // shipped schema. If that also fails, the caller shows a fatal startup error.
     const store = new Store(file, migrations === MIGRATIONS ? migrations : MIGRATIONS);
+    restrictToOwner(file);
     return { store, outcome: { kind: "recovered", reason, quarantined } };
   }
 }

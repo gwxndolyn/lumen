@@ -40,6 +40,15 @@ if (!app.requestSingleInstanceLock()) {
 }
 
 const userData = app.getPath("userData");
+// The data folder holds conversations, transcripts and encrypted keys: owner-only on macOS/Linux.
+if (process.platform !== "win32") {
+  try {
+    fs.mkdirSync(userData, { recursive: true, mode: 0o700 });
+    fs.chmodSync(userData, 0o700);
+  } catch {
+    /* best effort */
+  }
+}
 const logger = new Logger(path.join(userData, "logs"));
 const secrets = new SecretStore(userData, safeStorage, !app.isPackaged);
 const capture = new CaptureService();
@@ -317,12 +326,12 @@ function registerIpc() {
   handle("secrets:status", secretsStatus);
   handle("secrets:set", (_e, name, value) => {
     secrets.set(secretName.parse(name), str(512).parse(value));
-    core.updateSettings({}); // refresh provider health
+    core.credentialsChanged(); // the old test result described the old key
     return secretsStatus();
   });
   handle("secrets:clear", (_e, name) => {
     secrets.clear(secretName.parse(name));
-    core.updateSettings({});
+    core.credentialsChanged(); // the old test result described the old key
     return secretsStatus();
   });
   handle("provider:test", () => core.testProvider());
@@ -1179,7 +1188,11 @@ function startup() {
     const notice = startupNotice;
     setTimeout(() => void dialog.showMessageBox({ type: "warning", title: "Lumen recovered your data", message: "Lumen started with a fresh database", detail: notice }), 800);
   }
-  if (process.env.LUMEN_SMOKE_TEST) void import("./smoke.js").then((m) => m.runSmokeTest({ app, core, store, windows, capture, shortcutStatus, shortcuts }));
+  const restartPhase = process.env.LUMEN_SMOKE_PHASE;
+  if (process.env.LUMEN_SMOKE_TEST && restartPhase === "upgrade") void import("./smoke.js").then((m) => m.runUpgradeCheck({ app, core, store }));
+  else if (process.env.LUMEN_SMOKE_TEST && (restartPhase === "seed" || restartPhase === "verify"))
+    void import("./smoke.js").then((m) => m.runRestartPhase({ app, core, store, windows, setSecret: (n, v) => secrets.set(n, v) }, restartPhase));
+  else if (process.env.LUMEN_SMOKE_TEST) void import("./smoke.js").then((m) => m.runSmokeTest({ app, core, store, windows, capture, shortcutStatus, shortcuts }));
 }
 
 let startupNotice: string | null = null;

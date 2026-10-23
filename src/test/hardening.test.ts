@@ -182,3 +182,14 @@ describe("failed ingestion leaves nothing partially indexed", () => {
     fs.rmSync(dir, { recursive: true });
   });
 });
+
+describe("credential changes", () => {
+  it("replacing a key clears the old health result instead of keeping 'down'", async () => {
+    const h = harness({ turns: [{ status: 401, error: { type: "authentication_error", message: "bad" } }] });
+    await h.core.testProvider();
+    expect(h.core.health.state).toBe("down");
+    h.core.credentialsChanged();
+    expect(h.core.health.state).toBe("unknown");
+    expect(h.app.some((e) => e.type === "provider-health" && e.health.state === "unknown")).toBe(true);
+  });
+});

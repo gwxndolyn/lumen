@@ -362,6 +362,13 @@ export class AppCore {
     };
   }
 
+  /** A key was added, replaced or removed: the previous test result no longer describes it. */
+  credentialsChanged() {
+    this.health = this.initialHealth();
+    this.responseCache.clear();
+    this.deps.emitApp({ type: "provider-health", health: this.health });
+  }
+
   private initialHealth(): ProviderHealth {
     const kind = this.settings.provider.kind;
     const model = activeModel(this.settings.provider);

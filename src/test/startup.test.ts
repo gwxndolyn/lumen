@@ -95,11 +95,22 @@ describe("settings & errors", () => {
   it("writes files atomically and cleans up interrupted temp files", () => {
     const d = tmp();
     const f = path.join(d, "secrets.json");
-    writeFileAtomic(f, "{\"a\":1}");
-    expect(fs.readFileSync(f, "utf8")).toBe("{\"a\":1}");
+    writeFileAtomic(f, '{"a":1}');
+    expect(fs.readFileSync(f, "utf8")).toBe('{"a":1}');
     if (process.platform !== "win32") expect(fs.statSync(f).mode & 0o777).toBe(0o600);
     fs.writeFileSync(path.join(d, ".secrets.json.0f8fad5b-d9cb-469f-a165-70867728950e.tmp"), "partial");
     expect(cleanupTempFiles(d)).toBe(1);
     expect(fs.readdirSync(d)).toEqual(["secrets.json"]);
+  });
+});
+
+describe("data file permissions", () => {
+  it.skipIf(process.platform === "win32")("the database and its folder are owner-only", async () => {
+    const dir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "lumen-perm-")), "data");
+    const { store } = openStore(path.join(dir, "lumen.db"));
+    store.createSession({ title: "x", type: "general" });
+    expect(fs.statSync(path.join(dir, "lumen.db")).mode & 0o077).toBe(0);
+    expect(fs.statSync(dir).mode & 0o077).toBe(0);
+    store.close();
   });
 });

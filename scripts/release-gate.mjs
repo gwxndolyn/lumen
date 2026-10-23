@@ -5,6 +5,7 @@
 //   npm run release:gate                         all checks that can run here
 //   npm run release:gate -- --baseline run.json  also compare the benchmark with a recorded run
 //   npm run release:gate -- --skip smoke         skip a check (recorded as skipped)
+//   npm run release:gate -- --packaged           also build the packaged app and smoke-test it
 //
 // Exit codes: 0 = all critical checks passed (verdict says beta vs release candidate), 1 = NOT READY.
 
@@ -40,12 +41,26 @@ const CHECKS = [
     cmd: ["node", "scripts/eval.mjs", "--out", path.join(tmp, "bench.json"), ...(baseline ? ["--baseline", baseline] : [])],
   },
   { id: "smoke", label: "End-to-end smoke (Electron)", critical: true, cmd: ["bash", "scripts/smoke.sh"], needsDisplay: true },
+  { id: "restart", label: "Restart persistence (two launches)", critical: true, cmd: ["bash", "scripts/smoke-restart.sh"], needsDisplay: true },
+  { id: "upgrade", label: "Upgrade from an older schema", critical: true, cmd: ["bash", "scripts/smoke-upgrade.sh"], needsDisplay: true },
+  {
+    id: "packaged",
+    label: "Packaged app smoke",
+    critical: false,
+    cmd: ["bash", "-c", "npx electron-builder --dir --publish never > /dev/null && bash scripts/smoke-packaged.sh"],
+    needsDisplay: true,
+    optIn: "--packaged",
+  },
   { id: "live", label: "Live provider tests", critical: false, cmd: ["npm", "run", "-s", "test:live"], needsEnv: ["ANTHROPIC_API_KEY"] },
 ];
 
 const results = [];
 for (const c of CHECKS) {
   const started = Date.now();
+  if (c.optIn && !args.includes(c.optIn)) {
+    results.push({ id: c.id, label: c.label, critical: c.critical, status: "skipped", reason: `pass ${c.optIn} to run (slow: builds the app)`, ms: 0 });
+    continue;
+  }
   if (skip.has(c.id)) {
     results.push({ id: c.id, label: c.label, critical: c.critical, status: "skipped", reason: "skipped with --skip", ms: 0 });
     continue;

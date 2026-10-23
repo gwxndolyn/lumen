@@ -243,6 +243,79 @@
       "verification": "intentEval.test.ts",
       "status": "done-partial",
       "notes": "Holdout #2 is now contaminated for this case once fixed; write holdout #3 first. 2026-10-23: added leak/freeze/hang to the debugging rule ('slow' rejected: it mislabelled a React performance question). Holdout #3 (written first): categories 11/18 -> 13/18, wrong templates 5 -> 3. Holdout #2 10/24 -> 12/24; tuned set unchanged. Remaining wrong templates: memory-growth phrasing without 'leak', and 'throw <code>'. Holdout #3 is now seen; write #4 before further tuning."
+    },
+    {
+      "id": "LUM-013",
+      "title": "Provider health stayed 'down'/'degraded' after replacing a rejected API key",
+      "category": "defect",
+      "severity": "medium",
+      "subsystem": "core/app",
+      "problem": "secrets:set only re-applied settings; the previous test result (for the old key) was kept, so the UI showed the new key as broken until a manual test.",
+      "evidence": "smoke ONB_credentials: healthAfterBad=degraded after the key was replaced",
+      "acceptance": [
+        "Changing or removing a key resets health to 'not checked'",
+        "Response cache cleared"
+      ],
+      "verification": "hardening.test.ts 'credential changes'",
+      "status": "done",
+      "notes": "2026-10-23: AppCore.credentialsChanged()."
+    },
+    {
+      "id": "LUM-014",
+      "title": "Database and data folder readable by other local accounts",
+      "category": "security",
+      "severity": "medium",
+      "subsystem": "storage",
+      "problem": "lumen.db (conversations, transcripts, notes) was created 0644 under umask 022; secrets.json was already 0600.",
+      "evidence": "stat on smoke profile: lumen.db 644",
+      "acceptance": [
+        "lumen.db, -wal, -shm 0600; data folder 0700 (macOS/Linux)"
+      ],
+      "verification": "startup.test.ts 'data file permissions' (mutation-checked)",
+      "status": "done",
+      "notes": "Windows relies on per-user profile ACLs; not verified."
+    },
+    {
+      "id": "LUM-015",
+      "title": "Restart, upgrade and packaged-app journeys had no automated check",
+      "category": "test-gap",
+      "severity": "high",
+      "subsystem": "release",
+      "problem": "Persistence across a real quit/relaunch, upgrading a profile from an older schema, and the packaged build were only checked by hand.",
+      "acceptance": [
+        "Two-launch restart check",
+        "Upgrade check on a profile written by an older build",
+        "Packaged smoke in the gate (opt-in)"
+      ],
+      "verification": "scripts/smoke-restart.sh; LUMEN_SMOKE_PHASE=upgrade; npm run release:gate -- --packaged",
+      "status": "done"
+    },
+    {
+      "id": "LUM-016",
+      "title": "Live provider verification",
+      "category": "blocker",
+      "severity": "high",
+      "subsystem": "providers",
+      "problem": "No real Anthropic/OpenAI/Gemini/Deepgram/Ollama call has ever been made from Lumen.",
+      "acceptance": [
+        "npm run test:live passes with real keys",
+        "Live evaluation baseline recorded"
+      ],
+      "status": "blocked",
+      "notes": "Needs API keys (and Ollama for local)."
+    },
+    {
+      "id": "LUM-017",
+      "title": "Real capture hardware validation",
+      "category": "blocker",
+      "severity": "high",
+      "subsystem": "capture",
+      "problem": "Screen permission grant/deny, display hotplug, mic unplug, sleep/wake, Wi-Fi loss with real devices never exercised.",
+      "acceptance": [
+        "docs/CAPTURE_RELIABILITY.md manual steps run on macOS and Windows"
+      ],
+      "status": "blocked",
+      "notes": "The build machine denies Screen Recording to automation; needs a person."
     }
   ]
 }

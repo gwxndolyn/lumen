@@ -60,6 +60,12 @@ Note: vitest and the smoke run need to write to `node_modules/.vite-temp`; under
 - `npm run bench:reliability` (simulated). Baseline vs final: identical throughput/OCR counts/memory on this workload — the gains are correctness, not speed.
 - Docs: `docs/CAPTURE_RELIABILITY.md`; troubleshooting rows in `docs/BETA.md`. Hardware steps listed, not run.
 
+## Prompt 14: end-to-end validation (2026-10-23, committed)
+
+- See `docs/RELEASE_READINESS.md` (journey table, defects, classification: controlled beta on macOS).
+- Fixed: provider health after key change (LUM-013), owner-only DB/data folder (LUM-014), flaky benchmark test timeout.
+- Added: credential/onboarding-resume, network-drop + retry, code-copy smoke checks; two-launch restart check; upgrade check from an older build's schema; both in the gate. Packaged app and DMG built and smoke-tested (unsigned).
+
 **Next:** with an API key, run live evaluations (cloud and a local Ollama model) and record a baseline; then LUM-011.
 
 ## How to resume (any session, no chat history needed)
