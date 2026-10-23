@@ -41,7 +41,7 @@ const RULES: [TaskCategory, RegExp][] = [
   ["project", /\b(walk (me )?through (my|your|a|the) project|my project|project (deep dive|discussion)|on my resume|what i built|my role (in|on))\b/i],
   [
     "debugging",
-    /\b(bug|debug|error|exception|traceback|stack ?trace|crash(es|ing)?|fails?|failing|doesn'?t work|not working|wrong (answer|output|result)|segfault|undefined is not|npe|seg(mentation)? ?fault|off[- ]by[- ]one)\b|\w*(exception|error)\b|null ?pointer/i,
+    /\b(bug|debug|error|exception|traceback|stack ?trace|crash(es|ing)?|fails?|failing|doesn'?t work|not working|wrong (answer|output|result)|leak(s|ing|ed)?|freez(e|es|ing)|froze|hang(s|ing)?|hung|segfault|undefined is not|npe|seg(mentation)? ?fault|off[- ]by[- ]one)\b|\w*(exception|error)\b|null ?pointer/i,
   ],
   ["testing", /\b(unit tests?|test cases?|write tests|integration tests?|e2e|end-to-end tests?|mock(ing)?|test coverage|tdd|jest|pytest|junit|vitest|qa)\b/i],
   [

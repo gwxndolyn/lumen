@@ -1,0 +1,35 @@
+{
+  "note": "Holdout #3, written 2026-10-23 BEFORE the LUM-012 rule change and never used for tuning. Labels are ground truth. Several items pair a symptom (leak, hang, slow, freeze) with a language/framework name on purpose.",
+  "relations": [
+    { "prior": "tree", "text": "Would a queue work instead?", "expect": "follow_up" },
+    { "prior": "sql", "text": "Rewrite that in MySQL syntax", "expect": "revise_code" },
+    { "prior": "tree", "text": "No, I meant a binary search tree, not any binary tree", "expect": "correction" },
+    { "prior": "sql", "text": "Explain it more simply", "expect": "simplify" },
+    { "prior": "tree", "text": "What's the best pizza topping?", "expect": "new" },
+    { "prior": "sql", "text": "Go deeper on the subquery part", "expect": "elaborate" }
+  ],
+  "ambiguous": [
+    { "text": "fix it", "expect": true },
+    { "text": "How do I center a div with flexbox?", "expect": false }
+  ],
+  "categories": [
+    { "text": "My Python script slowly eats all the RAM over a day", "expect": "debugging" },
+    { "text": "Kotlin app freezes when I tap save", "expect": "debugging" },
+    { "text": "Java service hangs after a few hours under load", "expect": "debugging" },
+    { "text": "React page is really slow when the list has 5000 items", "expect": "frontend" },
+    { "text": "Node process memory keeps growing until it gets killed", "expect": "debugging" },
+    { "text": "Go program deadlocks on the second request", "expect": "debugging" },
+    { "text": "Why does my TypeScript build throw TS2345?", "expect": "debugging" },
+    { "text": "Merge two sorted arrays in place", "expect": "algorithm" },
+    { "text": "Design a ride-sharing dispatch system for a million riders", "expect": "system_design" },
+    { "text": "Write a query to find customers with no orders", "expect": "database_sql" },
+    { "text": "What is the difference between let and var in JavaScript?", "expect": "language_framework" },
+    { "text": "How do Kotlin coroutines differ from threads?", "expect": "language_framework" },
+    { "text": "Write pytest cases for this parser", "expect": "testing" },
+    { "text": "Tell me about a time you missed a deadline", "expect": "behavioral" },
+    { "text": "Summarise the meeting we just had", "expect": "meeting_summary" },
+    { "text": "What does this function do?", "expect": "code_explanation" },
+    { "text": "Should this endpoint return 409 or 422 for a duplicate email?", "expect": "api_backend" },
+    { "text": "What's a good name for a coffee shop?", "expect": "general" }
+  ]
+}

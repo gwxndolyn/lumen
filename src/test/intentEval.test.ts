@@ -29,7 +29,7 @@ describe("intent evaluation (held-out)", () => {
 });
 
 // Floors catch regressions when rules change. Tuned-set floors sit just below the measured value;
-// held-out floors sit at the measured value (holdout #2, 2026-10-22: relations 7/9, categories 10/24).
+// held-out floors sit at the measured value (holdout #2: relations 7/9, categories 12/24 after LUM-012).
 describe("intent accuracy floors", () => {
   it("tuned set", () => {
     expect(report.relations.accuracy).toBeGreaterThanOrEqual(0.95);
@@ -39,12 +39,22 @@ describe("intent accuracy floors", () => {
   it("held-out set", () => {
     expect(holdout.relations.accuracy).toBeGreaterThanOrEqual(7 / 9);
     expect(holdout.ambiguous.accuracy).toBe(1);
-    expect(holdout.categories.accuracy).toBeGreaterThanOrEqual(10 / 24);
+    expect(holdout.categories.accuracy).toBeGreaterThanOrEqual(12 / 24);
   });
   it("misclassified requests mostly fall back to general rather than a wrong specialised template", () => {
     const misses = [...report.categories.misses, ...holdout.categories.misses];
     const wrongTemplate = misses.filter((m) => m.got !== "general");
-    // Measured: 1 of 15 misses picks a wrong specialised category ("Memory leak in my Node server" → language).
-    expect(wrongTemplate.length).toBeLessThanOrEqual(1);
+    // LUM-012: symptom words (leak, freeze, hang) now rank debugging above language names.
+    expect(wrongTemplate).toEqual([]);
+  });
+  // Holdout #3 was written before the LUM-012 change. Before: categories 11/18, 5 wrong templates.
+  // After: 13/18, 3 wrong templates. It was looked at while choosing the change (dropping "slow",
+  // which mislabelled a frontend performance question), so treat it as seen; write #4 before tuning again.
+  it("holdout #3", () => {
+    const h3 = evaluateIntent(JSON.parse(fs.readFileSync(path.join(__dirname, "fixtures/intent-holdout3.json"), "utf8")) as IntentFixture);
+    expect(h3.relations.accuracy).toBeGreaterThanOrEqual(5 / 6);
+    expect(h3.ambiguous.accuracy).toBe(1);
+    expect(h3.categories.accuracy).toBeGreaterThanOrEqual(13 / 18);
+    expect(h3.categories.misses.filter((m) => m.got !== "general").length).toBeLessThanOrEqual(3);
   });
 });

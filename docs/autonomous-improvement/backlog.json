@@ -241,8 +241,8 @@
         "No tuned-set regression; re-measure on a NEW holdout"
       ],
       "verification": "intentEval.test.ts",
-      "status": "open",
-      "notes": "Holdout #2 is now contaminated for this case once fixed; write holdout #3 first."
+      "status": "done-partial",
+      "notes": "Holdout #2 is now contaminated for this case once fixed; write holdout #3 first. 2026-10-23: added leak/freeze/hang to the debugging rule ('slow' rejected: it mislabelled a React performance question). Holdout #3 (written first): categories 11/18 -> 13/18, wrong templates 5 -> 3. Holdout #2 10/24 -> 12/24; tuned set unchanged. Remaining wrong templates: memory-growth phrasing without 'leak', and 'throw <code>'. Holdout #3 is now seen; write #4 before further tuning."
     }
   ]
 }

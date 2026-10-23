@@ -78,6 +78,7 @@ The held-out set is the honest number. Tuning the rules on known misses did not 
 | 4 | LUM-005 audit advisories | done via a shipped-code audit gate; negative test confirms it fails when an exclusion is removed |
 | 5 | LUM-002 CI workflow | written and YAML-validated; **unverified** until first push |
 | 6 | LUM-006 intent evaluation | done; baseline, then targeted fixes, then a held-out measurement |
+| 8 | LUM-012 symptom words → debugging | partial; holdout #3 (written first) categories 11/18 → 13/18, wrong templates 5 → 3; "slow" rejected (broke a frontend case) |
 | 7 | LUM-009 category recall | partial; rules stopped generalising (held-out #2: 42% before and after); the general fallback was made safer. Next step needs a key (LUM-011) |
 
 ## Blockers (need the user)
