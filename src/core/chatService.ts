@@ -1,6 +1,6 @@
 import type { ChatEvent, ChatMessage, ChatSendRequest, ErrorCode, Session, Settings } from "../shared/types";
 import { citedLabels, type ContextEngine } from "./context/engine";
-import { buildPrompt } from "./context/promptBuilder";
+import { buildPrompt, DEFAULT_BUDGET } from "./context/promptBuilder";
 import type { Candidate } from "./context/ranker";
 import { redact } from "./context/sensitivity";
 import { truncate } from "./context/text";
@@ -11,6 +11,9 @@ import { activeModel } from "../shared/defaults";
 import { CancelledError, ProviderError, type AIProvider, type GenerateUsage, type ProviderMessage } from "./providers/types";
 import type { Store } from "./storage/db";
 import { planResponse, type ResponsePlan } from "./intelligence/orchestrator";
+import { routeModel } from "./intelligence/router";
+import { verifyAnswer } from "./intelligence/verify";
+import type { TaskCategory } from "./intelligence/classify";
 
 export interface LiveTranscriptContext {
   transcriptId: string;
@@ -38,13 +41,15 @@ export interface ChatDeps {
   checkBudget?: () => void;
   onUsage?: (model: string, usage: GenerateUsage, costUsd: number) => void;
   log?: (level: "info" | "warn" | "error" | "debug", msg: string, data?: Record<string, unknown>) => void;
+  /** Durable user-saved memory relevant to a query (bounded). */
+  retrieveMemory?: (query: string) => { id: string; kind: string; text: string; updatedAt: number }[];
 }
 
 const HISTORY_CHARS = 24_000;
 const RECENT_REQUEST_IDS = 500;
 
 export class ChatService {
-  private inflight = new Map<string, { ctrl: AbortController; conversationId: string | null; sessionId: string }>();
+  private inflight = new Map<string, { ctrl: AbortController; conversationId: string | null; sessionId: string; cancelAt?: number }>();
   /** Recently seen request ids — repeated IPC events with the same id are ignored. */
   private seen = new Set<string>();
 
@@ -53,17 +58,22 @@ export class ChatService {
   cancel(requestId: string): boolean {
     const f = this.inflight.get(requestId);
     if (!f) return false;
-    f.ctrl.abort();
+    this.abort(f);
     return true;
   }
 
+  private abort(f: { ctrl: AbortController; cancelAt?: number }) {
+    f.cancelAt ??= performance.now();
+    f.ctrl.abort();
+  }
+
   cancelAll() {
-    for (const f of this.inflight.values()) f.ctrl.abort();
+    for (const f of this.inflight.values()) this.abort(f);
   }
 
   /** Cancel in-flight requests belonging to a session (used on session switch / delete). */
   cancelSession(sessionId: string) {
-    for (const f of this.inflight.values()) if (f.sessionId === sessionId) f.ctrl.abort();
+    for (const f of this.inflight.values()) if (f.sessionId === sessionId) this.abort(f);
   }
 
   get activeRequests(): number {
@@ -114,11 +124,7 @@ export class ChatService {
       this.deps.checkBudget?.();
       const provider = this.deps.getProvider(session);
       if (!provider) {
-        throw new ProviderError(
-          "No API key is configured for the selected AI provider. Add one in Settings → AI provider, or switch to development mode.",
-          "missing_credentials",
-          false,
-        );
+        throw new ProviderError("No API key is configured for the selected AI provider. Add one in Settings → AI provider, or switch to development mode.", "missing_credentials", false);
       }
       model = provider.isMock ? "mock" : activeModel(settings.provider, session.ai.model);
 
@@ -150,7 +156,8 @@ export class ChatService {
       this.inflight.get(req.requestId)!.conversationId = convId;
 
       const waitStart = performance.now();
-      await this.deps.awaitPending?.(session.id);
+      // Stop must take effect immediately, not after the (bounded) OCR wait.
+      if (this.deps.awaitPending) await untilAborted(this.deps.awaitPending(session.id), ctrl.signal);
       pendingWaitMs = Math.round(performance.now() - waitStart);
       if (ctrl.signal.aborted) throw new CancelledError();
 
@@ -181,7 +188,15 @@ export class ChatService {
       }
       const live = req.includeLiveTranscript ? this.deps.getLiveTranscript(session.id) : null;
       if (live && live.sessionId === session.id && live.text.trim()) {
-        extra.push({ id: `transcript:${live.transcriptId}`, kind: "transcript", title: `Live transcript — ${live.title}`, text: live.text, createdAt: Date.now(), explicit: true, sourceId: live.transcriptId });
+        extra.push({
+          id: `transcript:${live.transcriptId}`,
+          kind: "transcript",
+          title: `Live transcript — ${live.title}`,
+          text: live.text,
+          createdAt: Date.now(),
+          explicit: true,
+          sourceId: live.transcriptId,
+        });
       }
       // Long conversation: turns older than the history window become a compact digest so a
       // follow-up can still refer back to them. New topics don't get it (it would be noise).
@@ -195,6 +210,11 @@ export class ChatService {
       if (settings.assistant.useKnowledgeBase) {
         for (const k of store.searchKnowledge(query, session.id)) {
           extra.push({ id: `kb:${k.chunkId}`, kind: "knowledge", title: k.title, text: k.text, createdAt: 0, sourceId: k.docId, retrieved: true });
+        }
+      }
+      if (settings.assistant.useProjectMemory) {
+        for (const m of this.deps.retrieveMemory?.(query) ?? []) {
+          extra.push({ id: `mem:${m.id}`, kind: "memory", title: m.kind.replace("_", " "), text: m.text, createdAt: m.updatedAt, sourceId: m.id, retrieved: true });
         }
       }
       if (settings.assistant.useConversationHistory) {
@@ -214,6 +234,7 @@ export class ChatService {
         tone: req.tone,
         availability: prepared.availability,
         sessionTitle: session.title,
+        query,
       });
       // Mode-specific task instructions are trusted (built by Lumen, never from captured content)
       // and go in the system blocks, after the cached policy.
@@ -246,6 +267,23 @@ export class ChatService {
       store.touchSession(session.id);
       store.setLastConversation(session.id, convId);
 
+      const configuredModel = activeModel(settings.provider, session.ai.model);
+      const route = provider.isMock
+        ? { model: configuredModel, routed: false, reason: "Development mode." }
+        : routeModel({
+            mode: settings.provider.routing,
+            providerKind: provider.kind,
+            configuredModel,
+            category: (plan?.task.category ?? "general") as TaskCategory,
+            depth: plan?.strategy.depth ?? settings.personalization.depth,
+            needsVision: userContent.some((p) => p.type === "image"),
+            estimatedInputTokens: Math.ceil((built.contextChars + question.length + chars) / 4),
+            sessionPinned: !!session.ai.model,
+          });
+      if (route.routed) {
+        model = route.model;
+        this.deps.log?.("info", "model routed", { from: configuredModel, to: route.model, category: plan?.task.category });
+      }
       emit({
         type: "start",
         requestId: req.requestId,
@@ -258,12 +296,20 @@ export class ChatService {
         availability: prepared.availability,
         contextPrepMs,
         intent,
+        selection: {
+          considered: prepared.considered,
+          included: built.included.length,
+          droppedForBudget: built.dropped.length,
+          belowRelevance: Math.max(0, prepared.considered - prepared.ranked.length),
+          contextChars: built.contextChars,
+          budgetChars: DEFAULT_BUDGET.maxContextChars,
+        },
       });
 
       requestSentMs = Date.now() - started;
       const result = await provider.generate(
         {
-          model: activeModel(settings.provider, session.ai.model),
+          model: route.model,
           system: built.systemBlocks,
           messages: [...merged, { role: "user", content: userContent }],
           maxTokens: settings.provider.maxTokens,
@@ -291,13 +337,40 @@ export class ChatService {
       const cost = estimateCostUsd(result.model, result.usage, hasPricing(result.model) ? null : settings.provider.customPrice);
       this.deps.onUsage?.(result.model, result.usage, cost);
       const cited = citedLabels(result.text, built.references);
+      const checks = verifyAnswer({
+        answer: result.text,
+        references: built.references,
+        category: (plan?.task.category ?? "general") as TaskCategory,
+        depth: plan?.strategy.depth ?? settings.personalization.depth,
+        requestedLanguage: plan?.turn.requestedLanguage ?? null,
+        available: { transcript: prepared.availability.transcript === "live", screen: prepared.availability.screen > 0 },
+        hintsOnly: !!plan?.strategy.hintsOnly,
+        stopReason: result.stopReason,
+      });
+      const verification = { checksRun: checks.checksRun.length, findings: checks.findings };
+      if (checks.findings.length) this.deps.log?.("info", "answer checks flagged", { checks: checks.findings.map((f) => f.check) });
+      metrics.recordVerification(
+        checks.checksRun.length,
+        checks.findings.map((f) => f.check),
+      );
       const totalMs = Date.now() - started;
       const saved = store.addMessage({
         conversationId: convId,
         role: "assistant",
         content: result.text,
         references: built.references.filter((r) => cited.includes(r.label)),
-        meta: { model: result.model, isMock: provider.isMock, estimatedCostUsd: cost, stopReason: result.stopReason, style, ttftMs: result.ttftMs, totalMs, intent },
+        meta: {
+          model: result.model,
+          isMock: provider.isMock,
+          estimatedCostUsd: cost,
+          stopReason: result.stopReason,
+          style,
+          ttftMs: result.ttftMs,
+          totalMs,
+          intent,
+          verification,
+          routedFrom: route.routed ? configuredModel : undefined,
+        },
       });
       metrics.recordRequest({
         at: started,
@@ -323,6 +396,8 @@ export class ChatService {
         stopReason: result.stopReason,
         servedByFallback: result.servedByFallback,
         citedLabels: cited,
+        verification,
+        routedFrom: route.routed ? configuredModel : undefined,
         usage: { inputTokens: result.usage.inputTokens, outputTokens: result.usage.outputTokens, cacheReadTokens: result.usage.cacheReadTokens, estimatedCostUsd: cost },
       });
     } catch (err) {
@@ -336,8 +411,23 @@ export class ChatService {
         } catch (saveErr) {
           this.deps.log?.("warn", "could not save stopped answer", { code: toUserError(saveErr).code });
         }
-        metrics.recordRequest({ at: started, model, ttftMs: null, totalMs, contextPrepMs, pendingWaitMs, requestSentMs, retries: 0, inputTokens: 0, outputTokens: 0, estimatedCostUsd: 0, outcome: "cancelled" });
+        metrics.recordRequest({
+          at: started,
+          model,
+          ttftMs: null,
+          totalMs,
+          contextPrepMs,
+          pendingWaitMs,
+          requestSentMs,
+          retries: 0,
+          inputTokens: 0,
+          outputTokens: 0,
+          estimatedCostUsd: 0,
+          outcome: "cancelled",
+        });
         emit({ type: "cancelled", requestId: req.requestId, partialMessageId });
+        const cancelAt = this.inflight.get(req.requestId)?.cancelAt;
+        if (cancelAt !== undefined) metrics.recordCancel(performance.now() - cancelAt);
         return;
       }
       const pe = toUserError(err);
@@ -350,13 +440,40 @@ export class ChatService {
         }
       }
       this.deps.log?.("warn", "chat request failed", { code: pe.code, message: pe.message, cause: err instanceof ProviderError ? undefined : String((err as Error)?.name ?? "error") });
-      metrics.recordRequest({ at: started, model, ttftMs: null, totalMs, contextPrepMs, pendingWaitMs, requestSentMs, retries: 0, inputTokens: 0, outputTokens: 0, estimatedCostUsd: 0, outcome: "error", errorCode: pe.code });
+      metrics.recordRequest({
+        at: started,
+        model,
+        ttftMs: null,
+        totalMs,
+        contextPrepMs,
+        pendingWaitMs,
+        requestSentMs,
+        retries: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        estimatedCostUsd: 0,
+        outcome: "error",
+        errorCode: pe.code,
+      });
       if (["network", "timeout", "overloaded", "auth", "rate_limited"].includes(pe.code)) this.deps.onProviderResult?.(false, pe.code, pe.message);
       fail(pe);
     } finally {
       this.inflight.delete(req.requestId);
     }
   }
+}
+
+/** Resolve when `p` settles or `signal` aborts, whichever comes first. */
+function untilAborted(p: Promise<unknown>, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve();
+  return new Promise<void>((resolve) => {
+    const done = () => {
+      signal.removeEventListener("abort", done);
+      resolve();
+    };
+    signal.addEventListener("abort", done, { once: true });
+    p.then(done, done);
+  });
 }
 
 function mergeConsecutive(turns: ProviderMessage[]): ProviderMessage[] {

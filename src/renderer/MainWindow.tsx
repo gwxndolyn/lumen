@@ -19,6 +19,7 @@ import { ShortcutsScreen } from "./screens/Shortcuts";
 import { TranscriptScreen } from "./screens/Transcript";
 import { InterviewScreen } from "./screens/Interview";
 import { TechnicalScreen } from "./screens/Technical";
+import { MemoryScreen } from "./screens/Memory";
 
 const MODES: { route: string; label: string; sub: string }[] = [
   { route: "interview", label: "Interview", sub: "Copilot" },
@@ -30,6 +31,7 @@ const NAV: { section?: string; route: string; label: string; icon: string }[] = 
   { route: "assistant", label: "Assistant", icon: "◎" },
   { route: "capture", label: "Screen context", icon: "▣" },
   { route: "knowledge", label: "Knowledge base", icon: "✦" },
+  { route: "memory", label: "Project memory", icon: "◆" },
   { route: "history", label: "Session history", icon: "↺" },
   { route: "sessions", label: "Sessions", icon: "▦" },
   { section: "Settings", route: "settings", label: "General", icon: "⚙" },
@@ -111,6 +113,8 @@ export function MainWindow() {
         return <HistoryScreen />;
       case "knowledge":
         return <KnowledgeScreen />;
+      case "memory":
+        return <MemoryScreen settings={settings} update={update} />;
       case "capture":
         return <CaptureScreen settings={settings} update={update} go={go} />;
       case "sessions":
@@ -153,7 +157,6 @@ export function MainWindow() {
             {n.section && <div className="nav-section">{n.section}</div>}
             <button className="nav-item" aria-current={route === n.route ? "page" : undefined} onClick={() => go(n.route)}>
               <span aria-hidden>{n.icon}</span> {n.label}
-
             </button>
           </div>
         ))}

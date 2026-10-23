@@ -43,6 +43,7 @@ export const DEFAULT_SETTINGS: Settings = {
     openai: { model: "gpt-5" },
     gemini: { model: "gemini-2.5-flash" },
     dailySpendLimitUsd: 5,
+    routing: "off",
     customPrice: null,
   },
   transcription: {
@@ -59,6 +60,7 @@ export const DEFAULT_SETTINGS: Settings = {
     tone: "neutral",
     useKnowledgeBase: true,
     useConversationHistory: true,
+    useProjectMemory: true,
   },
   questions: { policy: "assisted" },
   personalization: { depth: "quick", alsoKnows: [], codeStyle: "idiomatic", hintsFirst: false, includeComplexity: true, includeTests: true },

@@ -34,6 +34,7 @@ export const settingsSchema = z.object({
     openai: z.object({ model: z.string().regex(/^[A-Za-z0-9._:-]{2,80}$/) }),
     gemini: z.object({ model: z.string().regex(/^[A-Za-z0-9._:-]{2,80}$/) }),
     dailySpendLimitUsd: z.number().min(0).max(10_000),
+    routing: z.enum(["off", "economy"]),
     customPrice: z.object({ input: z.number().min(0).max(1000), output: z.number().min(0).max(1000) }).nullable(),
   }),
   transcription: z.object({
@@ -50,6 +51,7 @@ export const settingsSchema = z.object({
     tone: toneEnum,
     useKnowledgeBase: z.boolean(),
     useConversationHistory: z.boolean(),
+    useProjectMemory: z.boolean(),
   }),
   questions: z.object({
     policy: z.enum(["manual", "assisted"]),

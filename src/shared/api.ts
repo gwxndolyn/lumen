@@ -189,6 +189,12 @@ export interface LumenApi {
   deleteAllData(): Promise<void>;
   diagnostics(): Promise<Diagnostics>;
   openLogs(): Promise<void>;
+  listMemories(): Promise<MemoryView[]>;
+  addMemory(kind: MemoryView["kind"], text: string, ttlDays: number | null): Promise<MemoryView>;
+  updateMemory(id: string, patch: { text?: string; kind?: MemoryView["kind"] }): Promise<MemoryView>;
+  deleteMemory(id: string): Promise<void>;
+  /** Save a support file (technical metadata + log tail, no content). Returns the path or null if cancelled. */
+  saveSupportBundle(): Promise<string | null>;
   /** Renderer crash report: error type and component names only. */
   reportCrash(report: { name: string; components: string }): Promise<void>;
 
@@ -201,4 +207,15 @@ export interface LumenApi {
   onChat(fn: (e: ChatEvent) => void): () => void;
   onTranscript(fn: (e: TranscriptEvent) => void): () => void;
   onApp(fn: (e: AppEvent) => void): () => void;
+}
+
+export interface MemoryView {
+  id: string;
+  kind: "preference" | "convention" | "architecture" | "decision" | "known_issue" | "task";
+  text: string;
+  sessionId: string | null;
+  createdAt: number;
+  updatedAt: number;
+  lastUsedAt: number | null;
+  expiresAt: number | null;
 }

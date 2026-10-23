@@ -24,6 +24,7 @@ import { ChatService, type LiveTranscriptContext } from "./chatService";
 import { ContextEngine, type ContextRecord } from "./context/engine";
 import { addKnowledgeText, importKnowledge } from "./knowledge";
 import { LiveScreen } from "./liveScreen";
+import { MemoryService } from "./intelligence/memory";
 import { hasChanged } from "./frameDiff";
 import { generateInsights, notesToMarkdown } from "./meetingService";
 import { CATEGORY_LABELS, classifyQuestion, QuestionDetector, type DetectedQuestion, type QuestionCategory } from "./interview/questions";
@@ -128,6 +129,7 @@ export class AppCore {
   readonly engine: ContextEngine;
   readonly chat: ChatService;
   readonly metrics = new Metrics();
+  readonly memory: MemoryService;
   readonly liveScreen: LiveScreen;
   live: TranscriptSession | null = null;
   health: ProviderHealth;
@@ -144,6 +146,7 @@ export class AppCore {
     this.now = deps.now ?? Date.now;
     this.settings = initial;
     this.health = this.initialHealth();
+    this.memory = new MemoryService(deps.store, this.now);
     this.engine = new ContextEngine(
       deps.store,
       {
@@ -173,6 +176,7 @@ export class AppCore {
         if (cost > 0) deps.store.recordUsage(model, usage.inputTokens, usage.outputTokens, cost, this.now());
       },
       log: deps.log,
+      retrieveMemory: (q) => this.memory.retrieve(q),
     });
     this.liveScreen = new LiveScreen(
       () => this.liveScreenTick(),
@@ -266,7 +270,8 @@ export class AppCore {
   private initialHealth(): ProviderHealth {
     const kind = this.settings.provider.kind;
     const model = activeModel(this.settings.provider);
-    if (kind === "mock" && !this.devModeAllowed) return { kind, model, state: "unconfigured", message: "Development mode is not available in this build. Choose an AI provider.", checkedAt: null, latencyMs: null };
+    if (kind === "mock" && !this.devModeAllowed)
+      return { kind, model, state: "unconfigured", message: "Development mode is not available in this build. Choose an AI provider.", checkedAt: null, latencyMs: null };
     if (kind === "mock") return { kind, model, state: "mock", message: "Development mode — answers are mock responses, not AI.", checkedAt: null, latencyMs: null };
     if ((kind === "anthropic" || kind === "openai" || kind === "gemini") && !this.deps.secrets.has(kind)) {
       return { kind, model, state: "unconfigured", message: `No ${PROVIDER_INFO[kind].label} API key configured.`, checkedAt: null, latencyMs: null };
@@ -412,8 +417,10 @@ export class AppCore {
     let job: Promise<void> = Promise.resolve();
     if (this.settings.screen.ocr && this.deps.ocr) {
       const ocr = this.deps.ocr;
-      job = ocr
-        .recognize(input.ocrPng)
+      // Started inside a promise chain so an engine that throws synchronously is handled like any
+      // other OCR failure instead of leaving the capture stuck in "running".
+      job = Promise.resolve()
+        .then(() => ocr.recognize(input.ocrPng))
         .then((r) => {
           this.metrics.recordOcr(r.ms);
           // The capture may have been discarded or consent revoked while OCR ran.
@@ -501,9 +508,10 @@ export class AppCore {
     const type = session?.type ?? "general";
     if (recording && live?.text.trim()) {
       return {
-        prompt: type === "interview"
-          ? "Based on the live transcript, what is the most recent question I was asked, and how should I answer it?"
-          : "Based on the live transcript, what was just discussed and what should I say or do next?",
+        prompt:
+          type === "interview"
+            ? "Based on the live transcript, what is the most recent question I was asked, and how should I answer it?"
+            : "Based on the live transcript, what was just discussed and what should I say or do next?",
         sources,
         missing: null,
         style: type === "interview" ? "suggest" : "quick",
@@ -511,9 +519,10 @@ export class AppCore {
     }
     if (screen.length) {
       return {
-        prompt: type === "coding" || type === "technical"
-          ? "Look at what is on my screen. Identify the problem or code shown and help me with it."
-          : "Look at what is on my screen and tell me what I most likely need to know or do next.",
+        prompt:
+          type === "coding" || type === "technical"
+            ? "Look at what is on my screen. Identify the problem or code shown and help me with it."
+            : "Look at what is on my screen and tell me what I most likely need to know or do next.",
         sources,
         missing: null,
         style: "quick",
@@ -605,7 +614,16 @@ export class AppCore {
     this.suggestionDone = this.suggestionDone
       .then(() => {
         if (this.suggestionRequest !== requestId || this.activeSessionId !== sid) return; // superseded or session changed
-        return this.sendInterview({ requestId, conversationId: this.deps.store.getLastConversation(sid), question: q.text, category: q.category, length: this.settings.interview.length, tone: this.settings.assistant.tone, includeLiveTranscript: true, questionId: q.id });
+        return this.sendInterview({
+          requestId,
+          conversationId: this.deps.store.getLastConversation(sid),
+          question: q.text,
+          category: q.category,
+          length: this.settings.interview.length,
+          tone: this.settings.assistant.tone,
+          includeLiveTranscript: true,
+          questionId: q.id,
+        });
       })
       .catch(() => undefined)
       .finally(() => {
@@ -634,7 +652,8 @@ export class AppCore {
       text: interviewPrompt({ text: q, category }, req.length),
       displayText: q,
       retrievalQuery: q,
-      taskInstruction: "Task: interview answer suggestion. Follow the layout in the user's request exactly. Personal facts must come from the user's profile, résumé or notes in context, with citations.",
+      taskInstruction:
+        "Task: interview answer suggestion. Follow the layout in the user's request exactly. Personal facts must come from the user's profile, résumé or notes in context, with citations.",
       origin: { kind: "interview", label: CATEGORY_LABELS[category], questionId: req.questionId },
       style: "suggest",
       tone: req.tone ?? this.settings.assistant.tone,
@@ -657,19 +676,50 @@ export class AppCore {
     return parseProblem(source);
   }
 
-  sendTechnical(req: { requestId: string; conversationId: string | null; text: string; task: TechnicalTask; language: Language; problem?: string; tone?: Tone; includeLiveTranscript?: boolean; style?: AnswerStyle; detail?: TechnicalDetail }) {
+  sendTechnical(req: {
+    requestId: string;
+    conversationId: string | null;
+    text: string;
+    task: TechnicalTask;
+    language: Language;
+    problem?: string;
+    tone?: Tone;
+    includeLiveTranscript?: boolean;
+    style?: AnswerStyle;
+    detail?: TechnicalDetail;
+  }) {
     const parsed = req.problem?.trim() ? parseProblem(req.problem) : this.analyzeProblem("");
     const sid = this.activeSessionId;
     // The problem statement becomes explicit, session-scoped context (deduped if unchanged), so
     // follow-ups and spoken clarifications are combined with it by the normal pipeline.
     if (req.problem?.trim()) {
-      this.engine.ingest({ sessionId: sid, source: "user_message", sourceId: "technical-problem", title: parsed.title ? `Problem: ${parsed.title}` : "Problem statement", text: `${problemToContext(parsed)}`, pinned: true });
+      this.engine.ingest({
+        sessionId: sid,
+        source: "user_message",
+        sourceId: "technical-problem",
+        title: parsed.title ? `Problem: ${parsed.title}` : "Problem statement",
+        text: `${problemToContext(parsed)}`,
+        pinned: true,
+      });
     }
-    const label = { solve: "Solve", explain: "Explain code", debug: "Debug", review: "Code review", tests: "Test cases", complexity: "Complexity", refactor: "Refactor", hints: "Hints (practice)", system_design: "System design" }[req.task];
+    const label = {
+      solve: "Solve",
+      explain: "Explain code",
+      debug: "Debug",
+      review: "Code review",
+      tests: "Test cases",
+      complexity: "Complexity",
+      refactor: "Refactor",
+      hints: "Hints (practice)",
+      system_design: "System design",
+    }[req.task];
     return this.send({
       requestId: req.requestId,
       conversationId: req.conversationId,
-      text: technicalPrompt(req.task, req.language, req.problem?.trim() || parsed.statement ? parsed : null, req.text, { level: this.settings.technical.level, detail: req.detail ?? this.settings.technical.detail }),
+      text: technicalPrompt(req.task, req.language, req.problem?.trim() || parsed.statement ? parsed : null, req.text, {
+        level: this.settings.technical.level,
+        detail: req.detail ?? this.settings.technical.detail,
+      }),
       retrievalQuery: `${req.text} ${parsed.title ?? ""} ${parsed.statement.slice(0, 400)}`,
       displayText: req.text.trim() || `${label}${parsed.title ? ` — ${parsed.title}` : ""} (${req.language})`,
       taskInstruction: `Task: technical assessment assistance (${req.task}). Follow the requested structure and language conventions exactly. Code goes in fenced blocks. Do not claim to have executed code.`,
@@ -696,8 +746,21 @@ export class AppCore {
     const t = this.deps.store.getTranscriptSession(transcriptId);
     if (!t || t.sessionId !== this.activeSessionId) throw new Error("That transcript belongs to another session.");
     const session = this.deps.store.getSession(t.sessionId);
-    const md = notesToMarkdown({ title: t.title, startedAt: t.startedAt, endedAt: t.endedAt, sessionTitle: session?.title }, this.deps.store.getInsights<MeetingInsights>(transcriptId), this.deps.store.listSegments(transcriptId), { includeTranscript });
-    return { filename: `${t.title.replace(/[^\w-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60) || "notes"}.md`, markdown: md };
+    const md = notesToMarkdown(
+      { title: t.title, startedAt: t.startedAt, endedAt: t.endedAt, sessionTitle: session?.title },
+      this.deps.store.getInsights<MeetingInsights>(transcriptId),
+      this.deps.store.listSegments(transcriptId),
+      { includeTranscript },
+    );
+    return {
+      filename: `${
+        t.title
+          .replace(/[^\w-]+/g, "-")
+          .replace(/^-+|-+$/g, "")
+          .slice(0, 60) || "notes"
+      }.md`,
+      markdown: md,
+    };
   }
 
   // ---------------- chat ----------------
@@ -804,6 +867,22 @@ export class AppCore {
     }
   }
 
+  /**
+   * The renderer could not capture audio (permission denied, device unplugged, worklet failure).
+   * System audio failing is not fatal: the microphone keeps recording. A microphone failure ends
+   * the recording, keeping the transcript captured so far, and never re-prompts on its own.
+   */
+  audioCaptureFailed(kind: "microphone" | "system", message: string) {
+    const msg = message.slice(0, 300);
+    this.deps.log?.("warn", "audio capture failed", { kind, message: msg });
+    if (kind === "system") {
+      this.deps.emitApp({ type: "toast", level: "error", message: `System audio unavailable: ${msg}. Continuing with the microphone only.` });
+      return;
+    }
+    if (this.live && this.live.status !== "stopped" && this.live.status !== "error") this.live.stop();
+    this.deps.emitApp({ type: "toast", level: "error", message: `Microphone capture failed: ${msg}. Recording stopped; the transcript so far was kept.` });
+  }
+
   pushAudio(pcm: Uint8Array) {
     // Audio is only accepted while microphone consent is granted.
     if (!this.settings.consent.microphone) return;
@@ -851,6 +930,7 @@ export class AppCore {
 
   sweep() {
     const n = this.engine.sweep();
+    this.deps.store.sweepMemories(this.now());
     const r = this.deps.store.applyRetention(this.settings.privacy.conversationRetentionDays, this.settings.privacy.transcriptRetentionDays, this.now());
     return { ...r, context: n + r.context };
   }

@@ -6,6 +6,7 @@ import type {
   ChatMessage,
   ContextItemSummary,
   ContextReference,
+  ContextSelection,
   ErrorCode,
   LiveScreenState,
   ProviderHealth,
@@ -115,9 +116,24 @@ export interface UiMessage {
   references: ContextReference[];
   status: "done" | "streaming" | "error" | "cancelled" | "interrupted";
   error?: { message: string; code: ErrorCode; retryable: boolean };
-  meta?: { model?: string; isMock?: boolean; costUsd?: number; ttftMs?: number | null; totalMs?: number; fallback?: string | null; style?: AnswerStyle; stopReason?: string; intent?: ResponseIntent };
+  meta?: {
+    model?: string;
+    isMock?: boolean;
+    costUsd?: number;
+    ttftMs?: number | null;
+    totalMs?: number;
+    fallback?: string | null;
+    style?: AnswerStyle;
+    stopReason?: string;
+    intent?: ResponseIntent;
+    verification?: ChatMessage["meta"]["verification"];
+    routedFrom?: string;
+  };
   warnings?: string[];
   availability?: SourceAvailability;
+  /** Everything sent with this request (references keeps only what the answer cited). */
+  sent?: ContextReference[];
+  selection?: ContextSelection;
   /** Origin label shown on the user turn (e.g. "Behavioral question", "Debug"). */
   label?: string;
   retryNote?: string;
@@ -131,7 +147,18 @@ function fromStored(m: ChatMessage): UiMessage {
     references: m.references,
     label: m.meta.origin?.label,
     status: m.meta.cancelled ? "cancelled" : m.meta.interrupted ? "interrupted" : "done",
-    meta: { model: m.meta.model, isMock: m.meta.isMock, costUsd: m.meta.estimatedCostUsd, ttftMs: m.meta.ttftMs, totalMs: m.meta.totalMs, style: m.meta.style, stopReason: m.meta.stopReason, intent: m.meta.intent },
+    meta: {
+      model: m.meta.model,
+      isMock: m.meta.isMock,
+      costUsd: m.meta.estimatedCostUsd,
+      ttftMs: m.meta.ttftMs,
+      totalMs: m.meta.totalMs,
+      style: m.meta.style,
+      stopReason: m.meta.stopReason,
+      intent: m.meta.intent,
+      verification: m.meta.verification,
+      routedFrom: m.meta.routedFrom,
+    },
   };
 }
 
@@ -193,6 +220,8 @@ export function useChat(settings: Settings | null, chatOpts?: { adoptSuggestions
             case "start":
               setConversationId(e.conversationId);
               cur.references = e.references;
+              cur.sent = e.references;
+              cur.selection = e.selection;
               cur.warnings = e.warnings;
               cur.availability = e.availability;
               cur.meta = { model: e.provider.model, isMock: e.provider.isMock, intent: e.intent };
@@ -212,7 +241,17 @@ export function useChat(settings: Settings | null, chatOpts?: { adoptSuggestions
               cur.status = "done";
               cur.retryNote = undefined;
               cur.references = cur.references.filter((r) => e.citedLabels.includes(r.label));
-              cur.meta = { ...cur.meta, costUsd: e.usage.estimatedCostUsd, ttftMs: e.ttftMs, totalMs: e.totalMs, fallback: e.servedByFallback, stopReason: e.stopReason };
+              cur.meta = {
+                ...cur.meta,
+                model: e.routedFrom ? (cur.meta?.model ?? "") : cur.meta?.model,
+                costUsd: e.usage.estimatedCostUsd,
+                ttftMs: e.ttftMs,
+                totalMs: e.totalMs,
+                fallback: e.servedByFallback,
+                stopReason: e.stopReason,
+                verification: e.verification,
+                routedFrom: e.routedFrom,
+              };
               break;
             case "error":
               if (e.conversationId) setConversationId(e.conversationId);
@@ -238,7 +277,10 @@ export function useChat(settings: Settings | null, chatOpts?: { adoptSuggestions
   );
 
   const send = useCallback(
-    async (text: string, opts: { includeLiveTranscript: boolean; retryOf?: string; style?: AnswerStyle; depth?: "quick" | "balanced" | "deep"; mode?: Parameters<typeof api.chatSend>[0]["mode"]; label?: string }) => {
+    async (
+      text: string,
+      opts: { includeLiveTranscript: boolean; retryOf?: string; style?: AnswerStyle; depth?: "quick" | "balanced" | "deep"; mode?: Parameters<typeof api.chatSend>[0]["mode"]; label?: string },
+    ) => {
       if (!settings || reqRef.current) return;
       const requestId = newId();
       const pid = `pending-${requestId}`;

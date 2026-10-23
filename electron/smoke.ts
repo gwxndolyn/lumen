@@ -3,7 +3,7 @@ import { nativeImage } from "electron";
 import fs from "node:fs";
 import path from "node:path";
 import type { AppCore } from "../src/core/app";
-import type { Store } from "../src/core/storage/db";
+import { MIGRATIONS, type Store } from "../src/core/storage/db";
 import type { ShortcutManager } from "../src/core/shortcuts";
 import type { CaptureService } from "./capture";
 import type { WindowManager } from "./windows";
@@ -65,7 +65,8 @@ export async function runSmokeTest({ app, core, store, windows, capture, shortcu
     check("bridge", (await js("window.lumen.role")) === "main");
     check("nodeIsolated", (await js("typeof require + '/' + typeof process")) === "undefined/undefined");
     check("shortcuts", Object.values(shortcutStatus).every(Boolean), { ...shortcutStatus });
-    check("schemaVersion", store.schemaVersion() === 5, store.schemaVersion());
+    // Every migration applied (not a hard-coded number that goes stale when one is added).
+    check("schemaVersion", store.schemaVersion() === MIGRATIONS.length, store.schemaVersion());
 
     // Provider: an Anthropic-wire-compatible local server when provided, else labelled mock.
     if (realProvider) {
@@ -109,7 +110,10 @@ export async function runSmokeTest({ app, core, store, windows, capture, shortcu
     await ocr;
     const rec = core.engine.get(record.id)!;
     check("B_ocr", /1,?250/.test(rec.text) && /November/i.test(rec.text), { ms: Date.now() - t0, confidence: rec.confidence, text: rec.text.slice(0, 80) });
-    check("B_pendingNotUsed", core.engine.active(core.activeSessionId).every((r) => r.id !== record.id));
+    check(
+      "B_pendingNotUsed",
+      core.engine.active(core.activeSessionId).every((r) => r.id !== record.id),
+    );
     await wait(200);
     const confirmBtn = await ojs<boolean>("!!document.querySelector('button[data-action=\"confirm-capture\"]')");
     check("B_previewShown", confirmBtn);
@@ -134,7 +138,11 @@ export async function runSmokeTest({ app, core, store, windows, capture, shortcu
       const audioArrived = await until(() => (core.live?.liveSegments().length ?? 0) >= 1, 8000);
       check("C_realMicAudioFlowed", audioArrived);
       const got = await until(() => (core.live?.liveSegments().length ?? 0) >= 2, 8000);
-      check("C_transcriptSegments", got, core.live?.liveSegments().map((s) => s.text));
+      check(
+        "C_transcriptSegments",
+        got,
+        core.live?.liveSegments().map((s) => s.text),
+      );
       await ojs("document.querySelector('button[aria-label=\"New conversation\"]')?.click()");
       await wait(200);
       await ask("What did we agree about the launch date?");
@@ -252,7 +260,9 @@ export async function runSmokeTest({ app, core, store, windows, capture, shortcu
       // Scroll operates on Lumen's own response area (the long answer above overflows it).
       windows.setMode("expanded");
       await wait(300);
-      const scrollable = await ojs<{ sh: number; ch: number }>("(() => { const el = document.querySelector('.overlay-body-scroll'); el.scrollTop = el.scrollHeight; return { sh: el.scrollHeight, ch: el.clientHeight }; })()");
+      const scrollable = await ojs<{ sh: number; ch: number }>(
+        "(() => { const el = document.querySelector('.overlay-body-scroll'); el.scrollTop = el.scrollHeight; return { sh: el.scrollHeight, ch: el.clientHeight }; })()",
+      );
       if (scrollable.sh <= scrollable.ch) throw new Error(`response area not scrollable (${JSON.stringify(scrollable)})`);
       const top0 = await ojs<number>("document.querySelector('.overlay-body-scroll').scrollTop");
       shortcuts.trigger("scrollUp");
@@ -278,7 +288,9 @@ export async function runSmokeTest({ app, core, store, windows, capture, shortcu
       // ⌘/Ctrl+Enter with typed text submits it; with empty input it uses available context.
       await ojs("document.querySelector('button[aria-label=\"New conversation\"]')?.click()");
       await wait(200);
-      await ojs(`(() => { const ta = document.querySelector('textarea'); const set = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set; set.call(ta, 'What is the total due on the invoice?'); ta.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+      await ojs(
+        `(() => { const ta = document.querySelector('textarea'); const set = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set; set.call(ta, 'What is the total due on the invoice?'); ta.dispatchEvent(new Event('input', { bubbles: true })); })()`,
+      );
       await wait(100);
       const n0 = core.metrics.snapshot().requests.length;
       shortcuts.trigger("requestAssist");

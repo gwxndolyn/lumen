@@ -29,7 +29,12 @@ export function PrivacyScreen({ settings, update }: Props) {
           <p className="small muted">Older data is deleted automatically at startup and every hour.</p>
           <div className="field">
             <label htmlFor="conv-ret">Conversations</label>
-            <select id="conv-ret" className="select" value={settings.privacy.conversationRetentionDays} onChange={(e) => void update({ privacy: { conversationRetentionDays: Number(e.target.value) } })}>
+            <select
+              id="conv-ret"
+              className="select"
+              value={settings.privacy.conversationRetentionDays}
+              onChange={(e) => void update({ privacy: { conversationRetentionDays: Number(e.target.value) } })}
+            >
               {RETENTION.map(([v, l]) => (
                 <option key={v} value={v}>
                   {l}
@@ -74,7 +79,8 @@ export function PrivacyScreen({ settings, update }: Props) {
           <div className="field">
             <div className="label">Deletion policy</div>
             <div className="small muted">
-              Deleting a session removes its conversations, messages, transcripts, meeting notes, session documents, saved context and the matching full-text index rows. The database uses secure-delete, so removed rows are overwritten on disk.
+              Deleting a session removes its conversations, messages, transcripts, meeting notes, session documents, saved context and the matching full-text index rows. The database uses
+              secure-delete, so removed rows are overwritten on disk.
             </div>
           </div>
         </div>
@@ -104,7 +110,15 @@ export function PrivacyScreen({ settings, update }: Props) {
           <h3>Export</h3>
           <div className="row">
             <span className="grow small muted">Download all conversations, transcripts, meeting notes and knowledge documents as JSON.</span>
-            <button className="btn" onClick={() => void api.exportData().then((p) => p && setStatus(`Exported to ${p}`)).catch((e) => setStatus(`Export failed: ${errMsg(e)}`))}>
+            <button
+              className="btn"
+              onClick={() =>
+                void api
+                  .exportData()
+                  .then((p) => p && setStatus(`Exported to ${p}`))
+                  .catch((e) => setStatus(`Export failed: ${errMsg(e)}`))
+              }
+            >
               Export data
             </button>
           </div>
@@ -112,7 +126,9 @@ export function PrivacyScreen({ settings, update }: Props) {
 
         <div className="card" style={{ borderColor: "color-mix(in srgb, var(--danger) 40%, transparent)" }}>
           <h3>Delete all data</h3>
-          <p className="small muted">Permanently deletes every conversation, transcript, meeting note and knowledge document, and clears session context. Settings and API keys are kept. Type DELETE to confirm.</p>
+          <p className="small muted">
+            Permanently deletes every conversation, transcript, meeting note and knowledge document, and clears session context. Settings and API keys are kept. Type DELETE to confirm.
+          </p>
           <div className="row">
             <input className="input" style={{ maxWidth: 160 }} aria-label="Type DELETE to confirm" value={confirmText} onChange={(e) => setConfirmText(e.target.value)} />
             <button

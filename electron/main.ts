@@ -1,10 +1,13 @@
 import { app, BrowserWindow, clipboard, dialog, globalShortcut, ipcMain, Menu, nativeImage, powerMonitor, safeStorage, session, shell, Tray, type IpcMainInvokeEvent } from "electron";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { z } from "zod";
 import { AppCore } from "../src/core/app";
 import { ShortcutManager, type ShortcutAction } from "../src/core/shortcuts";
 import { formatFromPath, markdownToText, sessionToMarkdown } from "../src/core/exportFormat";
+import { buildSupportBundle } from "../src/core/supportBundle";
+import { singleFlight } from "../src/core/singleFlight";
 import { TesseractOcr } from "../src/core/ocr";
 import { SUPPORTED_DOC_EXTENSIONS, extractDocumentText } from "../src/core/knowledge";
 import type { Store } from "../src/core/storage/db";
@@ -131,6 +134,17 @@ function toast(level: "info" | "error", message: string) {
   emitApp({ type: "toast", level, message });
 }
 
+/**
+ * Capture the display under the cursor. Concurrent requests (held-down shortcut, ⌘⇧S then ⌘↵)
+ * share one capture instead of hiding/showing the panel and grabbing the screen repeatedly.
+ */
+const captureCursorOnce = singleFlight(async () => {
+  const started = performance.now();
+  const rec = await captureAndAttach(null);
+  core.metrics.recordCapture(performance.now() - started);
+  return rec;
+});
+
 async function captureAndAttach(sourceId: string | null, region: null = null, opts: { restoreFocus?: boolean } = {}) {
   const wasVisible = windows.overlayVisible;
   windows.hideOverlay(); // the panel must not appear in its own capture
@@ -151,7 +165,7 @@ async function askAboutScreen() {
     return;
   }
   try {
-    await captureAndAttach(null);
+    await captureCursorOnce();
     windows.showOverlay({ focus: false });
   } catch (err) {
     windows.showOverlay({ focus: false });
@@ -274,7 +288,7 @@ function registerIpc() {
     let shot: { captured: boolean; pending: string | null; error: string | null } = { captured: false, pending: null, error: null };
     if (core.settings.consent.screen) {
       try {
-        const rec = await captureAndAttach(null, null, { restoreFocus: false });
+        const rec = await captureCursorOnce();
         shot = { captured: true, pending: rec.status === "pending" ? rec.id : null, error: null };
       } catch (err) {
         shot = { captured: false, pending: null, error: (err as Error).message };
@@ -441,6 +455,23 @@ function registerIpc() {
     store.deleteConversation(String(cid));
     emitApp({ type: "history-changed" });
   });
+  // ---- project memory (user-approved, durable) ----
+  const memoryKind = z.enum(["preference", "convention", "architecture", "decision", "known_issue", "task"]);
+  handle("memory:list", () => core.memory.list());
+  handle("memory:add", (_e, kind, text, ttlDays) =>
+    core.memory.add(memoryKind.parse(kind), str(2000).parse(text), {
+      sessionId: null,
+      ttlDays: z
+        .number()
+        .int()
+        .min(1)
+        .max(3650)
+        .nullable()
+        .parse(ttlDays ?? null),
+    }),
+  );
+  handle("memory:update", (_e, mid, patch) => core.memory.update(id.parse(mid), z.object({ text: str(2000).optional(), kind: memoryKind.optional() }).parse(patch)));
+  handle("memory:delete", (_e, mid) => core.memory.delete(id.parse(mid)));
   handle("history:search", (_e, q, scope) => store.search(str(500).parse(q), z.enum(["session", "all"]).parse(scope) === "all" ? null : core.activeSessionId));
 
   // ---- context ----
@@ -542,7 +573,7 @@ function registerIpc() {
   handle("capture:discard", (_e, cid) => capture.discard(id.parse(cid)));
   handle("capture:quick", async () => {
     requireScreen();
-    await captureAndAttach(null);
+    await captureCursorOnce();
     return summaries();
   });
   handle("capture:live", (_e, action) => {
@@ -684,14 +715,7 @@ function registerIpc() {
   });
   ipcMain.on("transcript:captureFailed", (event, message: unknown, kind: unknown) => {
     if (!isTrustedUrl(event.senderFrame?.url ?? "")) return;
-    const msg = String(message).slice(0, 300);
-    logger.warn("audio capture failed", { message: msg, kind: String(kind) });
-    if (kind === "system") {
-      toast("error", `System audio unavailable: ${msg}. Continuing with the microphone only.`);
-      return;
-    }
-    if (core.live) core.live.stop();
-    toast("error", `Microphone capture failed: ${msg}`);
+    core.audioCaptureFailed(kind === "system" ? "system" : "microphone", String(message));
     updateTray();
   });
 
@@ -707,7 +731,7 @@ function registerIpc() {
   handle("data:export", async (e) => {
     const res = await dialog.showSaveDialog(winOf(e), { defaultPath: `lumen-export-${new Date().toISOString().slice(0, 10)}.json`, filters: [{ name: "JSON", extensions: ["json"] }] });
     if (res.canceled || !res.filePath) return null;
-    fs.writeFileSync(res.filePath, JSON.stringify(store.exportAll(), null, 2), { mode: 0o600 });
+    writeFileAtomic(res.filePath, JSON.stringify(store.exportAll(), null, 2), 0o600);
     return res.filePath;
   });
   handle("data:deleteAll", () => {
@@ -720,6 +744,25 @@ function registerIpc() {
   handle("diagnostics:rendererCrash", (e, report) => {
     const r = z.object({ name: z.string().max(80), components: z.string().max(400) }).parse(report);
     logger.error("renderer crashed", { window: winOf(e) === windows.overlay ? "overlay" : "main", error: r.name, components: r.components });
+  });
+  handle("diagnostics:saveSupportBundle", async (e) => {
+    const res = await dialog.showSaveDialog(winOf(e), {
+      defaultPath: `lumen-support-${app.getVersion()}-${new Date().toISOString().slice(0, 10)}.json`,
+      filters: [{ name: "JSON", extensions: ["json"] }],
+    });
+    if (res.canceled || !res.filePath) return null;
+    let logText = "";
+    try {
+      logText = fs.readFileSync(logger.file, "utf8");
+    } catch {
+      /* no log yet */
+    }
+    const d = diagnostics();
+    // Request rows carry only timings and token counts, but drop them to keep the file small.
+    const slim = { ...d, metrics: { ...d.metrics, requests: d.metrics.requests.slice(0, 20) } };
+    writeFileAtomic(res.filePath, buildSupportBundle({ diagnostics: slim as unknown as Record<string, unknown>, logText, home: os.homedir(), now: new Date() }), 0o600);
+    logger.info("support bundle saved");
+    return res.filePath;
   });
   handle("diagnostics:openLogs", async () => {
     await shell.openPath(path.dirname(logger.file));

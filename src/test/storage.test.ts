@@ -82,7 +82,12 @@ describe("Store", () => {
     s.addMessage({ conversationId: conv.id, role: "assistant", content: "The Q3 budget review is on Friday", references: [], meta: {} });
     const t = s.createTranscriptSession(sess.id, "Standup", "deepgram");
     const seg = s.addSegment({ sessionId: t.id, startMs: 0, endMs: 1000, speaker: "Speaker 1", channel: "mic", confidence: 0.9, text: "Budget approval is pending" });
-    expect(s.search("budget", null).map((h) => h.kind).sort()).toEqual(["message", "transcript"]);
+    expect(
+      s
+        .search("budget", null)
+        .map((h) => h.kind)
+        .sort(),
+    ).toEqual(["message", "transcript"]);
     expect(s.search("bud", null)).toHaveLength(2); // prefix match
     expect(s.search('" OR 1=1; DROP TABLE messages; --', null)).toEqual([]);
     expect(s.search("", null)).toEqual([]);
@@ -122,8 +127,10 @@ describe("Store", () => {
     const exp = s.exportAll();
     expect(exp.sessions[0]!.conversations).toHaveLength(1);
     expect(exp.sessions[0]!.transcripts).toHaveLength(1);
+    s.addMemory({ kind: "preference", text: "Prefer Kotlin", sessionId: null, expiresAt: null }, now);
+    expect(s.counts().memories).toBe(1);
     s.deleteAll();
-    expect(s.counts()).toEqual({ sessions: 0, conversations: 0, messages: 0, transcripts: 0, knowledgeDocs: 0, contextItems: 0 });
+    expect(s.counts()).toEqual({ sessions: 0, conversations: 0, messages: 0, transcripts: 0, knowledgeDocs: 0, contextItems: 0, memories: 0 });
   });
 });
 

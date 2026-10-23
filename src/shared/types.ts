@@ -40,6 +40,8 @@ export interface Settings {
     gemini: { model: string };
     /** Daily estimated-spend cap in USD; 0 = no limit. */
     dailySpendLimitUsd: number;
+    /** "economy" may use a cheaper model of the SAME provider for quick, light questions. */
+    routing: "off" | "economy";
     /** User-entered price (USD per million tokens) for models without bundled pricing. */
     customPrice: { input: number; output: number } | null;
   };
@@ -59,6 +61,8 @@ export interface Settings {
     tone: Tone;
     useKnowledgeBase: boolean;
     useConversationHistory: boolean;
+    /** Send relevant user-saved project memory with questions. */
+    useProjectMemory: boolean;
   };
   /** How Lumen reacts to questions detected in the live transcript. */
   questions: {
@@ -171,17 +175,7 @@ export interface SessionSummary extends Session {
 
 // ---------------- context ----------------
 
-export type ContextSource =
-  | "user_message"
-  | "selected_text"
-  | "clipboard"
-  | "document"
-  | "screenshot"
-  | "ocr"
-  | "transcript"
-  | "note"
-  | "history"
-  | "knowledge";
+export type ContextSource = "user_message" | "selected_text" | "clipboard" | "document" | "screenshot" | "ocr" | "transcript" | "note" | "history" | "knowledge" | "memory";
 
 /** Which consent gates a record. "user" = explicitly provided by the user, no OS permission. */
 export type ContextPermission = "user" | "screen" | "microphone" | "systemAudio";
@@ -219,6 +213,19 @@ export interface ContextReference {
   title: string;
   excerpt: string;
   sourceId?: string;
+  /** Why this source was included (for the context inspector). */
+  why?: "pinned" | "attached" | "matched" | "recent";
+  score?: number;
+}
+
+/** Context-selection summary for one request (no content, only counts and reasons). */
+export interface ContextSelection {
+  considered: number;
+  included: number;
+  droppedForBudget: number;
+  belowRelevance: number;
+  contextChars: number;
+  budgetChars: number;
 }
 
 export interface ChatSendRequest {
@@ -263,6 +270,7 @@ export type ChatEvent =
       availability: SourceAvailability;
       contextPrepMs: number;
       intent: ResponseIntent;
+      selection: ContextSelection;
     }
   | { type: "delta"; requestId: string; text: string }
   | { type: "suggestion"; requestId: string; question: { id: string; text: string; category: string; categoryLabel: string; startMs: number } }
@@ -277,6 +285,8 @@ export type ChatEvent =
       stopReason: string;
       servedByFallback: string | null;
       citedLabels: string[];
+      verification: { checksRun: number; findings: { check: string; severity: "warn" | "info"; message: string }[] };
+      routedFrom?: string;
     }
   | { type: "error"; requestId: string; message: string; code: ErrorCode; retryable: boolean; conversationId: string | null }
   | { type: "cancelled"; requestId: string; partialMessageId: string | null };
@@ -289,6 +299,7 @@ export interface SourceAvailability {
   notes: number;
   knowledge: number;
   history: number;
+  memory?: number;
 }
 
 export type ErrorCode =
@@ -332,6 +343,10 @@ export interface MessageMeta {
   totalMs?: number;
   /** How the response orchestrator understood this turn (deterministic, not a model judgement). */
   intent?: ResponseIntent;
+  /** Deterministic post-generation checks (see core/intelligence/verify.ts). */
+  verification?: { checksRun: number; findings: { check: string; severity: "warn" | "info"; message: string }[] };
+  /** Set when economy routing chose a different model of the same provider. */
+  routedFrom?: string;
 }
 
 export interface ResponseIntent {
@@ -558,6 +573,7 @@ export interface Diagnostics {
     p50TotalMs: number | null;
     p50ContextPrepMs: number | null;
     p50RequestSentMs: number | null;
+    verification: { answers: number; checks: number; flagged: number; byCheck: Record<string, number> };
     p50PendingWaitMs: number | null;
     errorRate: number | null;
     totalRetries: number;
@@ -565,6 +581,9 @@ export interface Diagnostics {
     sessionCostUsd: number;
     transcriptionP50LatencyMs: number | null;
     ocrP50Ms: number | null;
+    captureP50Ms: number | null;
+    cancelP50Ms: number | null;
+    cancelMaxMs: number | null;
   };
   process: { memoryMb: number; cpuPercent: number };
   storage: { sessions: number; conversations: number; messages: number; transcripts: number; knowledgeDocs: number; contextItems: number };

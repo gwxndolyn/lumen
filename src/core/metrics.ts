@@ -12,6 +12,8 @@ export class Metrics {
   private requests: RequestMetric[] = [];
   private transcriptionLatencies: number[] = [];
   private ocrDurations: number[] = [];
+  private captureDurations: number[] = [];
+  private cancelDurations: number[] = [];
   sessionCostUsd = 0;
   totalRetries = 0;
 
@@ -29,9 +31,30 @@ export class Metrics {
     if (this.transcriptionLatencies.length > this.cap) this.transcriptionLatencies.shift();
   }
 
+  private verifications = { answers: 0, checks: 0, flagged: 0, byCheck: {} as Record<string, number> };
+
+  recordVerification(checksRun: number, failed: string[]) {
+    this.verifications.answers++;
+    this.verifications.checks += checksRun;
+    if (failed.length) this.verifications.flagged++;
+    for (const f of failed) this.verifications.byCheck[f] = (this.verifications.byCheck[f] ?? 0) + 1;
+  }
+
   recordOcr(ms: number) {
     this.ocrDurations.push(ms);
     if (this.ocrDurations.length > this.cap) this.ocrDurations.shift();
+  }
+
+  /** Screen capture: request → image held, including hiding the panel. */
+  recordCapture(ms: number) {
+    this.captureDurations.push(ms);
+    if (this.captureDurations.length > this.cap) this.captureDurations.shift();
+  }
+
+  /** Cancel requested → request settled (terminal event emitted). */
+  recordCancel(ms: number) {
+    this.cancelDurations.push(ms);
+    if (this.cancelDurations.length > this.cap) this.cancelDurations.shift();
   }
 
   snapshot() {
@@ -46,15 +69,28 @@ export class Metrics {
       p50TtftMs: percentile(ttft, 50),
       p95TtftMs: percentile(ttft, 95),
       p50TotalMs: percentile(total, 50),
-      p50ContextPrepMs: percentile(this.requests.map((r) => r.contextPrepMs), 50),
-      p50RequestSentMs: percentile(this.requests.map((r) => r.requestSentMs).filter((v): v is number => v != null), 50),
-      p50PendingWaitMs: percentile(this.requests.map((r) => r.pendingWaitMs).filter((v): v is number => v != null), 50),
+      p50ContextPrepMs: percentile(
+        this.requests.map((r) => r.contextPrepMs),
+        50,
+      ),
+      p50RequestSentMs: percentile(
+        this.requests.map((r) => r.requestSentMs).filter((v): v is number => v != null),
+        50,
+      ),
+      p50PendingWaitMs: percentile(
+        this.requests.map((r) => r.pendingWaitMs).filter((v): v is number => v != null),
+        50,
+      ),
       errorRate: finished.length ? finished.filter((r) => r.outcome === "error").length / finished.length : null,
       totalRetries: this.totalRetries,
       failuresByCode,
       sessionCostUsd: Math.round(this.sessionCostUsd * 1e6) / 1e6,
       transcriptionP50LatencyMs: percentile(this.transcriptionLatencies, 50),
       ocrP50Ms: percentile(this.ocrDurations, 50),
+      verification: { ...this.verifications, byCheck: { ...this.verifications.byCheck } },
+      captureP50Ms: percentile(this.captureDurations, 50),
+      cancelP50Ms: percentile(this.cancelDurations, 50),
+      cancelMaxMs: this.cancelDurations.length ? Math.max(...this.cancelDurations) : null,
     };
   }
 }

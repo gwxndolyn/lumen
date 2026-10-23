@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
-import type { ContextItemSummary, ContextSource, ProviderHealth, SourceAvailability } from "../../shared/types";
+import type { ContextItemSummary, ContextReference, ContextSource, ProviderHealth, SourceAvailability } from "../../shared/types";
 import { STYLE_LABELS } from "../../shared/defaults";
 import { api, errMsg, usd } from "../lib/api";
 import type { LiveTranscript, UiMessage } from "../lib/hooks";
@@ -38,6 +38,7 @@ const KIND_ICON: Record<ContextSource, string> = {
   transcript: "◉",
   knowledge: "✦",
   history: "↺",
+  memory: "◆",
 };
 
 function expiresIn(ts: number | null): string | null {
@@ -113,18 +114,18 @@ export function ContextChips({ items, compact }: { items: ContextItemSummary[]; 
       {active.length > 0 && (
         <div className="overlay-context" aria-label="Active context">
           {active.map((i) => (
-            <span
-              key={i.id}
-              className={`chip ${i.enabled ? "on" : ""} ${i.suspicious || i.warning ? "warn" : ""}`}
-              title={itemTooltip(i)}
-            >
+            <span key={i.id} className={`chip ${i.enabled ? "on" : ""} ${i.suspicious || i.warning ? "warn" : ""}`} title={itemTooltip(i)}>
               <button aria-label={`${i.enabled ? "Disable" : "Enable"} ${i.title}`} aria-pressed={i.enabled} onClick={() => void api.updateContext(i.id, { enabled: !i.enabled })}>
                 {i.ocr === "running" ? <span className="spinner" style={{ width: 10, height: 10 }} /> : KIND_ICON[i.source]}
               </button>
               <span className="chip-label">{compact ? i.title.slice(0, 24) : i.title}</span>
               {i.sensitivity === "sensitive" && <span aria-label="sensitive">⚑</span>}
               {i.expiresAt && !i.pinned && <span className="faint small">{expiresIn(i.expiresAt)}</span>}
-              <button aria-label={i.pinned ? `Unpin ${i.title}` : `Pin ${i.title}`} title={i.pinned ? "Pinned — won't expire" : "Pin (keep until removed)"} onClick={() => void api.updateContext(i.id, { pinned: !i.pinned })}>
+              <button
+                aria-label={i.pinned ? `Unpin ${i.title}` : `Pin ${i.title}`}
+                title={i.pinned ? "Pinned — won't expire" : "Pin (keep until removed)"}
+                onClick={() => void api.updateContext(i.id, { pinned: !i.pinned })}
+              >
                 {i.pinned ? "●" : "○"}
               </button>
               <button aria-label={`Remove ${i.title}`} onClick={() => void api.removeContext(i.id)}>
@@ -188,6 +189,15 @@ export function MessageView({ m, onRetry, onCopy }: { m: UiMessage; onRetry?: ()
           <Markdown text={m.content} refs={m.references} streaming={streaming} onCopy={onCopy} onLink={(u) => void api.openExternal(u)} />
         </div>
       )}
+      {m.status !== "streaming" && m.meta?.verification?.findings.some((f) => f.severity === "warn") && (
+        <div className="alert warning small" role="note" aria-label="Answer checks">
+          {m.meta.verification.findings
+            .filter((f) => f.severity === "warn" && f.check !== "truncated")
+            .map((f) => (
+              <div key={f.check}>⚠ {f.message}</div>
+            ))}
+        </div>
+      )}
       {m.status === "done" && m.meta?.stopReason === "max_tokens" && (
         <div className="alert warning small">This answer was cut off at the output limit. Ask “continue”, or raise Max output tokens in AI provider settings.</div>
       )}
@@ -228,7 +238,19 @@ export function MessageView({ m, onRetry, onCopy }: { m: UiMessage; onRetry?: ()
               {m.meta.intent.ambiguous ? "Needs clarification" : m.meta.intent.label}
             </span>
           )}
-          {m.meta?.model && !m.meta.isMock && <span>{m.meta.model}</span>}
+          {m.meta?.model && !m.meta.isMock && (
+            <span title={m.meta.routedFrom ? `Economy routing used this model instead of ${m.meta.routedFrom}` : undefined}>
+              {m.meta.model}
+              {m.meta.routedFrom ? " (economy)" : ""}
+            </span>
+          )}
+          {m.meta?.verification && (
+            <span className="faint" title={m.meta.verification.findings.map((f) => f.message).join("\n") || "All automatic checks passed."}>
+              {m.meta.verification.findings.length
+                ? `${m.meta.verification.findings.length} check note${m.meta.verification.findings.length > 1 ? "s" : ""}`
+                : `${m.meta.verification.checksRun} checks ✓`}
+            </span>
+          )}
           {m.meta?.fallback && <span className="badge">answered by {m.meta.fallback}</span>}
           {m.meta?.ttftMs != null && <span>first token {m.meta.ttftMs} ms</span>}
           {m.meta?.costUsd ? <span>{usd(m.meta.costUsd)}</span> : null}
@@ -246,6 +268,7 @@ export function MessageView({ m, onRetry, onCopy }: { m: UiMessage; onRetry?: ()
           )}
         </div>
       )}
+      {m.status !== "streaming" && m.selection && <ContextInspector m={m} />}
       {m.references.length > 0 && m.status === "done" && (
         <div className="refs" aria-label="Sources cited">
           <span className="small faint">Sources:</span>
@@ -260,12 +283,56 @@ export function MessageView({ m, onRetry, onCopy }: { m: UiMessage; onRetry?: ()
   );
 }
 
+const WHY_LABEL: Record<NonNullable<ContextReference["why"]>, string> = { pinned: "pinned by you", attached: "attached to this session", matched: "matched your question", recent: "recent" };
+
+/** What was sent with this answer and why — counts and titles only. */
+function ContextInspector({ m }: { m: UiMessage }) {
+  const s = m.selection!;
+  const sent = m.sent ?? [];
+  const cited = new Set(m.references.map((r) => r.label));
+  return (
+    <details className="small" style={{ marginTop: 4 }}>
+      <summary className="faint" style={{ cursor: "pointer" }}>
+        Context used: {s.included} of {s.considered} available source{s.considered === 1 ? "" : "s"}
+        {s.droppedForBudget ? ` · ${s.droppedForBudget} cut for size` : ""}
+      </summary>
+      <div className="col" style={{ gap: 2, padding: "6px 0 2px 12px" }}>
+        {sent.length === 0 && <div className="muted">No context was sent; this was answered from the question alone.</div>}
+        {sent.map((r) => (
+          <div key={r.label} className="row" style={{ gap: 6 }}>
+            <span className="mono">{r.label}</span>
+            <span>{r.title}</span>
+            <span className="faint">
+              {r.kind.replace("_", " ")} · {r.why ? WHY_LABEL[r.why] : ""}
+              {cited.has(r.label) ? " · cited" : ""}
+            </span>
+          </div>
+        ))}
+        <div className="faint">
+          {s.belowRelevance ? `${s.belowRelevance} source${s.belowRelevance === 1 ? " was" : "s were"} left out as not relevant. ` : ""}
+          {Math.round(s.contextChars / 100) / 10}k of {s.budgetChars / 1000}k characters of context budget used.
+        </div>
+      </div>
+    </details>
+  );
+}
+
 const HEALTH_DOT: Record<ProviderHealth["state"], string> = { ok: "ok", degraded: "warn", down: "err", unconfigured: "err", mock: "warn", unknown: "" };
 
 export function ProviderStatus({ health, compact }: { health: ProviderHealth | null; compact?: boolean }) {
   if (!health) return null;
   const label =
-    health.state === "mock" ? "Dev mode" : health.state === "unconfigured" ? "No API key" : health.state === "down" ? "Provider error" : health.state === "degraded" ? "Provider issues" : compact ? "" : health.model;
+    health.state === "mock"
+      ? "Dev mode"
+      : health.state === "unconfigured"
+        ? "No API key"
+        : health.state === "down"
+          ? "Provider error"
+          : health.state === "degraded"
+            ? "Provider issues"
+            : compact
+              ? ""
+              : health.model;
   return (
     <button className="status-pill no-drag" title={`${health.kind} · ${health.model}\n${health.message}`} onClick={() => void api.openMain("/main/provider")}>
       <span className={`dot ${HEALTH_DOT[health.state]}`} />

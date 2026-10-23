@@ -38,6 +38,7 @@ const KIND_WEIGHT: Record<ContextSource, number> = {
   transcript: 1.1,
   knowledge: 0.9,
   history: 0.7,
+  memory: 1.0,
 };
 
 /**

@@ -4,41 +4,37 @@ Lumen is a lightweight desktop assistant with a floating overlay. It answers que
 
 ## Quick start
 
-Requirements: Node 22+ (tested with Node 24.15 and Electron 44.9, on macOS arm64).
+Requirements: Node 22.5+ (developed with Node 24.15 and Electron 44.9 on macOS arm64). For setup, permissions, privacy, troubleshooting, the pre-release checklist and platform status, see **[docs/BETA.md](docs/BETA.md)**.
 
 ```bash
-npm install
-npm start            # build and launch
-npm test             # 132 unit + integration tests (incl. workflows A–H, real OCR)
-npm run lint         # oxlint
-npm run check        # typecheck + lint + tests
-npm run typecheck    # strict TypeScript, main + renderer
-npm run smoke        # real Electron app + UI, against local Anthropic/Deepgram wire stand-ins and the real mic
-npm run package      # unpacked app in release/ (electron-builder)
-npm run dist         # platform installer (dmg / nsis / AppImage)
+npm ci
+npm start              # build and launch
+npm run check          # typecheck + lint + unit/integration tests
+npm run release:check  # check + secret scan + shipped-code audit + build
+npm run smoke          # real Electron app + UI against local Anthropic/Deepgram stand-ins and the real mic
+npm run package:mac    # or package:win: unsigned app in release/
 ```
 
-On first launch, onboarding asks for:
-1. **An Anthropic API key**, used for answers and meeting notes. Or pick *development mode*, which gives clearly labelled mock responses with no AI.
-2. **Permissions.** Screen context, microphone and system audio are all **off by default**.
-
-For live transcription, add a **Deepgram API key** under *Settings → AI provider*.
-
-During development you can supply keys as `ANTHROPIC_API_KEY` / `DEEPGRAM_API_KEY` environment variables instead. These are never persisted.
+On first launch, onboarding asks you to choose an AI provider and add its key: Anthropic, OpenAI, Gemini, or an OpenAI-compatible endpoint. Screen, microphone and system-audio context are all **off by default**. For live transcription, add a Deepgram API key under *Settings → AI provider*.
 
 ## Default shortcuts
 
-| Action | macOS | Windows / Linux |
-|---|---|---|
-| Show / hide assistant | ⌘⇧Space | Ctrl+Shift+Space |
-| Ask about screen (captures the display under the cursor) | ⌘⇧S | Ctrl+Shift+S |
-| Ask about selection (copy text first) | ⌘⇧A | Ctrl+Shift+A |
-| Open full window | ⌘⇧L | Ctrl+Shift+L |
-| In panel: send / newline / stop or hide / new chat / expand / answer style / copy last | ↵ / ⇧↵ / Esc / ⌘N / ⌘E / ⌥1–7 / ⌘⇧C | |
+`Cmd` on macOS, `Ctrl` on Windows. All of them can be rebound under *Settings → Shortcuts*, which also shows conflicts with other apps.
 
-You can rebind all of these under *Settings → Shortcuts*. If another app already holds a shortcut, the conflict is shown there.
+| Action | Shortcut |
+|---|---|
+| Ask: submit typed text, or ask about the authorized context | ⌘/Ctrl+Enter |
+| Show / hide panel (does not steal focus) | ⌘/Ctrl+\\ |
+| Capture the screen under the cursor | ⌘/Ctrl+Shift+S |
+| Attach copied text | ⌘/Ctrl+Shift+A |
+| Stop answer | ⌘/Ctrl+Shift+Backspace (Esc inside the panel) |
+| Pause / resume audio | ⌘/Ctrl+Shift+M |
+| Discreet input bar | ⌘/Ctrl+Shift+Enter |
+| Open main window | ⌘/Ctrl+Shift+L |
+| Scroll answer / move panel (only while the panel is visible) | ⌘/Ctrl+Arrows |
 
 ## Docs
+- [docs/BETA.md](docs/BETA.md): setup, permissions, privacy, diagnostics, release smoke procedure, platform status
 - [PRD.md](PRD.md): product requirements, epics, stories, acceptance criteria
 - [ARCHITECTURE.md](ARCHITECTURE.md): components, data flows, decisions
 - [SECURITY.md](SECURITY.md): threat model and controls

@@ -1,6 +1,16 @@
 # Lumen — current improvement state
 
-Last updated: 2026-10-22 · Branch: `improve/autonomous-loop` (from `master` @ `871ca43`)
+Last updated: 2026-10-23 · Branch: `improve/autonomous-loop` (from `master` @ `871ca43`)
+
+## Latest: Prompt 7 committed (2026-10-23)
+
+Prompt 7 (model intelligence engine) is committed on this branch: answer verification (`intelligence/verify.ts`), economy routing (`intelligence/router.ts`, off by default, same provider only), project memory (`intelligence/memory.ts`, Memory screen, migration 6) and the "context used" list. The support file (`src/core/supportBundle.ts`) is kept, now covered by `src/test/supportBundle.test.ts` (mutation-checked: removing scrubbing fails 2 tests).
+
+Verified on resume: `npm run check` 346 passed / 4 skipped; `format`, `audit:prod`, `smoke` pass.
+
+Note: vitest and the smoke run need to write to `node_modules/.vite-temp`; under the Claude Code sandbox they must run unsandboxed.
+
+**Next:** Prompt 8 Evaluation Lab, not started. Build on `src/core/intelligence/evaluate.ts`, `src/test/fixtures/intent-*.json`, `src/test/engine.test.ts` and `test:live`.
 
 ## How to resume (any session, no chat history needed)
 
@@ -33,7 +43,7 @@ Lumen is an Electron + React desktop AI assistant (macOS and Windows; Linux buil
 |---|---|
 | `npm run typecheck` | pass |
 | `npm run lint` | pass (warnings denied) |
-| `npm test` | 280 passed, 4 skipped (live-provider tests; need API keys) |
+| `npm test` | 346 passed, 4 skipped (live-provider tests; need API keys) — 2026-10-23 |
 | `npm run audit:prod` | pass: 3 advisories, all in modules excluded from the asar |
 | `npm run format` | pass (changed files) |
 | `npm run smoke` | pass on this branch (after the error-boundary change) |

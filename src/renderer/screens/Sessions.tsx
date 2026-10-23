@@ -55,7 +55,12 @@ function SessionForm({
           <label htmlFor="s-ttl">Context expiration</label>
           <div className="hint">How long attached notes, clipboard text and documents stay available. Screen captures always expire.</div>
         </div>
-        <select id="s-ttl" className="select" value={v.contextTtlMinutes === null ? "" : String(v.contextTtlMinutes)} onChange={(e) => setV({ ...v, contextTtlMinutes: e.target.value === "" ? null : Number(e.target.value) })}>
+        <select
+          id="s-ttl"
+          className="select"
+          value={v.contextTtlMinutes === null ? "" : String(v.contextTtlMinutes)}
+          onChange={(e) => setV({ ...v, contextTtlMinutes: e.target.value === "" ? null : Number(e.target.value) })}
+        >
           {TTL_OPTIONS.map((o) => (
             <option key={String(o.value)} value={o.value === null ? "" : String(o.value)}>
               {o.label}
@@ -77,13 +82,25 @@ function SessionForm({
               </option>
             ))}
           </select>
-          <select aria-label="Effort override" className="select" style={{ width: 150 }} value={v.ai.effort ?? ""} onChange={(e) => setV({ ...v, ai: { ...v.ai, effort: (e.target.value || undefined) as Effort | undefined } })}>
+          <select
+            aria-label="Effort override"
+            className="select"
+            style={{ width: 150 }}
+            value={v.ai.effort ?? ""}
+            onChange={(e) => setV({ ...v, ai: { ...v.ai, effort: (e.target.value || undefined) as Effort | undefined } })}
+          >
             <option value="">Default effort</option>
             <option value="low">Low effort</option>
             <option value="medium">Medium effort</option>
             <option value="high">High effort</option>
           </select>
-          <select aria-label="Answer style override" className="select" style={{ width: 200 }} value={v.ai.style ?? ""} onChange={(e) => setV({ ...v, ai: { ...v.ai, style: (e.target.value || undefined) as AnswerStyle | undefined } })}>
+          <select
+            aria-label="Answer style override"
+            className="select"
+            style={{ width: 200 }}
+            value={v.ai.style ?? ""}
+            onChange={(e) => setV({ ...v, ai: { ...v.ai, style: (e.target.value || undefined) as AnswerStyle | undefined } })}
+          >
             <option value="">Answer style from panel</option>
             {Object.entries(STYLE_LABELS).map(([k, l]) => (
               <option key={k} value={k}>
@@ -164,7 +181,15 @@ export function SessionsScreen() {
         )}
         {sessions && sessions.length > 1 && (
           <div className="row" style={{ marginBottom: 12 }}>
-            <input className="input" type="search" style={{ maxWidth: 340 }} placeholder="Search titles, notes, conversations and transcripts…" aria-label="Search sessions" value={query} onChange={(e) => setQuery(e.target.value)} />
+            <input
+              className="input"
+              type="search"
+              style={{ maxWidth: 340 }}
+              placeholder="Search titles, notes, conversations and transcripts…"
+              aria-label="Search sessions"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+            />
             <span className="spacer" />
             <label className="small muted" htmlFor="s-sort">
               Sort
@@ -210,7 +235,11 @@ export function SessionsScreen() {
                     <div className="small faint" style={{ marginTop: 4 }}>
                       {s.conversations} conversations · {s.transcripts} transcripts · {s.documents} documents · {s.contextItems} saved context items · updated {formatTime(s.updatedAt)}
                     </div>
-                    {s.notes && <div className="small muted" style={{ marginTop: 6, whiteSpace: "pre-wrap" }}>{s.notes.slice(0, 240)}</div>}
+                    {s.notes && (
+                      <div className="small muted" style={{ marginTop: 6, whiteSpace: "pre-wrap" }}>
+                        {s.notes.slice(0, 240)}
+                      </div>
+                    )}
                   </div>
                   <div className="row" style={{ flexWrap: "wrap", justifyContent: "flex-end" }}>
                     {active?.id !== s.id && (
@@ -221,7 +250,9 @@ export function SessionsScreen() {
                     <button className="btn sm" onClick={() => setEditing(s.id)}>
                       Edit
                     </button>
-                    <button className="btn sm" onClick={() =>
+                    <button
+                      className="btn sm"
+                      onClick={() =>
                         void api
                           .exportSession(s.id)
                           .then((p) => p && setStatus(`Exported to ${p}`))
@@ -233,7 +264,11 @@ export function SessionsScreen() {
                     <button
                       className="btn sm danger"
                       onClick={() => {
-                        if (confirm(`Delete “${s.title}”?\n\nThis permanently deletes its conversations, transcripts, meeting notes, session documents and saved context, including their search index. Global knowledge documents are not affected.`))
+                        if (
+                          confirm(
+                            `Delete “${s.title}”?\n\nThis permanently deletes its conversations, transcripts, meeting notes, session documents and saved context, including their search index. Global knowledge documents are not affected.`,
+                          )
+                        )
                           void api
                             .deleteSession(s.id)
                             .then(() => setStatus(`Deleted “${s.title}”.`))

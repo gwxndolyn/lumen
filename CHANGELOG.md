@@ -1,5 +1,41 @@
 # Changelog
 
+## Unreleased: beta reliability
+Context quality
+- Oversized sources (long documents, big pastes) keep their opening plus the passages that match the question, in original order, with `[…]` marking omissions. Previously only the first 16k characters were sent, so a relevant passage later in the document never reached the model.
+- Every timestamped source carries an `age`. Screen captures older than 5 minutes are marked `stale`, and the policy tells the model to prefer recent sources and to say when sources disagree.
+
+Reliability
+- Stop now takes effect during the wait for in-progress OCR. Previously it could wait up to 8 s, and a provider request could still be sent.
+- An OCR engine that throws synchronously no longer leaves a capture stuck in "running".
+- Shortcut-triggered screen captures (⌘⇧S, ⌘↵ with an empty box, Quick capture) are single-flight: rapid or repeated presses share one capture instead of hiding/showing the panel and capturing the screen repeatedly.
+- Microphone/system-audio failure handling moved from the IPC layer into `AppCore` (now tested). A microphone failure says the transcript was kept.
+
+Measurement
+- New timings in Diagnostics: screen capture duration (p50), and stop → stopped (p50 and max).
+
+Release gates
+- `npm run smoke` previously always exited 0 (`… | grep … || true`). It now fails unless the app prints `SMOKE PASS`, and it honours `$TMPDIR`. This immediately exposed a stale `schemaVersion === 5` assertion, which now compares against the migration count.
+- New `npm run check:secrets` (in CI and `release:check`) fails on real-looking API keys or private keys in tracked files. Obvious test placeholders are allowed.
+
+Tests
+- `src/test/beta.test.ts`: 30 end-to-end tests through the real AppCore → ChatService → Anthropic SDK (fake HTTP) → SQLite. They cover:
+  - missing configuration, invalid credentials, unsupported model
+  - rate limits, overload recovery, offline mode, malformed error bodies
+  - cancellation during the OCR wait and on shutdown
+  - rapid repeated activation
+  - empty and irrelevant screen context
+  - microphone denial and disconnection, system-audio loss, transcription auth failure
+  - OCR crash recovery, live-screen tick failure
+  - restart restore, legacy/corrupt settings, delete-everything
+  - a 200-question / 3,000-segment long session with bounded growth
+  - unexpected exceptions mid-stream
+- Each new fix was checked by reverting it and confirming its test fails.
+
+Docs
+- New `docs/BETA.md`: setup, provider configuration, macOS/Windows permissions, session lifecycle, data retention, diagnostics, the pre-release smoke procedure and an honest platform matrix.
+- README shortcuts updated to the actual defaults.
+
 ## 0.2.0 — 2026-10-21 (Phase 2: real-time copilot)
 Context
 - New `ContextEngine`. Each item is a normalized record carrying its source, timestamp, sourceId, confidence, permission, expiry and sensitivity.

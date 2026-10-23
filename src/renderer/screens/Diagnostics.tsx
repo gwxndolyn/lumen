@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import type { Diagnostics, LogLevel, ProviderTestResult } from "../../shared/types";
 import { describeTest } from "../lib/providerTest";
-import { api, formatTime, usd } from "../lib/api";
+import { api, errMsg, formatTime, usd } from "../lib/api";
 import { Segmented } from "../components/ui";
 
 const ms = (v: number | null) => (v == null ? "—" : `${Math.round(v)} ms`);
@@ -20,6 +20,7 @@ const FIX: Record<string, string> = {
 export function DiagnosticsScreen() {
   const [d, setD] = useState<Diagnostics | null>(null);
   const [copied, setCopied] = useState(false);
+  const [notice, setNotice] = useState<{ ok: boolean; text: string } | null>(null);
   const [test, setTest] = useState<ProviderTestResult | "running" | null>(null);
   const load = () => void api.diagnostics().then(setD);
   useEffect(() => {
@@ -39,8 +40,10 @@ export function DiagnosticsScreen() {
   if (d.provider.state === "unconfigured") issues.push({ text: "No API key for the selected AI provider.", fix: "Add one in AI provider, or use development mode." });
   if (d.provider.state === "down" || d.provider.state === "degraded") issues.push({ text: `AI provider: ${d.provider.message}` });
   if (d.transcription.kind !== "none" && !d.transcription.configured) issues.push({ text: "No Deepgram API key — live transcription is unavailable." });
-  for (const [k, ok] of Object.entries(d.shortcutsRegistered)) if (!ok) issues.push({ text: `Shortcut “${k}” could not be registered.`, fix: "Another app uses it; pick a different one in Shortcuts." });
-  if (d.capture.permission === "denied") issues.push({ text: "Screen capture is blocked by the OS.", fix: "Allow Lumen in System Settings → Privacy & Security → Screen Recording, then restart Lumen." });
+  for (const [k, ok] of Object.entries(d.shortcutsRegistered))
+    if (!ok) issues.push({ text: `Shortcut “${k}” could not be registered.`, fix: "Another app uses it; pick a different one in Shortcuts." });
+  if (d.capture.permission === "denied")
+    issues.push({ text: "Screen capture is blocked by the OS.", fix: "Allow Lumen in System Settings → Privacy & Security → Screen Recording, then restart Lumen." });
   if (d.permissions.microphone === "denied") issues.push({ text: "Microphone access is denied by the OS." });
   for (const [code, n] of Object.entries(d.metrics.failuresByCode)) issues.push({ text: `${n} request${n === 1 ? "" : "s"} failed with “${code}” this session.`, fix: FIX[code] });
 
@@ -70,6 +73,18 @@ export function DiagnosticsScreen() {
         </button>
         <button
           className="btn"
+          title="Saves versions, health, permission state, timings and recent log lines. No conversations, transcripts, notes, screenshots or keys."
+          onClick={() =>
+            void api
+              .saveSupportBundle()
+              .then((p) => p && setNotice({ ok: true, text: `Support file saved to ${p}. Attach it to your bug report.` }))
+              .catch((e) => setNotice({ ok: false, text: `Could not save the support file: ${errMsg(e)}` }))
+          }
+        >
+          Save support file
+        </button>
+        <button
+          className="btn"
           onClick={() =>
             void api.copyText(report).then(() => {
               setCopied(true);
@@ -81,6 +96,11 @@ export function DiagnosticsScreen() {
         </button>
       </header>
       <div className="page">
+        {notice && (
+          <div className={`alert ${notice.ok ? "info" : "error"} small`} role="status" style={{ marginBottom: 12 }}>
+            {notice.text}
+          </div>
+        )}
         {test && test !== "running" && (
           <div className={`alert ${test.ok ? "info" : "error"} small`} style={{ marginBottom: 12 }} role="status">
             <strong>{describeTest(test).title}:</strong> {describeTest(test).detail}
@@ -117,6 +137,8 @@ export function DiagnosticsScreen() {
             <Stat v={ms(d.metrics.p50RequestSentMs)} l="Input → request sent (p50)" />
             <Stat v={ms(d.metrics.transcriptionP50LatencyMs)} l="Transcription latency (p50)" />
             <Stat v={ms(d.metrics.ocrP50Ms)} l="OCR time (p50)" />
+            <Stat v={ms(d.metrics.captureP50Ms)} l="Screen capture (p50)" />
+            <Stat v={ms(d.metrics.cancelP50Ms)} l="Stop → stopped (p50)" />
             <Stat v={d.metrics.errorRate == null ? "—" : `${Math.round(d.metrics.errorRate * 100)}%`} l="Provider error rate" />
             <Stat v={String(d.metrics.totalRetries)} l="Automatic retries" />
             <Stat v={usd(d.metrics.sessionCostUsd)} l="Estimated AI cost" />
@@ -205,7 +227,9 @@ export function DiagnosticsScreen() {
           <div className="field">
             <div>
               <div className="label">Log level</div>
-              <div className="hint">Logs contain operational metadata only (timings, error codes). Prompts, answers, transcripts, screenshots and keys are never logged; anything resembling a credential is redacted.</div>
+              <div className="hint">
+                Logs contain operational metadata only (timings, error codes). Prompts, answers, transcripts, screenshots and keys are never logged; anything resembling a credential is redacted.
+              </div>
             </div>
             <Segmented<LogLevel>
               label="Log level"
@@ -253,7 +277,8 @@ export function DiagnosticsScreen() {
             </dd>
             <dt>Storage</dt>
             <dd>
-              {d.storage.sessions} sessions, {d.storage.conversations} conversations, {d.storage.messages} messages, {d.storage.transcripts} transcripts, {d.storage.knowledgeDocs} documents, {d.storage.contextItems} saved context items
+              {d.storage.sessions} sessions, {d.storage.conversations} conversations, {d.storage.messages} messages, {d.storage.transcripts} transcripts, {d.storage.knowledgeDocs} documents,{" "}
+              {d.storage.contextItems} saved context items
             </dd>
             <dt>Data folder</dt>
             <dd>{d.userDataPath}</dd>

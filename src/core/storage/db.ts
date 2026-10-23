@@ -98,6 +98,18 @@ export const MIGRATIONS: string[] = [
      input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL, cost_usd REAL NOT NULL);
    CREATE INDEX idx_usage_at ON usage_ledger(at);
    ALTER TABLE sessions ADD COLUMN last_conversation_id TEXT;`,
+  // 6: durable, user-approved project memory (separate from session history)
+  `CREATE TABLE memories (
+     id TEXT PRIMARY KEY, kind TEXT NOT NULL, text TEXT NOT NULL,
+     session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL,
+     created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, last_used_at INTEGER, expires_at INTEGER);
+   CREATE INDEX idx_memories_kind ON memories(kind, updated_at);
+   CREATE VIRTUAL TABLE memories_fts USING fts5(text, content='memories', content_rowid='rowid');
+   CREATE TRIGGER memories_ai AFTER INSERT ON memories BEGIN INSERT INTO memories_fts(rowid, text) VALUES (new.rowid, new.text); END;
+   CREATE TRIGGER memories_ad AFTER DELETE ON memories BEGIN INSERT INTO memories_fts(memories_fts, rowid, text) VALUES ('delete', old.rowid, old.text); END;
+   CREATE TRIGGER memories_au AFTER UPDATE OF text ON memories BEGIN
+     INSERT INTO memories_fts(memories_fts, rowid, text) VALUES ('delete', old.rowid, old.text);
+     INSERT INTO memories_fts(rowid, text) VALUES (new.rowid, new.text); END;`,
 ];
 
 type Row = Record<string, unknown>;
@@ -184,7 +196,7 @@ export class Store {
    * old page images until a checkpoint. Run after any user-initiated deletion.
    */
   purgeDeleted() {
-    for (const t of ["messages_fts", "segments_fts", "chunks_fts"]) this.db.exec(`INSERT INTO ${t}(${t}) VALUES('optimize')`);
+    for (const t of ["messages_fts", "segments_fts", "chunks_fts", "memories_fts"]) this.db.exec(`INSERT INTO ${t}(${t}) VALUES('optimize')`);
     this.db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
   }
 
@@ -294,9 +306,7 @@ export class Store {
 
   /** Last conversation the user had open in a session, if it still exists and belongs to it. */
   getLastConversation(sessionId: string): string | null {
-    const r = this.db
-      .prepare("SELECT c.id FROM sessions s JOIN conversations c ON c.id = s.last_conversation_id AND c.session_id = s.id WHERE s.id = ?")
-      .get(sessionId) as Row | undefined;
+    const r = this.db.prepare("SELECT c.id FROM sessions s JOIN conversations c ON c.id = s.last_conversation_id AND c.session_id = s.id WHERE s.id = ?").get(sessionId) as Row | undefined;
     return r ? String(r.id) : null;
   }
 
@@ -333,9 +343,7 @@ export class Store {
 
   listContextItems(sessionId?: string): PersistedContextItem[] {
     const rows = (
-      sessionId
-        ? this.db.prepare("SELECT * FROM context_items WHERE session_id = ? ORDER BY created_at").all(sessionId)
-        : this.db.prepare("SELECT * FROM context_items ORDER BY created_at").all()
+      sessionId ? this.db.prepare("SELECT * FROM context_items WHERE session_id = ? ORDER BY created_at").all(sessionId) : this.db.prepare("SELECT * FROM context_items ORDER BY created_at").all()
     ) as Row[];
     return rows.map((r) => ({
       id: String(r.id),
@@ -365,9 +373,7 @@ export class Store {
   }
 
   getConversation(id: string): Conversation | null {
-    const r = this.db
-      .prepare("SELECT c.*, (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id) AS n FROM conversations c WHERE id = ?")
-      .get(id) as Row | undefined;
+    const r = this.db.prepare("SELECT c.*, (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id) AS n FROM conversations c WHERE id = ?").get(id) as Row | undefined;
     return r ? toConversation(r) : null;
   }
 
@@ -465,9 +471,7 @@ export class Store {
 
   /** Workspace session that owns a transcript segment (for authorization checks). */
   segmentOwner(segmentId: string): string | null {
-    const r = this.db
-      .prepare("SELECT s.session_id FROM transcript_segments g JOIN transcript_sessions s ON s.id = g.session_id WHERE g.id = ?")
-      .get(segmentId) as Row | undefined;
+    const r = this.db.prepare("SELECT s.session_id FROM transcript_segments g JOIN transcript_sessions s ON s.id = g.session_id WHERE g.id = ?").get(segmentId) as Row | undefined;
     return r ? String(r.session_id) : null;
   }
 
@@ -514,10 +518,7 @@ export class Store {
     return r ? toDoc(r) : null;
   }
 
-  addKnowledgeDoc(
-    input: { title: string; source: string; chunks: string[]; sessionId?: string | null; format?: string; hash?: string },
-    now = Date.now(),
-  ): KnowledgeDoc {
+  addKnowledgeDoc(input: { title: string; source: string; chunks: string[]; sessionId?: string | null; format?: string; hash?: string }, now = Date.now()): KnowledgeDoc {
     const id = randomUUID();
     const chars = input.chunks.reduce((s, c) => s + c.length, 0);
     const sessionId = input.sessionId ?? null;
@@ -550,6 +551,66 @@ export class Store {
   }
 
   /** BM25-ranked knowledge passages visible to `sessionId` (global + that session's documents only). */
+  // ---------------- project memory ----------------
+
+  addMemory(m: { kind: MemoryKind; text: string; sessionId: string | null; expiresAt: number | null }, now = Date.now()): MemoryItem {
+    const id = randomUUID();
+    this.db
+      .prepare("INSERT INTO memories (id, kind, text, session_id, created_at, updated_at, last_used_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, NULL, ?)")
+      .run(id, m.kind, m.text, m.sessionId, now, now, m.expiresAt);
+    return this.getMemory(id)!;
+  }
+
+  getMemory(id: string): MemoryItem | null {
+    const r = this.db.prepare("SELECT * FROM memories WHERE id = ?").get(id) as Row | undefined;
+    return r ? toMemory(r) : null;
+  }
+
+  listMemories(now = Date.now()): MemoryItem[] {
+    return (this.db.prepare("SELECT * FROM memories WHERE expires_at IS NULL OR expires_at > ? ORDER BY kind, updated_at DESC").all(now) as Row[]).map(toMemory);
+  }
+
+  updateMemory(id: string, patch: { text?: string; kind?: MemoryKind; expiresAt?: number | null }, now = Date.now()): MemoryItem | null {
+    const cur = this.getMemory(id);
+    if (!cur) return null;
+    this.db
+      .prepare("UPDATE memories SET text = ?, kind = ?, expires_at = ?, updated_at = ? WHERE id = ?")
+      .run(patch.text ?? cur.text, patch.kind ?? cur.kind, patch.expiresAt === undefined ? cur.expiresAt : patch.expiresAt, now, id);
+    if (patch.text !== undefined && patch.text !== cur.text) this.purgeDeleted();
+    return this.getMemory(id);
+  }
+
+  deleteMemory(id: string): boolean {
+    const ok = Number(this.db.prepare("DELETE FROM memories WHERE id = ?").run(id).changes) > 0;
+    if (ok) this.purgeDeleted();
+    return ok;
+  }
+
+  /** Full-text match over active memories, most relevant first. */
+  searchMemories(query: string, limit: number, now = Date.now()): MemoryItem[] {
+    const q = toRetrievalQuery(query);
+    if (!q) return [];
+    return (
+      this.db
+        .prepare(
+          `SELECT m.* FROM memories_fts f JOIN memories m ON m.rowid = f.rowid
+           WHERE memories_fts MATCH ? AND (m.expires_at IS NULL OR m.expires_at > ?) ORDER BY bm25(memories_fts) LIMIT ?`,
+        )
+        .all(q, now, limit) as Row[]
+    ).map(toMemory);
+  }
+
+  touchMemories(ids: string[], now = Date.now()) {
+    const st = this.db.prepare("UPDATE memories SET last_used_at = ? WHERE id = ?");
+    for (const id of ids) st.run(now, id);
+  }
+
+  sweepMemories(now = Date.now()): number {
+    const n = Number(this.db.prepare("DELETE FROM memories WHERE expires_at IS NOT NULL AND expires_at <= ?").run(now).changes);
+    if (n) this.purgeDeleted();
+    return n;
+  }
+
   searchKnowledge(query: string, sessionId: string | null, limit = 6): KnowledgeHit[] {
     const q = toRetrievalQuery(query);
     if (!q) return [];
@@ -628,9 +689,7 @@ export class Store {
       conversations = Number(this.db.prepare("DELETE FROM conversations WHERE updated_at < ?").run(now - conversationDays * 86_400_000).changes);
     }
     if (transcriptDays > 0) {
-      transcripts = Number(
-        this.db.prepare("DELETE FROM transcript_sessions WHERE COALESCE(ended_at, started_at) < ?").run(now - transcriptDays * 86_400_000).changes,
-      );
+      transcripts = Number(this.db.prepare("DELETE FROM transcript_sessions WHERE COALESCE(ended_at, started_at) < ?").run(now - transcriptDays * 86_400_000).changes);
     }
     const context = this.deleteExpiredContext(now);
     if (conversations || transcripts || context) this.purgeDeleted();
@@ -646,6 +705,7 @@ export class Store {
       transcripts: n("SELECT COUNT(*) AS n FROM transcript_sessions"),
       knowledgeDocs: n("SELECT COUNT(*) AS n FROM knowledge_docs"),
       contextItems: n("SELECT COUNT(*) AS n FROM context_items"),
+      memories: n("SELECT COUNT(*) AS n FROM memories"),
     };
   }
 
@@ -660,7 +720,7 @@ export class Store {
 
   deleteAll() {
     this.db.exec(
-      "BEGIN; DELETE FROM sessions; DELETE FROM conversations; DELETE FROM transcript_sessions; DELETE FROM knowledge_docs; DELETE FROM meeting_insights; DELETE FROM context_items; COMMIT;",
+      "BEGIN; DELETE FROM sessions; DELETE FROM conversations; DELETE FROM transcript_sessions; DELETE FROM knowledge_docs; DELETE FROM meeting_insights; DELETE FROM context_items; DELETE FROM memories; COMMIT;",
     );
     this.purgeDeleted();
     this.db.exec("VACUUM");
@@ -724,4 +784,30 @@ function safeJson<T>(s: string, fallback: T): T {
   } catch {
     return fallback;
   }
+}
+
+export type MemoryKind = "preference" | "convention" | "architecture" | "decision" | "known_issue" | "task";
+
+export interface MemoryItem {
+  id: string;
+  kind: MemoryKind;
+  text: string;
+  sessionId: string | null;
+  createdAt: number;
+  updatedAt: number;
+  lastUsedAt: number | null;
+  expiresAt: number | null;
+}
+
+function toMemory(r: Row): MemoryItem {
+  return {
+    id: String(r.id),
+    kind: String(r.kind) as MemoryKind,
+    text: String(r.text),
+    sessionId: r.session_id == null ? null : String(r.session_id),
+    createdAt: Number(r.created_at),
+    updatedAt: Number(r.updated_at),
+    lastUsedAt: r.last_used_at == null ? null : Number(r.last_used_at),
+    expiresAt: r.expires_at == null ? null : Number(r.expires_at),
+  };
 }

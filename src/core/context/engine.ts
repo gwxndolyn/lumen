@@ -1,12 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type {
-  ContextItemSummary,
-  ContextPermission,
-  ContextReference,
-  ContextSource,
-  Sensitivity,
-  SourceAvailability,
-} from "../../shared/types";
+import type { ContextItemSummary, ContextPermission, ContextReference, ContextSource, Sensitivity, SourceAvailability } from "../../shared/types";
 import type { PersistedContextItem, Store } from "../storage/db";
 import { looksLikeInjection } from "./injection";
 import { classify, redact } from "./sensitivity";
@@ -79,6 +72,8 @@ export interface PreparedContext {
   ranked: Ranked[];
   availability: SourceAvailability;
   prepMs: number;
+  /** Candidates looked at, before the relevance cut. */
+  considered: number;
 }
 
 /**
@@ -296,9 +291,7 @@ export class ContextEngine {
 
   /** Items of one session, newest first, excluding expired ones. */
   list(sessionId: string): ContextRecord[] {
-    return [...this.items.values()]
-      .filter((r) => r.sessionId === sessionId && !this.isExpired(r))
-      .sort((a, b) => b.createdAt - a.createdAt);
+    return [...this.items.values()].filter((r) => r.sessionId === sessionId && !this.isExpired(r)).sort((a, b) => b.createdAt - a.createdAt);
   }
 
   /** Usable items: in this session, enabled, confirmed, not expired, and still permitted. */
@@ -337,12 +330,7 @@ export class ContextEngine {
    * enforced here: only records whose sessionId matches are ever considered, and externally
    * supplied candidates (knowledge, history, transcript) must already be scoped by the caller.
    */
-  prepare(
-    sessionId: string,
-    question: string,
-    extra: Candidate[],
-    opts: { sendImages: boolean; minScore?: number } = { sendImages: true },
-  ): PreparedContext {
+  prepare(sessionId: string, question: string, extra: Candidate[], opts: { sendImages: boolean; minScore?: number } = { sendImages: true }): PreparedContext {
     const started = performance.now();
     const own: Candidate[] = this.active(sessionId).map((r) => ({
       id: r.id,
@@ -370,8 +358,9 @@ export class ContextEngine {
       notes: count((c) => c.kind === "note" || c.kind === "clipboard" || c.kind === "selected_text"),
       knowledge: count((c) => c.kind === "knowledge"),
       history: count((c) => c.kind === "history"),
+      memory: count((c) => c.kind === "memory"),
     };
-    return { ranked: sanitized, availability, prepMs: Math.round((performance.now() - started) * 10) / 10 };
+    return { ranked: sanitized, availability, prepMs: Math.round((performance.now() - started) * 10) / 10, considered: usable.length + extra.length };
   }
 
   /** Keep each session bounded: evict the oldest unpinned items beyond the cap. */

@@ -8,7 +8,7 @@ case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*) APP=$(ls release/win-unpacked/Lumen.exe) ;;
   *) APP=$(ls release/linux-unpacked/lumen-assistant 2>/dev/null || ls release/linux-unpacked/* | head -1) ;;
 esac
-PROFILE="$(mktemp -d)"
+PROFILE="$(mktemp -d "${TMPDIR:-/tmp}/lumen-smoke.XXXXXX")"
 node scripts/standins.mjs > "$PROFILE/standins.json" &
 STANDIN_PID=$!
 trap 'kill $STANDIN_PID 2>/dev/null || true' EXIT

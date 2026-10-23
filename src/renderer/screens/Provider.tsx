@@ -62,7 +62,23 @@ function KeyField({ name, label, present, onChange, hint, optional }: { name: Se
 }
 
 /** Text/number input that validates and saves on blur or Enter, not on every keystroke. */
-function CommitField({ id, value, onCommit, type = "text", min, max, suffix }: { id: string; value: string; onCommit: (v: string) => Promise<void>; type?: "text" | "number"; min?: number; max?: number; suffix?: string }) {
+function CommitField({
+  id,
+  value,
+  onCommit,
+  type = "text",
+  min,
+  max,
+  suffix,
+}: {
+  id: string;
+  value: string;
+  onCommit: (v: string) => Promise<void>;
+  type?: "text" | "number";
+  min?: number;
+  max?: number;
+  suffix?: string;
+}) {
   const [draft, setDraft] = useState(value);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => setDraft(value), [value]);
@@ -85,7 +101,17 @@ function CommitField({ id, value, onCommit, type = "text", min, max, suffix }: {
   return (
     <div className="col" style={{ gap: 4 }}>
       <div className="row">
-        <input id={id} className="input" type={type} min={min} max={max} value={draft} onChange={(e) => setDraft(e.target.value)} onBlur={() => void commit()} onKeyDown={(e) => e.key === "Enter" && void commit()} />
+        <input
+          id={id}
+          className="input"
+          type={type}
+          min={min}
+          max={max}
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={() => void commit()}
+          onKeyDown={(e) => e.key === "Enter" && void commit()}
+        />
         {suffix && <span className="small muted">{suffix}</span>}
       </div>
       {error && <div className="alert error small">{error}</div>}
@@ -128,7 +154,8 @@ export function ProviderScreen({ settings, update }: Props) {
         )}
         {secrets && secrets.unreadable.length > 0 && (
           <div className="alert warning small" style={{ marginBottom: 12 }}>
-            Some saved keys could not be decrypted ({secrets.unreadable.join(", ")}). This happens if the OS keychain was reset or your profile was copied from another computer. Enter them again below.
+            Some saved keys could not be decrypted ({secrets.unreadable.join(", ")}). This happens if the OS keychain was reset or your profile was copied from another computer. Enter them again
+            below.
           </div>
         )}
         {test && test !== "running" && (
@@ -159,7 +186,13 @@ export function ProviderScreen({ settings, update }: Props) {
           </div>
           {p.kind === "anthropic" && secrets && (
             <>
-              <KeyField name="anthropic" label="Anthropic API key" present={secrets.anthropic} onChange={setSecrets} hint="Stored encrypted with your OS keychain and only used by the app's main process. Create one at console.anthropic.com." />
+              <KeyField
+                name="anthropic"
+                label="Anthropic API key"
+                present={secrets.anthropic}
+                onChange={setSecrets}
+                hint="Stored encrypted with your OS keychain and only used by the app's main process. Create one at console.anthropic.com."
+              />
               <div className="field">
                 <label htmlFor="model">Model</label>
                 <select id="model" className="select" value={p.model} onChange={(e) => void update({ provider: { model: e.target.value } })}>
@@ -247,17 +280,63 @@ export function ProviderScreen({ settings, update }: Props) {
                     Estimated from token usage (Anthropic, OpenAI and Gemini list prices where known). 0 = no limit. Today: {spend ? usd(spend.costUsd) : "—"} across {spend?.requests ?? 0} requests.
                   </div>
                 </div>
-                <CommitField id="spend" type="number" min={0} max={10000} suffix="USD / day" value={String(p.dailySpendLimitUsd)} onCommit={(v) => update({ provider: { dailySpendLimitUsd: Number(v) } })} />
+                <CommitField
+                  id="spend"
+                  type="number"
+                  min={0}
+                  max={10000}
+                  suffix="USD / day"
+                  value={String(p.dailySpendLimitUsd)}
+                  onCommit={(v) => update({ provider: { dailySpendLimitUsd: Number(v) } })}
+                />
               </div>
+              {p.kind === "anthropic" && (
+                <div className="field">
+                  <div>
+                    <div className="label">Economy routing</div>
+                    <div className="hint">
+                      For quick general questions, use a cheaper Claude model than the one selected above. Stays with Anthropic: Lumen never switches to a different provider. Coding, debugging, design
+                      and deep answers always use your selected model. Answers show “(economy)” when this applies.
+                    </div>
+                  </div>
+                  <Segmented
+                    label="Economy routing"
+                    value={p.routing}
+                    options={[
+                      { value: "off", label: "Off" },
+                      { value: "economy", label: "Economy" },
+                    ]}
+                    onChange={(v) => void update({ provider: { routing: v } })}
+                  />
+                </div>
+              )}
               {p.kind !== "anthropic" && (
                 <div className="field">
                   <div>
                     <div className="label">Price for this model</div>
-                    <div className="hint">Lumen only ships Anthropic prices. Enter your provider's current USD price per million tokens so cost estimates and the spend limit work; leave empty for “unknown”.</div>
+                    <div className="hint">
+                      Lumen only ships Anthropic prices. Enter your provider's current USD price per million tokens so cost estimates and the spend limit work; leave empty for “unknown”.
+                    </div>
                   </div>
                   <div className="row">
-                    <CommitField id="pin" type="number" min={0} max={1000} suffix="in" value={p.customPrice ? String(p.customPrice.input) : ""} onCommit={(v) => update({ provider: { customPrice: v === "" ? null : { input: Number(v), output: p.customPrice?.output ?? 0 } } })} />
-                    <CommitField id="pout" type="number" min={0} max={1000} suffix="out" value={p.customPrice ? String(p.customPrice.output) : ""} onCommit={(v) => update({ provider: { customPrice: v === "" ? null : { input: p.customPrice?.input ?? 0, output: Number(v) } } })} />
+                    <CommitField
+                      id="pin"
+                      type="number"
+                      min={0}
+                      max={1000}
+                      suffix="in"
+                      value={p.customPrice ? String(p.customPrice.input) : ""}
+                      onCommit={(v) => update({ provider: { customPrice: v === "" ? null : { input: Number(v), output: p.customPrice?.output ?? 0 } } })}
+                    />
+                    <CommitField
+                      id="pout"
+                      type="number"
+                      min={0}
+                      max={1000}
+                      suffix="out"
+                      value={p.customPrice ? String(p.customPrice.output) : ""}
+                      onCommit={(v) => update({ provider: { customPrice: v === "" ? null : { input: p.customPrice?.input ?? 0, output: Number(v) } } })}
+                    />
                   </div>
                 </div>
               )}
@@ -273,14 +352,30 @@ export function ProviderScreen({ settings, update }: Props) {
                   <label htmlFor="timeout">Request timeout</label>
                   <div className="hint">Maximum time for one answer.</div>
                 </div>
-                <CommitField id="timeout" type="number" min={5} max={600} suffix="seconds" value={String(Math.round(p.timeoutMs / 1000))} onCommit={(v) => update({ provider: { timeoutMs: Math.round(Number(v)) * 1000 } })} />
+                <CommitField
+                  id="timeout"
+                  type="number"
+                  min={5}
+                  max={600}
+                  suffix="seconds"
+                  value={String(Math.round(p.timeoutMs / 1000))}
+                  onCommit={(v) => update({ provider: { timeoutMs: Math.round(Number(v)) * 1000 } })}
+                />
               </div>
               <div className="field">
                 <div>
                   <label htmlFor="idle">Stall timeout</label>
                   <div className="hint">If the stream goes silent this long, Lumen aborts it and retries (only if nothing was shown yet).</div>
                 </div>
-                <CommitField id="idle" type="number" min={5} max={300} suffix="seconds" value={String(Math.round(p.idleTimeoutMs / 1000))} onCommit={(v) => update({ provider: { idleTimeoutMs: Math.round(Number(v)) * 1000 } })} />
+                <CommitField
+                  id="idle"
+                  type="number"
+                  min={5}
+                  max={300}
+                  suffix="seconds"
+                  value={String(Math.round(p.idleTimeoutMs / 1000))}
+                  onCommit={(v) => update({ provider: { idleTimeoutMs: Math.round(Number(v)) * 1000 } })}
+                />
               </div>
             </>
           )}
@@ -301,7 +396,13 @@ export function ProviderScreen({ settings, update }: Props) {
             />
           </div>
           {secrets && settings.transcription.kind === "deepgram" && (
-            <KeyField name="deepgram" label="Deepgram API key" present={secrets.deepgram} onChange={setSecrets} hint="Used for live transcription. Audio is streamed to Deepgram over TLS and is not stored by Lumen." />
+            <KeyField
+              name="deepgram"
+              label="Deepgram API key"
+              present={secrets.deepgram}
+              onChange={setSecrets}
+              hint="Used for live transcription. Audio is streamed to Deepgram over TLS and is not stored by Lumen."
+            />
           )}
           <div className="field">
             <div>
@@ -316,7 +417,8 @@ export function ProviderScreen({ settings, update }: Props) {
           <h3>Data handling</h3>
           <p className="small muted">
             When you ask a question, Lumen sends your question, the context you attached to the active session and the most relevant retrieved passages to the selected provider (
-            {p.kind === "anthropic" ? "api.anthropic.com" : p.kind === "openai_compat" ? safeHost(p.openaiCompat.baseUrl) : "nowhere — development mode"}). During a live transcript, audio streams to api.deepgram.com. {settings.privacy.redactSensitive ? "Detected secrets (card numbers, API keys, passwords) are masked first. " : ""}Lumen has no telemetry.
+            {p.kind === "anthropic" ? "api.anthropic.com" : p.kind === "openai_compat" ? safeHost(p.openaiCompat.baseUrl) : "nowhere — development mode"}). During a live transcript, audio streams to
+            api.deepgram.com. {settings.privacy.redactSensitive ? "Detected secrets (card numbers, API keys, passwords) are masked first. " : ""}Lumen has no telemetry.
           </p>
         </div>
       </div>
