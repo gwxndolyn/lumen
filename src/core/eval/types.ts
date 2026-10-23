@@ -240,6 +240,17 @@ export interface EvalRun {
   summary: RunSummary;
   metricDefinitions: Record<Metric, string>;
   limitations: string[];
+  /** Hardware and runtime conditions, so local benchmarks can be interpreted and reproduced. */
+  environment?: {
+    os: string;
+    cpu: string;
+    cpuCount: number;
+    memoryGb: number;
+    location: "none" | "local" | "cloud";
+    runtimeVersion?: string | null;
+    /** Models the local runtime held in memory after the run (size = RAM/VRAM footprint). */
+    loadedModels?: { name: string; sizeBytes: number; vramBytes: number }[];
+  };
   /** Set when the run is one variant of an experiment. */
   experiment?: { id: string; name: string; variant: string };
 }

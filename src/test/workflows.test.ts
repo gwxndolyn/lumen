@@ -28,7 +28,10 @@ describe("A. question → streaming answer → user cancels", () => {
     const cancelled = h.chat.at(-1) as Extract<ChatEvent, { type: "cancelled" }>;
     const stored = h.store.getMessage(cancelled.partialMessageId!)!;
     expect(stored.meta.cancelled).toBe(true);
-    const deltas = h.chat.filter((e) => e.type === "delta").map((e) => (e as { text: string }).text).join("");
+    const deltas = h.chat
+      .filter((e) => e.type === "delta")
+      .map((e) => (e as { text: string }).text)
+      .join("");
     expect(stored.content).toBe(deltas);
     expect(h.core.metrics.snapshot().requests[0]!.outcome).toBe("cancelled");
   });
@@ -359,7 +362,7 @@ describe("G. provider disconnects → error → reconnection without corrupting 
       ["assistant", "Recovered answer"],
     ]);
     // Consecutive user turns are merged so the API still receives alternating roles.
-    const roles = ((h.calls.at(-1)!.body as { messages: { role: string }[] }).messages).map((m) => m.role);
+    const roles = (h.calls.at(-1)!.body as { messages: { role: string }[] }).messages.map((m) => m.role);
     expect(roles).toEqual(["user"]);
   });
 
@@ -378,8 +381,17 @@ describe("G. provider disconnects → error → reconnection without corrupting 
     expect(JSON.stringify((h.calls.at(-1)!.body as { messages: unknown }).messages)).not.toContain("part ial");
   });
 
-  it("a stalled stream is aborted by the watchdog and retried", async () => {
+  it("a stalled stream is aborted by the watchdog and, by default, not resent (it may have been billed)", async () => {
     const h = harness({ settings: { provider: { idleTimeoutMs: 5000 } }, turns: [{ stallAfter: 0, text: ["never"] }, { text: ["ok"] }] });
+    h.core.settings = { ...h.core.settings, provider: { ...h.core.settings.provider, idleTimeoutMs: 60 } };
+    const evts = await h.ask("Q");
+    expect(evts.some((e) => e.type === "retrying")).toBe(false);
+    expect(evts.at(-1)).toMatchObject({ type: "error", code: "timeout", retryable: true });
+    expect(h.calls).toHaveLength(1);
+  });
+
+  it("a stalled stream is retried when the user allows retrying timeouts", async () => {
+    const h = harness({ settings: { provider: { idleTimeoutMs: 5000 }, limits: { retryTimeouts: true } }, turns: [{ stallAfter: 0, text: ["never"] }, { text: ["ok"] }] });
     h.core.settings = { ...h.core.settings, provider: { ...h.core.settings.provider, idleTimeoutMs: 60 } };
     const evts = await h.ask("Q");
     expect(evts.some((e) => e.type === "retrying")).toBe(true);

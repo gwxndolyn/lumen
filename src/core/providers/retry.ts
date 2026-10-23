@@ -7,9 +7,18 @@ export interface RetryOptions {
   /** Injected for tests. */
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
   random?: () => number;
+  /** false: a timeout is never retried (its completion is uncertain). Default true. */
+  retryTimeouts?: boolean;
 }
 
 export const DEFAULT_RETRY: RetryOptions = { maxAttempts: 4, baseDelayMs: 800, maxDelayMs: 12_000 };
+
+/** The adapter's retry options narrowed by the caller's policy (never widened). */
+export function retryFor(base: RetryOptions, req: { retryPolicy?: { maxAttempts: number; retryTimeouts: boolean } }): RetryOptions {
+  const p = req.retryPolicy;
+  if (!p) return base;
+  return { ...base, maxAttempts: Math.max(1, Math.min(base.maxAttempts, p.maxAttempts)), retryTimeouts: p.retryTimeouts };
+}
 
 export function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -55,7 +64,7 @@ export async function withRetry<T>(
       return { value, retries: attempt - 1 };
     } catch (err) {
       if (signal.aborted || err instanceof CancelledError) throw new CancelledError();
-      const retryable = err instanceof ProviderError && err.retryable && !started;
+      const retryable = err instanceof ProviderError && err.retryable && !started && !(err.code === "timeout" && opts.retryTimeouts === false);
       if (!retryable || attempt >= opts.maxAttempts) throw err;
       const delay = backoffDelay(attempt, opts, err.retryAfterMs);
       onRetry?.(attempt, delay, err.message);

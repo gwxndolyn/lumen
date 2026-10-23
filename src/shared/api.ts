@@ -36,6 +36,14 @@ import type { EvalEvent, EvalService, StartRequest as EvalStartRequest } from ".
 import type { EvalRun, RunListItem } from "../core/eval/types";
 import type { RunComparison } from "../core/eval/compare";
 
+import type { LocalState } from "../core/inference/local";
+import type { EmbeddingIndexState } from "../core/inference/embeddings";
+import type { LoadedModel } from "../core/providers/ollama";
+import type { BudgetStatus, UsageService } from "../core/inference/usage";
+import type { CacheStats } from "../core/inference/cache";
+
+export type UsageRow = ReturnType<UsageService["report"]>[number];
+export type { LocalState, EmbeddingIndexState, LoadedModel, BudgetStatus, CacheStats };
 type EvalCatalog = ReturnType<EvalService["catalog"]>;
 type EvalEstimate = ReturnType<EvalService["estimate"]>;
 
@@ -203,6 +211,16 @@ export interface LumenApi {
   deleteMemory(id: string): Promise<void>;
   /** Save a support file (technical metadata + log tail, no content). Returns the path or null if cancelled. */
   saveSupportBundle(): Promise<string | null>;
+
+  // Hybrid inference (local runtime is contacted on loopback only; nothing is ever downloaded)
+  localStatus(): Promise<LocalState & { embeddingIndex: EmbeddingIndexState }>;
+  localLoaded(): Promise<LoadedModel[]>;
+  localBuildIndex(rebuild: boolean): Promise<{ added: number; state: EmbeddingIndexState }>;
+  localStopIndex(): Promise<void>;
+  localClearIndex(): Promise<void>;
+  usageReport(days: number): Promise<{ rows: UsageRow[]; budget: BudgetStatus }>;
+  cacheStats(): Promise<CacheStats>;
+  cacheClear(): Promise<void>;
 
   // Evaluation Lab
   evalCatalog(): Promise<EvalCatalog>;

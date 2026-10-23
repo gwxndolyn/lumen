@@ -447,6 +447,18 @@ function ResultsPanel({
               <dd>
                 {shown.config.contextBudgetChars.toLocaleString()} chars · {shown.config.verification ? "on" : "off"}
               </dd>
+              {shown.environment && shown.config.mode === "live" && (
+                <>
+                  <dt>Environment</dt>
+                  <dd>
+                    {shown.environment.location} · {shown.environment.os} · {shown.environment.cpu} ×{shown.environment.cpuCount} · {shown.environment.memoryGb} GB RAM
+                    {shown.environment.runtimeVersion ? ` · Ollama ${shown.environment.runtimeVersion}` : ""}
+                    {shown.environment.loadedModels?.length
+                      ? ` · in memory: ${shown.environment.loadedModels.map((m) => `${m.name} ${(m.sizeBytes / 1e9).toFixed(1)} GB${m.vramBytes ? ` (${(m.vramBytes / 1e9).toFixed(1)} GB GPU)` : ""}`).join(", ")}`
+                      : ""}
+                  </dd>
+                </>
+              )}
               <dt>Benchmark / repeats</dt>
               <dd>
                 v{shown.benchmarkVersion} · {shown.config.repeat}×

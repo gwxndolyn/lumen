@@ -21,6 +21,15 @@ Note: vitest and the smoke run need to write to `node_modules/.vite-temp`; under
 
 **Next:** run `npm run eval:live -- --yes --max-cost 1` with a key, then set it as the baseline (LUM-011). Add a budget-sensitive case.
 
+## Prompt 9: hybrid local/cloud inference (2026-10-23, committed)
+
+- `providers/ollama.ts`: native Ollama API adapter (loopback only; discovery, capabilities, context length, streaming, cancel, timeouts, embeddings). Never downloads models.
+- `inference/hybrid.ts`: routing (manual / local first / cloud first) + privacy restriction + policy-only fallback. `inference/usage.ts`: ledger with reported/estimated and cost basis, per-session cost/request limits, concurrency, worst-case pre-check. `inference/cache.ts`: in-memory response cache (off by default). `inference/embeddings.ts`: optional local semantic search, one model per index.
+- Migration 7. Timeouts are no longer retried by default (behaviour change; test updated). Settings UI in AI provider. Eval runs can target the local model and record hardware/memory. Docs: `docs/LOCAL_AI.md`.
+- **Not verified against a real Ollama** (not installed here): all local tests use a stand-in speaking the documented wire format.
+
+**Next:** Prompt 10 (feedback, quality analytics, improvement proposals, release gate) — not started.
+
 ## How to resume (any session, no chat history needed)
 
 1. `cd ~/Documents/lumen-assistant && git status && git log --oneline -8` — confirm you are on the branch above and the tree is clean.
@@ -52,7 +61,7 @@ Lumen is an Electron + React desktop AI assistant (macOS and Windows; Linux buil
 |---|---|
 | `npm run typecheck` | pass |
 | `npm run lint` | pass (warnings denied) |
-| `npm test` | 388 passed, 4 skipped (live-provider tests; need API keys) — 2026-10-23 |
+| `npm test` | 429 passed, 4 skipped (live-provider tests; need API keys) — 2026-10-23 |
 | `npm run audit:prod` | pass: 3 advisories, all in modules excluded from the asar |
 | `npm run format` | pass (changed files) |
 | `npm run smoke` | pass on this branch (after the error-boundary change) |

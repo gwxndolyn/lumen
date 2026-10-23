@@ -24,7 +24,7 @@ export const settingsSchema = z.object({
   theme: z.enum(["dark", "light", "system"]),
   activeSessionId: z.string().max(100).nullable(),
   provider: z.object({
-    kind: z.enum(["anthropic", "openai", "gemini", "openai_compat", "mock"]),
+    kind: z.enum(["anthropic", "openai", "gemini", "openai_compat", "ollama", "mock"]),
     model: z.string().regex(/^[a-z0-9.-]{3,64}$/),
     effort: effortEnum,
     maxTokens: z.number().int().min(256).max(64000),
@@ -123,6 +123,37 @@ export const settingsSchema = z.object({
   }),
   diagnostics: z.object({
     logLevel: z.enum(["off", "error", "info", "debug"]),
+  }),
+  inference: z.object({
+    mode: z.enum(["manual", "local_first", "cloud_first"]),
+    local: z.object({
+      baseUrl: z
+        .string()
+        .max(200)
+        .regex(/^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d{1,5})?\/?$/, "Must be a loopback address such as http://127.0.0.1:11434"),
+      model: z
+        .string()
+        .max(120)
+        .regex(/^$|^[A-Za-z0-9._:/-]+$/),
+      numCtx: z.number().int().min(2048).max(131_072),
+      embeddingModel: z
+        .string()
+        .max(120)
+        .regex(/^$|^[A-Za-z0-9._:/-]+$/),
+    }),
+    privacyRestricted: z.boolean(),
+    cloudAllowed: z.object({ screen: z.boolean(), transcript: z.boolean(), documents: z.boolean() }),
+    fallback: z.object({ cloudToLocal: z.boolean(), localToCloud: z.boolean() }),
+    responseCache: z.boolean(),
+  }),
+  limits: z.object({
+    requestsPerSession: z.number().int().min(0).max(100_000),
+    costPerSessionUsd: z.number().min(0).max(10_000),
+    warnAtPercent: z.number().int().min(10).max(100),
+    maxConcurrentRequests: z.number().int().min(1).max(10),
+    maxContextChars: z.number().int().min(4_000).max(200_000),
+    maxAttempts: z.number().int().min(1).max(6),
+    retryTimeouts: z.boolean(),
   }),
 });
 

@@ -107,7 +107,7 @@ export async function generateInsights(
   if (opts.redactSensitive ?? settings.privacy.redactSensitive) transcript = redact(transcript);
   const res = await provider.generate(
     {
-      model: activeModel(settings.provider, opts.model),
+      model: provider.kind === "ollama" ? (opts.model ?? settings.inference.local.model) : activeModel({ ...settings.provider, kind: provider.kind }, opts.model),
       system: [
         { text: BASE_SYSTEM_PROMPT, cache: true },
         { text: INSIGHTS_INSTRUCTIONS, cache: false },

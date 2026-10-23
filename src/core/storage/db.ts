@@ -110,6 +110,21 @@ export const MIGRATIONS: string[] = [
    CREATE TRIGGER memories_au AFTER UPDATE OF text ON memories BEGIN
      INSERT INTO memories_fts(memories_fts, rowid, text) VALUES ('delete', old.rowid, old.text);
      INSERT INTO memories_fts(rowid, text) VALUES (new.rowid, new.text); END;`,
+  // 7: richer usage accounting (provider, session, task, reported vs estimated) and local embeddings
+  `ALTER TABLE usage_ledger ADD COLUMN provider TEXT;
+   ALTER TABLE usage_ledger ADD COLUMN session_id TEXT;
+   ALTER TABLE usage_ledger ADD COLUMN category TEXT;
+   ALTER TABLE usage_ledger ADD COLUMN cache_read_tokens INTEGER NOT NULL DEFAULT 0;
+   ALTER TABLE usage_ledger ADD COLUMN cost_basis TEXT NOT NULL DEFAULT 'list_price';
+   ALTER TABLE usage_ledger ADD COLUMN usage_basis TEXT NOT NULL DEFAULT 'reported';
+   ALTER TABLE usage_ledger ADD COLUMN outcome TEXT NOT NULL DEFAULT 'ok';
+   ALTER TABLE usage_ledger ADD COLUMN retries INTEGER NOT NULL DEFAULT 0;
+   ALTER TABLE usage_ledger ADD COLUMN latency_ms INTEGER;
+   CREATE INDEX idx_usage_session ON usage_ledger(session_id, at);
+   CREATE TABLE chunk_embeddings (
+     chunk_id TEXT PRIMARY KEY REFERENCES knowledge_chunks(id) ON DELETE CASCADE,
+     model TEXT NOT NULL, dims INTEGER NOT NULL, vector BLOB NOT NULL, created_at INTEGER NOT NULL);
+   CREATE INDEX idx_chunk_embeddings_model ON chunk_embeddings(model, dims);`,
 ];
 
 type Row = Record<string, unknown>;
@@ -311,9 +326,122 @@ export class Store {
   }
 
   // ---- usage ledger (spend limits; no content) ----
-  recordUsage(model: string, inputTokens: number, outputTokens: number, costUsd: number, at = Date.now()) {
-    this.db.prepare("INSERT INTO usage_ledger (at, model, input_tokens, output_tokens, cost_usd) VALUES (?, ?, ?, ?, ?)").run(at, model, inputTokens, outputTokens, costUsd);
+  recordUsage(model: string, inputTokens: number, outputTokens: number, costUsd: number, at = Date.now(), extra: Partial<UsageExtra> = {}) {
+    this.db
+      .prepare(
+        `INSERT INTO usage_ledger (at, model, input_tokens, output_tokens, cost_usd, provider, session_id, category, cache_read_tokens, cost_basis, usage_basis, outcome, retries, latency_ms)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        at,
+        model,
+        inputTokens,
+        outputTokens,
+        costUsd,
+        extra.provider ?? null,
+        extra.sessionId ?? null,
+        extra.category ?? null,
+        extra.cacheReadTokens ?? 0,
+        extra.costBasis ?? "list_price",
+        extra.usageBasis ?? "reported",
+        extra.outcome ?? "ok",
+        extra.retries ?? 0,
+        extra.latencyMs ?? null,
+      );
     this.db.prepare("DELETE FROM usage_ledger WHERE at < ?").run(at - 90 * 86_400_000);
+  }
+
+  sessionUsage(sessionId: string): { costUsd: number; requests: number } {
+    const r = this.db.prepare("SELECT COALESCE(SUM(cost_usd), 0) AS c, COUNT(*) AS n FROM usage_ledger WHERE session_id = ?").get(sessionId) as Row;
+    return { costUsd: Number(r.c), requests: Number(r.n) };
+  }
+
+  /** Aggregates for the usage report: totals per provider/model and per task category. */
+  usageReport(since: number) {
+    const rows = this.db
+      .prepare(
+        `SELECT COALESCE(provider, '') AS provider, model, COALESCE(category, '') AS category, cost_basis, usage_basis, outcome,
+                COUNT(*) AS n, SUM(input_tokens) AS i, SUM(output_tokens) AS o, SUM(cache_read_tokens) AS cr, SUM(cost_usd) AS c, SUM(retries) AS rt, AVG(latency_ms) AS lat
+         FROM usage_ledger WHERE at >= ? GROUP BY provider, model, category, cost_basis, usage_basis, outcome ORDER BY c DESC`,
+      )
+      .all(since) as Row[];
+    return rows.map((r) => ({
+      provider: String(r.provider) || null,
+      model: String(r.model),
+      category: String(r.category) || null,
+      costBasis: String(r.cost_basis) as UsageExtra["costBasis"],
+      usageBasis: String(r.usage_basis) as UsageExtra["usageBasis"],
+      outcome: String(r.outcome),
+      requests: Number(r.n),
+      inputTokens: Number(r.i),
+      outputTokens: Number(r.o),
+      cacheReadTokens: Number(r.cr),
+      costUsd: Math.round(Number(r.c) * 1e6) / 1e6,
+      retries: Number(r.rt),
+      avgLatencyMs: r.lat == null ? null : Math.round(Number(r.lat)),
+    }));
+  }
+
+  // ---- local embeddings (one model per index; mixing spaces is rejected) ----
+  embeddingIndexInfo(): { model: string; dims: number; chunks: number }[] {
+    return (this.db.prepare("SELECT model, dims, COUNT(*) AS n FROM chunk_embeddings GROUP BY model, dims").all() as Row[]).map((r) => ({
+      model: String(r.model),
+      dims: Number(r.dims),
+      chunks: Number(r.n),
+    }));
+  }
+
+  chunksWithoutEmbedding(model: string, limit: number): { id: string; text: string }[] {
+    return (
+      this.db.prepare("SELECT c.id, c.text FROM knowledge_chunks c LEFT JOIN chunk_embeddings e ON e.chunk_id = c.id AND e.model = ? WHERE e.chunk_id IS NULL LIMIT ?").all(model, limit) as Row[]
+    ).map((r) => ({ id: String(r.id), text: String(r.text) }));
+  }
+
+  countChunks(): number {
+    return Number((this.db.prepare("SELECT COUNT(*) AS n FROM knowledge_chunks").get() as Row).n);
+  }
+
+  saveEmbeddings(model: string, rows: { chunkId: string; vector: Float32Array }[], now = Date.now()) {
+    const dims = rows[0]?.vector.length ?? 0;
+    const existing = this.embeddingIndexInfo();
+    if (existing.some((e) => e.model !== model || e.dims !== dims)) throw new Error("The embedding index was built with a different model. Rebuild it before adding new vectors.");
+    const ins = this.db.prepare("INSERT OR REPLACE INTO chunk_embeddings (chunk_id, model, dims, vector, created_at) VALUES (?, ?, ?, ?, ?)");
+    this.db.exec("BEGIN");
+    try {
+      for (const r of rows) {
+        if (r.vector.length !== dims) throw new Error("Embedding dimensions changed within one batch.");
+        ins.run(r.chunkId, model, dims, Buffer.from(r.vector.buffer, r.vector.byteOffset, r.vector.byteLength), now);
+      }
+      this.db.exec("COMMIT");
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      throw e;
+    }
+  }
+
+  /** Vectors for chunks visible to a session (its own and global documents). */
+  embeddingsForScope(model: string, sessionId: string | null): { chunkId: string; docId: string; title: string; text: string; vector: Float32Array }[] {
+    const scope = sessionId ? "(d.session_id IS NULL OR d.session_id = ?)" : "d.session_id IS NULL";
+    const rows = this.db
+      .prepare(
+        `SELECT e.chunk_id, e.vector, c.doc_id, c.text, d.title FROM chunk_embeddings e JOIN knowledge_chunks c ON c.id = e.chunk_id JOIN knowledge_docs d ON d.id = c.doc_id
+         WHERE e.model = ? AND ${scope}`,
+      )
+      .all(...(sessionId ? [model, sessionId] : [model])) as Row[];
+    return rows.map((r) => {
+      const b = r.vector as Uint8Array;
+      return {
+        chunkId: String(r.chunk_id),
+        docId: String(r.doc_id),
+        title: String(r.title),
+        text: String(r.text),
+        vector: new Float32Array(b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength)),
+      };
+    });
+  }
+
+  clearEmbeddings() {
+    this.db.exec("DELETE FROM chunk_embeddings");
   }
 
   spendSince(since: number): { costUsd: number; requests: number } {
@@ -720,7 +848,7 @@ export class Store {
 
   deleteAll() {
     this.db.exec(
-      "BEGIN; DELETE FROM sessions; DELETE FROM conversations; DELETE FROM transcript_sessions; DELETE FROM knowledge_docs; DELETE FROM meeting_insights; DELETE FROM context_items; DELETE FROM memories; COMMIT;",
+      "BEGIN; DELETE FROM sessions; DELETE FROM conversations; DELETE FROM transcript_sessions; DELETE FROM knowledge_docs; DELETE FROM meeting_insights; DELETE FROM context_items; DELETE FROM memories; DELETE FROM chunk_embeddings; UPDATE usage_ledger SET session_id = NULL, category = NULL; COMMIT;",
     );
     this.purgeDeleted();
     this.db.exec("VACUUM");
@@ -784,6 +912,20 @@ function safeJson<T>(s: string, fallback: T): T {
   } catch {
     return fallback;
   }
+}
+
+export interface UsageExtra {
+  provider: string | null;
+  sessionId: string | null;
+  category: string | null;
+  cacheReadTokens: number;
+  /** list_price: bundled price list; user_price: price the user entered; none: no price (cost recorded as 0, not free). */
+  costBasis: "list_price" | "user_price" | "local" | "none";
+  /** reported: token counts from the provider; estimated: counted by Lumen. */
+  usageBasis: "reported" | "estimated";
+  outcome: "ok" | "error" | "cancelled";
+  retries: number;
+  latencyMs: number | null;
 }
 
 export type MemoryKind = "preference" | "convention" | "architecture" | "decision" | "known_issue" | "task";

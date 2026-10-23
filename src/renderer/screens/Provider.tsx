@@ -5,6 +5,7 @@ import { describeTest } from "../lib/providerTest";
 import { api, errMsg, formatTime, usd } from "../lib/api";
 import { useProviderHealth } from "../lib/hooks";
 import { ProviderStatus, Segmented, Switch } from "../components/ui";
+import { HybridSettings } from "./HybridSettings";
 
 type Props = { settings: Settings; update: (p: unknown) => Promise<void> };
 
@@ -181,6 +182,7 @@ export function ProviderScreen({ settings, update }: Props) {
               <option value="openai">OpenAI</option>
               <option value="gemini">Google Gemini</option>
               <option value="openai_compat">Custom (OpenAI-compatible)</option>
+              <option value="ollama">Local model (Ollama, on this computer)</option>
               {(devMode || p.kind === "mock") && <option value="mock">Development mode (no AI)</option>}
             </select>
           </div>
@@ -271,6 +273,7 @@ export function ProviderScreen({ settings, update }: Props) {
               </div>
             </>
           )}
+          {p.kind === "ollama" && <p className="small muted">Choose the installed model under “Local model (Ollama)” below. Nothing leaves this computer.</p>}
           {p.kind !== "mock" && (
             <>
               <div className="field">
@@ -381,6 +384,8 @@ export function ProviderScreen({ settings, update }: Props) {
           )}
         </div>
 
+        <HybridSettings settings={settings} update={update} />
+
         <div className="card">
           <h3>Speech-to-text</h3>
           <div className="field">
@@ -417,8 +422,18 @@ export function ProviderScreen({ settings, update }: Props) {
           <h3>Data handling</h3>
           <p className="small muted">
             When you ask a question, Lumen sends your question, the context you attached to the active session and the most relevant retrieved passages to the selected provider (
-            {p.kind === "anthropic" ? "api.anthropic.com" : p.kind === "openai_compat" ? safeHost(p.openaiCompat.baseUrl) : "nowhere — development mode"}). During a live transcript, audio streams to
-            api.deepgram.com. {settings.privacy.redactSensitive ? "Detected secrets (card numbers, API keys, passwords) are masked first. " : ""}Lumen has no telemetry.
+            {p.kind === "anthropic"
+              ? "api.anthropic.com"
+              : p.kind === "openai_compat"
+                ? safeHost(p.openaiCompat.baseUrl)
+                : p.kind === "ollama"
+                  ? "the local model on this computer — nothing leaves it"
+                  : p.kind === "mock"
+                    ? "nowhere — development mode"
+                    : PROVIDER_INFO[p.kind].host}
+            ){settings.inference.mode !== "manual" ? ", or to the local model when hybrid routing chooses it (each answer shows where it ran)" : ""}
+            {settings.inference.privacyRestricted ? ". Privacy restriction keeps screen content, transcripts and documents on this device unless you allowed them" : ""}. During a live transcript,
+            audio streams to api.deepgram.com. {settings.privacy.redactSensitive ? "Detected secrets (card numbers, API keys, passwords) are masked first. " : ""}Lumen has no telemetry.
           </p>
         </div>
       </div>

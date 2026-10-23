@@ -8,7 +8,13 @@ import type { Metrics } from "./metrics";
 import { estimateCostUsd, hasPricing } from "./providers/pricing";
 import { toUserError } from "./errors";
 import { activeModel } from "../shared/defaults";
-import { CancelledError, ProviderError, type AIProvider, type GenerateUsage, type ProviderMessage } from "./providers/types";
+import { CancelledError, ProviderError, capabilitiesOf, type AIProvider, type GenerateRequest, type GenerateResult, type GenerateUsage, type ProviderMessage } from "./providers/types";
+import { decideRoute, protectedKindsOf, type HybridPolicy, type RouteDecision } from "./inference/hybrid";
+import type { UsageService } from "./inference/usage";
+import { responseKey, type CachedResponse, type LruCache } from "./inference/cache";
+import { mergeHits } from "./inference/embeddings";
+import { estimateTokens } from "./providers/ollama";
+import type { KnowledgeHit } from "../shared/types";
 import type { Store } from "./storage/db";
 import { planResponse, type ResponsePlan } from "./intelligence/orchestrator";
 import { routeModel } from "./intelligence/router";
@@ -45,6 +51,28 @@ export interface ChatDeps {
   retrieveMemory?: (query: string) => { id: string; kind: string; text: string; updatedAt: number }[];
   /** Pipeline variations for the Evaluation Lab. Unset in the app, which always uses the defaults. */
   overrides?: PipelineOverrides;
+  /**
+   * Hybrid local/cloud inference. When set it replaces `getProvider`: the router picks the target
+   * for each request from the user's policy and what the request contains.
+   */
+  targets?: (session: Session) => Promise<InferenceTargets>;
+  /** Central usage accounting and limits. When set it replaces `checkBudget` / `onUsage`. */
+  usage?: UsageService;
+  /** In-memory response cache (only consulted when the user enabled it). */
+  responseCache?: LruCache<CachedResponse>;
+  /** Optional semantic knowledge search (local embeddings). null = unavailable; keyword search is used. */
+  semanticKnowledge?: (query: string, sessionId: string, signal: AbortSignal) => Promise<KnowledgeHit[] | null>;
+}
+
+export interface InferenceTargets {
+  policy: HybridPolicy;
+  selectedKind: string;
+  cloud: AIProvider | null;
+  cloudLabel: string;
+  local: AIProvider | null;
+  localLabel: string;
+  /** Why the local model is not usable, when it isn't. */
+  localReason?: string;
 }
 
 export interface PipelineOverrides {
@@ -58,7 +86,7 @@ const HISTORY_CHARS = 24_000;
 const RECENT_REQUEST_IDS = 500;
 
 export class ChatService {
-  private inflight = new Map<string, { ctrl: AbortController; conversationId: string | null; sessionId: string; cancelAt?: number }>();
+  private inflight = new Map<string, { ctrl: AbortController; conversationId: string | null; sessionId: string; cancelAt?: number; release?: () => void }>();
   /** Recently seen request ids — repeated IPC events with the same id are ignored. */
   private seen = new Set<string>();
 
@@ -130,12 +158,23 @@ export class ChatService {
     try {
       const session = store.getSession(req.sessionId);
       if (!session) throw new ProviderError("This session no longer exists.", "bad_request", false);
-      this.deps.checkBudget?.();
-      const provider = this.deps.getProvider(session);
+      if (!this.deps.usage) this.deps.checkBudget?.();
+      const targets = this.deps.targets ? await this.deps.targets(session) : null;
+      // Before routing, use the provider that would serve a request with no protected context, so
+      // image handling and model labels match the likely target.
+      let provider: AIProvider | null = targets
+        ? targets.policy.mode === "local_first" || targets.selectedKind === "ollama"
+          ? (targets.local ?? targets.cloud)
+          : (targets.cloud ?? targets.local)
+        : this.deps.getProvider(session);
       if (!provider) {
+        if (targets?.selectedKind === "ollama" || (targets && targets.policy.mode !== "manual" && !targets.cloud))
+          throw new ProviderError(`No local model is ready${targets.localReason ? `: ${targets.localReason}` : ""}. Set one up in Settings → AI provider → Local model.`, "missing_credentials", false);
         throw new ProviderError("No API key is configured for the selected AI provider. Add one in Settings → AI provider, or switch to development mode.", "missing_credentials", false);
       }
-      model = provider.isMock ? "mock" : activeModel(settings.provider, session.ai.model);
+      model = provider.isMock ? "mock" : modelFor(provider, settings, session.ai.model);
+      const releaseSlot = this.deps.usage?.acquire();
+      this.inflight.get(req.requestId)!.release = releaseSlot;
 
       // ---- resolve conversation + question ----
       let question = req.text.trim();
@@ -217,7 +256,10 @@ export class ChatService {
       }
       const query = req.retrievalQuery?.trim() || (plan && plan.turn.relation !== "new" ? plan.turn.retrievalQuery : question);
       if (settings.assistant.useKnowledgeBase) {
-        for (const k of store.searchKnowledge(query, session.id)) {
+        const keyword = store.searchKnowledge(query, session.id);
+        const semantic = this.deps.semanticKnowledge ? await this.deps.semanticKnowledge(query, session.id, ctrl.signal).catch(() => null) : null;
+        if (ctrl.signal.aborted) throw new CancelledError();
+        for (const k of mergeHits(keyword, semantic)) {
           extra.push({ id: `kb:${k.chunkId}`, kind: "knowledge", title: k.title, text: k.text, createdAt: 0, sourceId: k.docId, retrieved: true });
         }
       }
@@ -241,7 +283,7 @@ export class ChatService {
       contextPrepMs = prepared.prepMs;
       const style = session.ai.style ?? req.style;
       const overrides = this.deps.overrides ?? {};
-      const budget = overrides.budget ?? DEFAULT_BUDGET;
+      const budget = overrides.budget ?? { ...DEFAULT_BUDGET, maxContextChars: settings.limits.maxContextChars, maxItemChars: Math.min(DEFAULT_BUDGET.maxItemChars, settings.limits.maxContextChars) };
       const built = buildPrompt(question, prepared.ranked, {
         mode: session.type,
         style,
@@ -283,19 +325,52 @@ export class ChatService {
       store.touchSession(session.id);
       store.setLastConversation(session.id, convId);
 
-      const configuredModel = activeModel(settings.provider, session.ai.model);
-      const route = provider.isMock
-        ? { model: configuredModel, routed: false, reason: "Development mode." }
-        : routeModel({
-            mode: settings.provider.routing,
-            providerKind: provider.kind,
-            configuredModel,
+      // ---- hybrid routing (local vs cloud), privacy enforcement ----
+      let decision: RouteDecision | null = null;
+      let fallbackProvider: AIProvider | null = null;
+      if (targets) {
+        const sent = prepared.ranked.filter((r) => built.included.includes(r.id));
+        const imageOnly = sent.some((r) => r.image && !r.text.trim());
+        const estimatedTokens = estimateTokens(built.systemBlocks.map((b) => b.text).join("") + JSON.stringify(merged) + built.userContent.map((p) => (p.type === "text" ? p.text : "")).join(""));
+        const cap = (p: AIProvider | null) => (p ? capabilitiesOf(p) : null);
+        const cloudCap = cap(targets.cloud);
+        const localCap = cap(targets.local);
+        decision = decideRoute(
+          targets.policy,
+          {
+            protectedKinds: protectedKindsOf(sent.map((r) => r.kind)),
+            needsVision: imageOnly,
+            estimatedTokens,
             category: (plan?.task.category ?? "general") as TaskCategory,
             depth: plan?.strategy.depth ?? settings.personalization.depth,
-            needsVision: userContent.some((p) => p.type === "image"),
-            estimatedInputTokens: Math.ceil((built.contextChars + question.length + chars) / 4),
-            sessionPinned: !!session.ai.model,
-          });
+          },
+          {
+            selectedKind: targets.selectedKind,
+            cloud: { ready: !!targets.cloud, vision: !!cloudCap?.vision, contextTokens: cloudCap?.contextTokens ?? null, label: targets.cloudLabel },
+            local: { ready: !!targets.local, vision: !!localCap?.vision, contextTokens: localCap?.contextTokens ?? null, label: targets.localLabel, reason: targets.localReason },
+          },
+        );
+        if (!decision.route) throw new ProviderError([decision.reason, ...decision.alternatives].join(" "), "routing_blocked", false);
+        provider = decision.route === "local" ? targets.local! : targets.cloud!;
+        fallbackProvider = decision.fallback === "local" ? targets.local : decision.fallback === "cloud" ? targets.cloud : null;
+        model = provider.isMock ? "mock" : modelFor(provider, settings, session.ai.model);
+        this.deps.log?.("info", "inference routed", { route: decision.route, mode: targets.policy.mode, fallback: decision.fallback });
+      }
+      const active: AIProvider = provider;
+      const configuredModel = modelFor(active, settings, session.ai.model);
+      const route =
+        active.isMock || active.kind === "ollama"
+          ? { model: configuredModel, routed: false, reason: "Development mode." }
+          : routeModel({
+              mode: settings.provider.routing,
+              providerKind: active.kind,
+              configuredModel,
+              category: (plan?.task.category ?? "general") as TaskCategory,
+              depth: plan?.strategy.depth ?? settings.personalization.depth,
+              needsVision: userContent.some((p) => p.type === "image"),
+              estimatedInputTokens: Math.ceil((built.contextChars + question.length + chars) / 4),
+              sessionPinned: !!session.ai.model,
+            });
       if (route.routed) {
         model = route.model;
         this.deps.log?.("info", "model routed", { from: configuredModel, to: route.model, category: plan?.task.category });
@@ -307,7 +382,8 @@ export class ChatService {
         conversationId: convId,
         userMessageId,
         references: built.references,
-        provider: { kind: provider.kind, model, isMock: provider.isMock },
+        provider: { kind: active.kind, model, isMock: active.isMock },
+        routing: decision ? { route: decision.route!, reason: decision.reason, leavesDevice: decision.leavesDevice } : undefined,
         warnings: built.warnings,
         availability: prepared.availability,
         contextPrepMs,
@@ -323,35 +399,105 @@ export class ChatService {
       });
 
       requestSentMs = Date.now() - started;
-      const result = await provider.generate(
-        {
-          model: route.model,
-          system: built.systemBlocks,
-          messages: [...merged, { role: "user", content: userContent }],
-          maxTokens: settings.provider.maxTokens,
-          effort: session.ai.effort ?? settings.provider.effort,
-          timeoutMs: settings.provider.timeoutMs,
-          idleTimeoutMs: settings.provider.idleTimeoutMs,
+      const genReq: GenerateRequest = {
+        model: route.model,
+        system: built.systemBlocks,
+        messages: [...merged, { role: "user", content: userContent }],
+        maxTokens: settings.provider.maxTokens,
+        effort: session.ai.effort ?? settings.provider.effort,
+        timeoutMs: settings.provider.timeoutMs,
+        idleTimeoutMs: settings.provider.idleTimeoutMs,
+        retryPolicy: { maxAttempts: settings.limits.maxAttempts, retryTimeouts: settings.limits.retryTimeouts },
+      };
+      const hooks = {
+        onDelta: (text: string) => {
+          if (ctrl.signal.aborted) return;
+          partial += text;
+          emit({ type: "delta", requestId: req.requestId, text });
         },
-        ctrl.signal,
-        {
-          onDelta: (text) => {
-            if (ctrl.signal.aborted) return;
-            partial += text;
-            emit({ type: "delta", requestId: req.requestId, text });
-          },
-          onRetry: (attempt, delayMs, reason) => {
-            partial = "";
-            emit({ type: "retrying", requestId: req.requestId, attempt, delayMs, reason });
-          },
+        onRetry: (attempt: number, delayMs: number, reason: string) => {
+          partial = "";
+          emit({ type: "retrying", requestId: req.requestId, attempt, delayMs, reason });
         },
-      );
+      };
+      const inputEstimate = estimateTokens(JSON.stringify(genReq.messages) + genReq.system.map((b) => b.text).join(""));
+      const useCache = settings.inference.responseCache && !!this.deps.responseCache && !active.isMock;
+      const cacheKey = useCache
+        ? responseKey({ kind: active.kind, model: genReq.model, system: genReq.system.map((b) => b.text), messages: genReq.messages, maxTokens: genReq.maxTokens, effort: genReq.effort })
+        : null;
+      const cached = cacheKey ? this.deps.responseCache!.get(cacheKey) : undefined;
+      let servedBy: AIProvider = active;
+      let fellBack = false;
+      let result: GenerateResult;
+      if (cached) {
+        hooks.onDelta(cached.text);
+        result = {
+          text: cached.text,
+          model: cached.model,
+          stopReason: cached.stopReason,
+          usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+          servedByFallback: null,
+          ttftMs: 0,
+          retries: 0,
+        };
+      } else {
+        this.deps.usage?.check({ sessionId: session.id, kind: active.kind, model: genReq.model, inputTokens: inputEstimate, maxOutputTokens: genReq.maxTokens });
+        const genStarted = Date.now();
+        try {
+          result = await active.generate(genReq, ctrl.signal, hooks);
+        } catch (first) {
+          // Policy-approved fallback only, never after text streamed, never on cancel/limit/privacy errors.
+          const pe = first instanceof ProviderError ? first : null;
+          const eligible =
+            !!fallbackProvider &&
+            !partial &&
+            !ctrl.signal.aborted &&
+            !!pe &&
+            ["network", "timeout", "overloaded", "rate_limited", "auth", "context_too_large", "missing_credentials"].includes(pe.code);
+          if (!eligible) {
+            this.recordUsage(active, genReq.model, null, session.id, plan?.task.category ?? null, first, Date.now() - genStarted);
+            throw first;
+          }
+          this.recordUsage(active, genReq.model, null, session.id, plan?.task.category ?? null, first, Date.now() - genStarted);
+          servedBy = fallbackProvider!;
+          fellBack = true;
+          const fbModel = modelFor(servedBy, settings, undefined);
+          emit({
+            type: "retrying",
+            requestId: req.requestId,
+            attempt: 1,
+            delayMs: 0,
+            reason: `${pe!.message} Trying ${servedBy.kind === "ollama" ? "the local model on this device" : `the cloud provider (${fbModel})`} as your fallback setting allows.`,
+          });
+          this.deps.usage?.check({ sessionId: session.id, kind: servedBy.kind, model: fbModel, inputTokens: inputEstimate, maxOutputTokens: genReq.maxTokens });
+          model = fbModel;
+          result = await servedBy.generate({ ...genReq, model: fbModel }, ctrl.signal, hooks);
+        }
+        if (cacheKey && result.text.trim() && result.stopReason !== "max_tokens")
+          this.deps.responseCache!.set(cacheKey, { text: result.text, model: result.model, stopReason: result.stopReason }, { tag: session.id, costMs: Date.now() - genStarted });
+      }
 
       if (!result.text.trim()) {
         throw new ProviderError("The AI returned an empty answer. Try again, or rephrase the question.", "empty_response", true);
       }
-      const cost = estimateCostUsd(result.model, result.usage, hasPricing(result.model) ? null : settings.provider.customPrice);
-      this.deps.onUsage?.(result.model, result.usage, cost);
+      let cost: number;
+      if (cached) cost = 0;
+      else if (this.deps.usage)
+        cost = this.deps.usage.record({
+          kind: servedBy.kind,
+          model: result.model,
+          usage: result.usage,
+          usageBasis: capabilitiesOf(servedBy).usage === "reported" ? "reported" : "estimated",
+          sessionId: session.id,
+          category: plan?.task.category ?? null,
+          outcome: "ok",
+          retries: result.retries,
+          latencyMs: Date.now() - started,
+        }).usd;
+      else {
+        cost = estimateCostUsd(result.model, result.usage, hasPricing(result.model) ? null : settings.provider.customPrice);
+        this.deps.onUsage?.(result.model, result.usage, cost);
+      }
       const cited = citedLabels(result.text, built.references);
       const checks =
         overrides.verification === false
@@ -380,7 +526,7 @@ export class ChatService {
         references: built.references.filter((r) => cited.includes(r.label)),
         meta: {
           model: result.model,
-          isMock: provider.isMock,
+          isMock: servedBy.isMock,
           estimatedCostUsd: cost,
           stopReason: result.stopReason,
           style,
@@ -389,6 +535,9 @@ export class ChatService {
           intent,
           verification,
           routedFrom: route.routed ? configuredModel : undefined,
+          route: decision ? (fellBack ? decision.fallback! : decision.route!) : undefined,
+          cached: cached ? true : undefined,
+          fellBack: fellBack || undefined,
         },
       });
       metrics.recordRequest({
@@ -405,7 +554,8 @@ export class ChatService {
         estimatedCostUsd: cost,
         outcome: "ok",
       });
-      if (!provider.isMock) this.deps.onProviderResult?.(true);
+      if (!servedBy.isMock && servedBy === targets?.cloud) this.deps.onProviderResult?.(true);
+      else if (!targets && !servedBy.isMock) this.deps.onProviderResult?.(true);
       emit({
         type: "done",
         requestId: req.requestId,
@@ -417,6 +567,7 @@ export class ChatService {
         citedLabels: cited,
         verification,
         routedFrom: route.routed ? configuredModel : undefined,
+        cached: cached ? true : undefined,
         usage: { inputTokens: result.usage.inputTokens, outputTokens: result.usage.outputTokens, cacheReadTokens: result.usage.cacheReadTokens, estimatedCostUsd: cost },
       });
     } catch (err) {
@@ -477,9 +628,34 @@ export class ChatService {
       if (["network", "timeout", "overloaded", "auth", "rate_limited"].includes(pe.code)) this.deps.onProviderResult?.(false, pe.code, pe.message);
       fail(pe);
     } finally {
+      this.inflight.get(req.requestId)?.release?.();
       this.inflight.delete(req.requestId);
     }
   }
+
+  /** Record a failed attempt (no tokens reported) so failure and retry rates are real. */
+  private recordUsage(p: AIProvider, model: string, usage: GenerateUsage | null, sessionId: string, category: string | null, err: unknown, latencyMs: number) {
+    if (!this.deps.usage || p.isMock) return;
+    const cancelled = err instanceof CancelledError;
+    this.deps.usage.record({
+      kind: p.kind,
+      model,
+      usage: usage ?? { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      usageBasis: "estimated",
+      sessionId,
+      category,
+      outcome: cancelled ? "cancelled" : "error",
+      retries: 0,
+      latencyMs,
+    });
+  }
+}
+
+/** Model id for whichever provider serves the request. */
+function modelFor(p: AIProvider, settings: Settings, override: string | undefined): string {
+  if (p.isMock) return "mock";
+  if (p.kind === "ollama") return settings.inference.local.model;
+  return activeModel({ ...settings.provider, kind: p.kind }, override);
 }
 
 /** Resolve when `p` settles or `signal` aborts, whichever comes first. */

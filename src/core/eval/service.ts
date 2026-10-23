@@ -30,7 +30,9 @@ export type EvalEvent = { type: "progress"; run: EvalRun } | { type: "finished";
 export interface EvalServiceDeps {
   store: EvalStore;
   getSettings: () => Settings;
-  getProvider: () => AIProvider | null;
+  /** The provider a live run measures: the selected cloud provider, or the local model ("ollama"). */
+  getProvider: () => AIProvider | null | Promise<AIProvider | null>;
+  describeLocal?: () => Promise<{ runtimeVersion: string | null; loaded: { name: string; sizeBytes: number; vramBytes: number }[] }>;
   emit: (e: EvalEvent) => void;
   cases?: EvalCase[];
 }
@@ -72,11 +74,12 @@ export class EvalService {
     const settings = this.deps.getSettings();
     const cases = this.select(req).filter((c) => !c.deterministicOnly);
     const maxOut = Math.min(req.limits?.maxOutputTokens ?? DEFAULT_LIMITS.maxOutputTokens, HARD_LIMITS.maxOutputTokens);
-    const models = req.experiment ? req.experiment.variants.map((v) => v.model ?? settings.provider.model) : [req.variant?.model ?? settings.provider.model];
+    const selected = settings.provider.kind === "ollama" ? settings.inference.local.model : settings.provider.model;
+    const models = req.experiment ? req.experiment.variants.map((v) => v.model ?? selected) : [req.variant?.model ?? selected];
     let usd = 0;
     let known = true;
     for (const m of models) {
-      const e = estimateRunCostUsd(cases, m, maxOut, req.repeat ?? 1);
+      const e = settings.provider.kind === "ollama" ? { usd: 0, known: true } : estimateRunCostUsd(cases, m, maxOut, req.repeat ?? 1);
       if (!e.known) known = false;
       usd += e.usd;
     }
@@ -99,6 +102,7 @@ export class EvalService {
       benchmarkVersion: BENCHMARK_VERSION,
       settings,
       liveProvider: this.deps.getProvider,
+      describeLocal: this.deps.describeLocal,
       repeat: req.repeat,
       limits: req.limits,
       signal: ctrl.signal,

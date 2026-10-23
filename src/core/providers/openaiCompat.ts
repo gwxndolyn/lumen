@@ -1,15 +1,6 @@
 import type { ProviderTestResult } from "../../shared/types";
-import { DEFAULT_RETRY, withRetry, type RetryOptions } from "./retry";
-import {
-  CancelledError,
-  idleWatchdog,
-  ProviderError,
-  type AIProvider,
-  type GenerateRequest,
-  type GenerateResult,
-  type ProviderMessage,
-  type StreamHooks,
-} from "./types";
+import { DEFAULT_RETRY, retryFor, withRetry, type RetryOptions } from "./retry";
+import { CancelledError, idleWatchdog, ProviderError, type AIProvider, type GenerateRequest, type GenerateResult, type ProviderMessage, type StreamHooks } from "./types";
 
 /**
  * Provider for any server speaking the OpenAI-compatible `/chat/completions` streaming protocol
@@ -151,7 +142,7 @@ export class OpenAICompatProvider implements AIProvider {
         }
       },
       signal,
-      this.retry,
+      retryFor(this.retry, req),
       hooks?.onRetry,
     );
     return { ...value, retries };
@@ -179,7 +170,12 @@ export class OpenAICompatProvider implements AIProvider {
       };
     } catch (err) {
       const timedOut = (err as Error)?.name === "TimeoutError";
-      return { ok: false, message: timedOut ? `${safeHost(this.opts.baseUrl)} did not respond within 10 seconds.` : `Cannot reach ${safeHost(this.opts.baseUrl)}.`, latencyMs: null, code: timedOut ? "timeout" : "network" };
+      return {
+        ok: false,
+        message: timedOut ? `${safeHost(this.opts.baseUrl)} did not respond within 10 seconds.` : `Cannot reach ${safeHost(this.opts.baseUrl)}.`,
+        latencyMs: null,
+        code: timedOut ? "timeout" : "network",
+      };
     }
   }
 }

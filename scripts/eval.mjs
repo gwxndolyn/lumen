@@ -7,6 +7,7 @@
 //   npm run eval -- --out run.json                save the full run
 //   npm run eval -- --baseline run.json           compare with a saved run; exit 1 on regressions
 //   npm run eval:live -- --yes --max-cost 0.50    live: ANTHROPIC_API_KEY must be set; --yes is required
+//   npm run eval:live -- --local llama3.2 --yes   live against a local Ollama model (nothing leaves the device)
 //
 // Exit codes: 0 = complete with no failures (and no regressions vs --baseline); 1 = failures,
 // regressions, or an incomplete run; 2 = usage error.
@@ -37,6 +38,8 @@ function parseArgs(argv) {
     else if (k === "--concurrency") a.concurrency = Number(v());
     else if (k === "--max-output-tokens") a.maxOut = Number(v());
     else if (k === "--model") a.model = v();
+    else if (k === "--local") a.local = v();
+    else if (k === "--ollama-url") a.ollamaUrl = v();
     else if (k === "--prompt") a.prompt = v();
     else if (k === "--budget") a.budget = Number(v());
     else if (k === "--no-verification") a.noVerification = true;
@@ -74,7 +77,20 @@ if (!cases.length) usage("no cases match the selection");
 let settings = DEFAULT_SETTINGS;
 if (args.model) settings = applySettingsPatch(settings, { provider: { model: args.model } });
 let liveProvider;
-if (args.mode === "live") {
+let describeLocal;
+if (args.mode === "live" && args.local) {
+  const { OllamaRuntime, OllamaProvider } = await core("core/providers/ollama.js");
+  const url = args.ollamaUrl ?? "http://127.0.0.1:11434";
+  const rt = new OllamaRuntime(url);
+  const st = await rt.status();
+  if (!st.available) usage(`local runtime not available: ${st.error}`);
+  const details = await rt.show(args.local).catch(() => usage(`"${args.local}" is not installed. Install it yourself with: ollama pull ${args.local}`));
+  settings = applySettingsPatch(settings, { provider: { kind: "ollama" }, inference: { local: { baseUrl: url, model: args.local } } });
+  console.log(`Local run: ${cases.filter((c) => !c.deterministicOnly).length} cases × ${args.repeat} → ${args.local} on Ollama ${st.version} (${url}). No data leaves this computer.`);
+  if (!args.yes) usage("pass --yes to start the local run");
+  liveProvider = () => new OllamaProvider({ baseUrl: url, model: args.local, numCtx: settings.inference.local.numCtx, details });
+  describeLocal = async () => ({ runtimeVersion: st.version, loaded: await rt.loaded().catch(() => []) });
+} else if (args.mode === "live") {
   const key = process.env.ANTHROPIC_API_KEY;
   if (!key) usage("live mode needs ANTHROPIC_API_KEY in the environment");
   const liveCases = cases.filter((c) => !c.deterministicOnly);
@@ -92,6 +108,7 @@ const run = await runEvaluation({
   benchmarkVersion: BENCHMARK_VERSION,
   settings,
   liveProvider,
+  describeLocal,
   repeat: args.repeat,
   limits: { maxCostUsd: args.maxCost, concurrency: args.concurrency, maxOutputTokens: args.maxOut },
   variant:
@@ -105,6 +122,10 @@ console.log(
   `${run.status.toUpperCase()}: ${c.passed} passed, ${c.failed} failed, ${c.inconclusive} inconclusive, ${c.skipped} skipped, ${c.not_run} not run · ${((Date.now() - started) / 1000).toFixed(1)} s`,
 );
 if (run.stopReason) console.log(`  ${run.stopReason}`);
+if (run.environment && run.config.mode === "live")
+  console.log(
+    `  environment: ${run.environment.os} · ${run.environment.cpu} ×${run.environment.cpuCount} · ${run.environment.memoryGb} GB RAM${run.environment.loadedModels?.length ? ` · loaded ${run.environment.loadedModels.map((m) => `${m.name} ${(m.sizeBytes / 1e9).toFixed(1)} GB`).join(", ")}` : ""}`,
+  );
 for (const [m, s] of Object.entries(run.summary.byMetric)) console.log(`  ${m.padEnd(24)} ${s.passed}/${s.total} checks`);
 if (run.config.mode === "live") console.log(`  cost ${run.summary.usage.costKnown ? `$${run.summary.usage.costUsd}` : "unknown"} · p50 total ${run.summary.latency.p50TotalMs ?? "—"} ms`);
 for (const r of run.results.filter((x) => x.status === "failed" || x.status === "inconclusive")) {

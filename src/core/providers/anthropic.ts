@@ -10,17 +10,8 @@ import Anthropic, {
   RateLimitError,
 } from "@anthropic-ai/sdk";
 import type { ProviderTestResult } from "../../shared/types";
-import { DEFAULT_RETRY, withRetry, type RetryOptions } from "./retry";
-import {
-  CancelledError,
-  idleWatchdog,
-  ProviderError,
-  type AIProvider,
-  type GenerateRequest,
-  type GenerateResult,
-  type ProviderMessage,
-  type StreamHooks,
-} from "./types";
+import { DEFAULT_RETRY, retryFor, withRetry, type RetryOptions } from "./retry";
+import { CancelledError, idleWatchdog, ProviderError, type AIProvider, type GenerateRequest, type GenerateResult, type ProviderMessage, type StreamHooks } from "./types";
 
 // Server-side refusal fallback ("default" routing by refusal category). Claude Haiku 5.5 has no
 // server-side fallback, so it is excluded.
@@ -80,7 +71,7 @@ export class AnthropicProvider implements AIProvider {
         }
       },
       signal,
-      this.retry,
+      retryFor(this.retry, req),
       hooks?.onRetry,
     );
     return { ...value, retries };
@@ -163,9 +154,7 @@ export class AnthropicProvider implements AIProvider {
 function toBetaMessage(m: ProviderMessage): BetaMessageParam {
   if (typeof m.content === "string") return { role: m.role, content: m.content };
   const content: BetaContentBlockParam[] = m.content.map((p) =>
-    p.type === "text"
-      ? { type: "text", text: p.text }
-      : { type: "image", source: { type: "base64", media_type: p.mediaType, data: p.data } },
+    p.type === "text" ? { type: "text", text: p.text } : { type: "image", source: { type: "base64", media_type: p.mediaType, data: p.data } },
   );
   return { role: m.role, content };
 }
@@ -181,18 +170,12 @@ function retryAfter(headers: Headers | undefined): number | undefined {
 export function mapError(err: unknown, signal: AbortSignal): Error {
   if (err instanceof ProviderError || err instanceof CancelledError) return err;
   if (signal.aborted || err instanceof APIUserAbortError) return new CancelledError();
-  if (err instanceof APIConnectionTimeoutError)
-    return new ProviderError("The AI provider timed out.", "timeout", true);
-  if (err instanceof APIConnectionError)
-    return new ProviderError("Cannot reach the AI provider. Check your network connection.", "network", true);
-  if (err instanceof AuthenticationError)
-    return new ProviderError("The Anthropic API key was rejected. Update it in Settings → AI provider.", "auth", false);
-  if (err instanceof PermissionDeniedError)
-    return new ProviderError("This API key does not have access to the selected model.", "auth", false);
-  if (err instanceof RateLimitError)
-    return new ProviderError("Rate limited by the AI provider.", "rate_limited", true, retryAfter(err.headers));
-  if (err instanceof NotFoundError)
-    return new ProviderError("The selected model was not found. Choose another model in Settings.", "bad_request", false);
+  if (err instanceof APIConnectionTimeoutError) return new ProviderError("The AI provider timed out.", "timeout", true);
+  if (err instanceof APIConnectionError) return new ProviderError("Cannot reach the AI provider. Check your network connection.", "network", true);
+  if (err instanceof AuthenticationError) return new ProviderError("The Anthropic API key was rejected. Update it in Settings → AI provider.", "auth", false);
+  if (err instanceof PermissionDeniedError) return new ProviderError("This API key does not have access to the selected model.", "auth", false);
+  if (err instanceof RateLimitError) return new ProviderError("Rate limited by the AI provider.", "rate_limited", true, retryAfter(err.headers));
+  if (err instanceof NotFoundError) return new ProviderError("The selected model was not found. Choose another model in Settings.", "bad_request", false);
   if (err instanceof BadRequestError) {
     const tooLarge = /too long|context|prompt is too long/i.test(err.message);
     return new ProviderError(
@@ -203,8 +186,7 @@ export function mapError(err: unknown, signal: AbortSignal): Error {
   }
   if (err instanceof APIError) {
     const status = err.status ?? 0;
-    if (status === 529 || status === 503)
-      return new ProviderError("The AI provider is overloaded.", "overloaded", true, retryAfter(err.headers));
+    if (status === 529 || status === 503) return new ProviderError("The AI provider is overloaded.", "overloaded", true, retryAfter(err.headers));
     if (status >= 500) return new ProviderError("The AI provider had a temporary error.", "overloaded", true);
     return new ProviderError(`The AI provider returned an error (${status}).`, "unknown", false);
   }

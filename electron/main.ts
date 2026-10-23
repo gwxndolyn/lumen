@@ -475,6 +475,35 @@ function registerIpc() {
   );
   handle("memory:update", (_e, mid, patch) => core.memory.update(id.parse(mid), z.object({ text: str(2000).optional(), kind: memoryKind.optional() }).parse(patch)));
   handle("memory:delete", (_e, mid) => core.memory.delete(id.parse(mid)));
+  // ---- hybrid inference: local runtime (loopback only), usage, caches, embeddings ----
+  handle("local:status", async () => {
+    await core.local.refresh();
+    const st = core.local.state();
+    const model = core.settings.inference.local.embeddingModel;
+    return { ...st, embeddingIndex: core.embeddings.state(model) };
+  });
+  handle("local:loaded", async () => {
+    const rt = core.local.runtime();
+    return rt ? rt.loaded().catch(() => []) : [];
+  });
+  let embedJob: AbortController | null = null;
+  handle("local:buildIndex", async (_e, rebuild) => {
+    if (embedJob) throw new Error("The index is already being built.");
+    embedJob = new AbortController();
+    try {
+      const added = await core.embeddings.build(core.settings.inference.local.embeddingModel, { rebuild: z.boolean().parse(rebuild), signal: embedJob.signal });
+      logger.info("embedding index built", { added });
+      return { added, state: core.embeddings.state(core.settings.inference.local.embeddingModel) };
+    } finally {
+      embedJob = null;
+    }
+  });
+  handle("local:stopIndex", () => embedJob?.abort());
+  handle("local:clearIndex", () => store.clearEmbeddings());
+  handle("usage:report", (_e, days) => ({ rows: core.usage.report(z.number().int().min(1).max(90).parse(days)), budget: core.usage.status(core.activeSessionId) }));
+  handle("cache:stats", () => core.responseCache.stats());
+  handle("cache:clear", () => core.responseCache.clear());
+
   // ---- evaluation lab (synthetic benchmark; live runs need explicit confirmation) ----
   const limitsSchema = z
     .object({
@@ -1030,7 +1059,18 @@ function startup() {
   evals = new EvalService({
     store: new EvalStore(path.join(userData, "evaluations"), os.homedir()),
     getSettings: () => core.settings,
-    getProvider: () => core.providerFor(),
+    // A live run measures the selected provider; selecting "Local model" benchmarks the local model.
+    getProvider: async () => {
+      if (core.settings.provider.kind !== "ollama") return core.providerFor();
+      await core.local.refresh();
+      return core.local.provider();
+    },
+    describeLocal: async () => {
+      const rt = core.local.runtime();
+      if (!rt) return { runtimeVersion: null, loaded: [] };
+      const st = await rt.status();
+      return { runtimeVersion: st.version, loaded: await rt.loaded().catch(() => []) };
+    },
     emit: (e) => windows?.broadcast("lumen:eval", e),
   });
   store.setKv("settings", JSON.stringify(core.settings));

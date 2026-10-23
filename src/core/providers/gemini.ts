@@ -1,5 +1,5 @@
 import type { ProviderTestResult } from "../../shared/types";
-import { DEFAULT_RETRY, withRetry, type RetryOptions } from "./retry";
+import { DEFAULT_RETRY, retryFor, withRetry, type RetryOptions } from "./retry";
 import { CancelledError, idleWatchdog, ProviderError, type AIProvider, type GenerateRequest, type GenerateResult, type StreamHooks } from "./types";
 
 const BASE = "https://generativelanguage.googleapis.com/v1beta";
@@ -27,10 +27,7 @@ export class GeminiProvider implements AIProvider {
   private body(req: GenerateRequest) {
     const contents = req.messages.map((m) => ({
       role: m.role === "assistant" ? "model" : "user",
-      parts:
-        typeof m.content === "string"
-          ? [{ text: m.content }]
-          : m.content.map((p) => (p.type === "text" ? { text: p.text } : { inline_data: { mime_type: p.mediaType, data: p.data } })),
+      parts: typeof m.content === "string" ? [{ text: m.content }] : m.content.map((p) => (p.type === "text" ? { text: p.text } : { inline_data: { mime_type: p.mediaType, data: p.data } })),
     }));
     return JSON.stringify({
       systemInstruction: { parts: [{ text: req.system.map((s) => s.text).join("\n\n") }] },
@@ -129,7 +126,7 @@ export class GeminiProvider implements AIProvider {
         }
       },
       signal,
-      this.retry,
+      retryFor(this.retry, req),
       hooks?.onRetry,
     );
     return { ...value, retries };

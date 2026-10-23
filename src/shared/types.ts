@@ -6,7 +6,7 @@ export type AssistantMode = "general" | "meeting" | "interview" | "technical" | 
 /** How a single answer should be shaped. */
 export type AnswerStyle = "quick" | "detailed" | "steps" | "suggest" | "technical" | "meeting_summary" | "follow_ups";
 export type Tone = "neutral" | "friendly" | "formal" | "confident";
-export type ProviderKind = "anthropic" | "openai" | "gemini" | "openai_compat" | "mock";
+export type ProviderKind = "anthropic" | "openai" | "gemini" | "openai_compat" | "ollama" | "mock";
 export type TranscriptionKind = "deepgram" | "none";
 export type Effort = "low" | "medium" | "high";
 export type ThemePref = "dark" | "light" | "system";
@@ -144,6 +144,51 @@ export interface Settings {
   diagnostics: {
     logLevel: LogLevel;
   };
+  /** Hybrid local/cloud inference. The cloud side is `provider`; the local side is an Ollama runtime. */
+  inference: {
+    /**
+     * manual: always use `provider.kind` (which may itself be "ollama").
+     * local_first: use the local model when it is suitable, otherwise the cloud provider.
+     * cloud_first: use the cloud provider, unless privacy or availability rules out the request.
+     */
+    mode: "manual" | "local_first" | "cloud_first";
+    local: {
+      /** Loopback URL of the Ollama runtime. */
+      baseUrl: string;
+      /** Installed model to use ("" = none chosen). */
+      model: string;
+      /** Context window requested from the runtime (tokens). Larger needs more memory. */
+      numCtx: number;
+      /** Local embedding model for semantic knowledge search ("" = keyword search only). */
+      embeddingModel: string;
+    };
+    /** When true, protected context is only sent to a cloud provider for the kinds allowed below. */
+    privacyRestricted: boolean;
+    cloudAllowed: { screen: boolean; transcript: boolean; documents: boolean };
+    fallback: {
+      /** Retry on the local model when the cloud provider fails (data stays on this device). */
+      cloudToLocal: boolean;
+      /** Retry on the cloud provider when the local model fails. Off by default: it sends data off-device. */
+      localToCloud: boolean;
+    };
+    /** Reuse an identical answer (same model, prompt and context) for 10 minutes. Kept in memory only. */
+    responseCache: boolean;
+  };
+  limits: {
+    /** 0 = no limit. */
+    requestsPerSession: number;
+    /** Estimated USD per workspace session; 0 = no limit. */
+    costPerSessionUsd: number;
+    /** Warn when an estimated budget reaches this share. */
+    warnAtPercent: number;
+    maxConcurrentRequests: number;
+    /** Characters of context sent with one question. */
+    maxContextChars: number;
+    /** Attempts per request including the first. */
+    maxAttempts: number;
+    /** Retry after a timeout (the first attempt may still have been processed and billed). */
+    retryTimeouts: boolean;
+  };
 }
 
 // ---------------- sessions ----------------
@@ -266,6 +311,8 @@ export type ChatEvent =
       userMessageId: string;
       references: ContextReference[];
       provider: { kind: ProviderKind; model: string; isMock: boolean };
+      /** Hybrid routing decision, when hybrid routing is on. */
+      routing?: { route: "local" | "cloud"; reason: string; leavesDevice: boolean };
       warnings: string[];
       availability: SourceAvailability;
       contextPrepMs: number;
@@ -287,6 +334,8 @@ export type ChatEvent =
       citedLabels: string[];
       verification: { checksRun: number; findings: { check: string; severity: "warn" | "info"; message: string }[] };
       routedFrom?: string;
+      /** Served from the in-memory response cache (no provider call). */
+      cached?: boolean;
     }
   | { type: "error"; requestId: string; message: string; code: ErrorCode; retryable: boolean; conversationId: string | null }
   | { type: "cancelled"; requestId: string; partialMessageId: string | null };
@@ -316,6 +365,8 @@ export type ErrorCode =
   | "empty_response"
   | "spend_limit"
   | "context_too_large"
+  /** Hybrid routing found no target allowed by the user's privacy and availability settings. */
+  | "routing_blocked"
   | "unknown";
 
 export interface Conversation {
@@ -347,6 +398,11 @@ export interface MessageMeta {
   verification?: { checksRun: number; findings: { check: string; severity: "warn" | "info"; message: string }[] };
   /** Set when economy routing chose a different model of the same provider. */
   routedFrom?: string;
+  /** Where hybrid routing ran it. */
+  route?: "local" | "cloud";
+  cached?: boolean;
+  /** A policy-approved fallback served this answer after the first target failed. */
+  fellBack?: boolean;
 }
 
 export interface ResponseIntent {

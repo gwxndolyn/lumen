@@ -75,6 +75,8 @@ export interface HarnessOpts {
   settings?: Partial<Record<keyof Settings, unknown>>;
   ocr?: OcrEngine | null;
   secrets?: Partial<Record<SecretName, string>>;
+  /** fetch for the local (Ollama) runtime. Defaults to "not running". */
+  localFetch?: typeof fetch;
 }
 
 /** A full AppCore wired to an in-memory DB, a fake Anthropic HTTP backend and fake STT sockets. */
@@ -100,6 +102,7 @@ export function harness(opts: HarnessOpts = {}) {
       providerFactory: () => {
         if (kind === "none") return null;
         if (kind === "mock") return new MockProvider(0);
+        if (settings.provider.kind === "ollama") return null;
         const client = new Anthropic({ apiKey: "sk-ant-test", fetch: ff.fetch as typeof fetch, maxRetries: 0 });
         return new AnthropicProvider({ apiKey: "x", client, retry: noSleep });
       },
@@ -110,6 +113,11 @@ export function harness(opts: HarnessOpts = {}) {
           return s;
         }),
       ocrWaitMs: 2000,
+      localFetch:
+        opts.localFetch ??
+        ((async () => {
+          throw new TypeError("fetch failed");
+        }) as typeof fetch),
     },
     settings,
     (s) => (settings = s),
@@ -121,6 +129,24 @@ export function harness(opts: HarnessOpts = {}) {
     return chat.filter((e) => e.requestId === requestId);
   };
   const capture = (title = "Invoice") =>
-    core.addCapture({ title, sourceId: `cap-${title}`, vision: { mediaType: "image/jpeg", data: Buffer.from(title).toString("base64") }, ocrPng: Buffer.from("png"), thumbnailDataUrl: "data:," }, { pending: false });
-  return { store, core, ff, calls: ff.calls, chat, transcript, app, sockets, ask, done, capture, get settings() { return settings; } };
+    core.addCapture(
+      { title, sourceId: `cap-${title}`, vision: { mediaType: "image/jpeg", data: Buffer.from(title).toString("base64") }, ocrPng: Buffer.from("png"), thumbnailDataUrl: "data:," },
+      { pending: false },
+    );
+  return {
+    store,
+    core,
+    ff,
+    calls: ff.calls,
+    chat,
+    transcript,
+    app,
+    sockets,
+    ask,
+    done,
+    capture,
+    get settings() {
+      return settings;
+    },
+  };
 }

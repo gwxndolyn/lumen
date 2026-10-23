@@ -38,6 +38,11 @@ import { AnthropicProvider } from "./providers/anthropic";
 import { MockProvider } from "./providers/mock";
 import { OpenAICompatProvider } from "./providers/openaiCompat";
 import { GeminiProvider } from "./providers/gemini";
+import { LocalInference } from "./inference/local";
+import { UsageService } from "./inference/usage";
+import { LruCache, type CachedResponse } from "./inference/cache";
+import { EmbeddingIndex } from "./inference/embeddings";
+import type { InferenceTargets } from "./chatService";
 import { ProviderError, type AIProvider } from "./providers/types";
 import { toUserError } from "./errors";
 import type { Store } from "./storage/db";
@@ -83,6 +88,8 @@ export interface AppCoreDeps {
   devModeAllowed?: boolean;
   /** Evaluation Lab only: pipeline variations (prompt, budget, verification) for experiments. */
   pipelineOverrides?: PipelineOverrides;
+  /** fetch used for the local (loopback) runtime; injected by tests. */
+  localFetch?: typeof fetch;
 }
 
 /**
@@ -105,6 +112,8 @@ export function safeEndpoint(url: string | undefined, kind: "http" | "ws"): stri
 
 export function defaultProviderFactory(kind: Settings["provider"]["kind"], secrets: SecretReader, settings: Settings): AIProvider | null {
   if (kind === "mock") return new MockProvider();
+  // The local runtime is built by LocalInference (it needs the model's discovered capabilities).
+  if (kind === "ollama") return null;
   if (kind === "openai_compat") {
     const c = settings.provider.openaiCompat;
     return new OpenAICompatProvider({ baseUrl: c.baseUrl, model: c.model, apiKey: secrets.get("openai_compat"), supportsImages: c.supportsImages });
@@ -133,6 +142,11 @@ export class AppCore {
   readonly metrics = new Metrics();
   readonly memory: MemoryService;
   readonly liveScreen: LiveScreen;
+  readonly local: LocalInference;
+  readonly usage: UsageService;
+  readonly embeddings: EmbeddingIndex;
+  /** In-memory only; cleared on restart, session deletion, "Delete everything" and on request. */
+  readonly responseCache = new LruCache<CachedResponse>({ maxEntries: 100, maxBytes: 2_000_000, ttlMs: 10 * 60_000, size: (v) => v.text.length * 2 });
   live: TranscriptSession | null = null;
   health: ProviderHealth;
   private ocrJobs = new Map<string, Promise<void>>();
@@ -149,6 +163,9 @@ export class AppCore {
     this.settings = initial;
     this.health = this.initialHealth();
     this.memory = new MemoryService(deps.store, this.now);
+    this.local = new LocalInference(() => this.settings, deps.localFetch, this.now);
+    this.usage = new UsageService(deps.store, () => this.settings, this.now);
+    this.embeddings = new EmbeddingIndex(deps.store, () => this.local.runtime());
     this.engine = new ContextEngine(
       deps.store,
       {
@@ -180,6 +197,13 @@ export class AppCore {
       log: deps.log,
       retrieveMemory: (q) => this.memory.retrieve(q),
       overrides: deps.pipelineOverrides,
+      targets: (session) => this.inferenceTargets(session),
+      usage: this.usage,
+      responseCache: this.responseCache,
+      semanticKnowledge: (q, sessionId, signal) => {
+        const m = this.settings.inference.local.embeddingModel;
+        return m ? this.embeddings.search(m, q, sessionId, 6, signal) : Promise.resolve(null);
+      },
     });
     this.liveScreen = new LiveScreen(
       () => this.liveScreenTick(),
@@ -270,12 +294,44 @@ export class AppCore {
     return (this.deps.providerFactory ?? defaultProviderFactory)(this.settings.provider.kind, this.deps.secrets, this.settings);
   }
 
+  /** The cloud provider (the selected kind when it is not the local runtime) and the local model. */
+  async inferenceTargets(session?: Session | null): Promise<InferenceTargets> {
+    const s = this.settings;
+    await this.local.ensureFresh();
+    const selectedKind = s.provider.kind;
+    const cloud = selectedKind === "ollama" ? null : this.providerFor(session);
+    const localState = this.local.state();
+    const local = this.local.wanted ? this.local.provider() : null;
+    return {
+      policy: { mode: s.inference.mode, privacyRestricted: s.inference.privacyRestricted, cloudAllowed: s.inference.cloudAllowed, fallback: s.inference.fallback },
+      selectedKind,
+      cloud,
+      cloudLabel: cloud
+        ? cloud.isMock
+          ? "development mode"
+          : `${PROVIDER_INFO[cloud.kind as keyof typeof PROVIDER_INFO]?.label ?? cloud.kind} · ${activeModel({ ...s.provider, kind: cloud.kind })}`
+        : "no cloud provider",
+      local,
+      localLabel: local ? `${s.inference.local.model} (local)` : "local model",
+      localReason: localState.problem ?? undefined,
+    };
+  }
+
   private initialHealth(): ProviderHealth {
     const kind = this.settings.provider.kind;
     const model = activeModel(this.settings.provider);
     if (kind === "mock" && !this.devModeAllowed)
       return { kind, model, state: "unconfigured", message: "Development mode is not available in this build. Choose an AI provider.", checkedAt: null, latencyMs: null };
     if (kind === "mock") return { kind, model, state: "mock", message: "Development mode — answers are mock responses, not AI.", checkedAt: null, latencyMs: null };
+    if (kind === "ollama")
+      return {
+        kind,
+        model: this.settings.inference.local.model || "none",
+        state: this.settings.inference.local.model ? "unknown" : "unconfigured",
+        message: this.settings.inference.local.model ? "Local model not checked yet." : "No local model selected.",
+        checkedAt: null,
+        latencyMs: null,
+      };
     if ((kind === "anthropic" || kind === "openai" || kind === "gemini") && !this.deps.secrets.has(kind)) {
       return { kind, model, state: "unconfigured", message: `No ${PROVIDER_INFO[kind].label} API key configured.`, checkedAt: null, latencyMs: null };
     }
@@ -291,6 +347,14 @@ export class AppCore {
   }
 
   async testProvider() {
+    if (this.settings.provider.kind === "ollama") {
+      await this.local.refresh();
+      const lp = this.local.provider();
+      const res = lp ? await lp.test() : { ok: false, message: `Local model unavailable: ${this.local.state().problem}.`, latencyMs: null, code: "model_unavailable" as const };
+      this.health = { ...this.initialHealth(), state: res.ok ? "ok" : "down", message: res.message, checkedAt: this.now(), latencyMs: res.latencyMs };
+      this.deps.emitApp({ type: "provider-health", health: this.health });
+      return res;
+    }
     const p = this.providerFor();
     this.health = this.initialHealth();
     if (!p) return { ok: false, message: this.health.message, latencyMs: null, code: "missing_credentials" as const };
@@ -361,6 +425,7 @@ export class AppCore {
    */
   deleteSession(id: string): void {
     this.chat.cancelSession(id);
+    this.responseCache.invalidateTag(id);
     if (this.live?.workspaceSessionId === id) {
       this.stopTranscript();
       this.stopDetector();
@@ -897,13 +962,21 @@ export class AppCore {
   }
 
   async generateInsights(transcriptId: string, signal: AbortSignal): Promise<MeetingInsights> {
-    const p = this.providerFor();
-    if (!p) throw new ProviderError("No API key is configured for the selected AI provider.", "missing_credentials", false);
+    // Notes send the whole transcript, so they follow the same routing and privacy rules as chat.
+    const t0 = await this.inferenceTargets();
+    const transcriptBlocked = t0.policy.privacyRestricted && !t0.policy.cloudAllowed.transcript;
+    const preferLocal = t0.selectedKind === "ollama" || t0.policy.mode === "local_first" || transcriptBlocked;
+    const p = preferLocal ? t0.local : (t0.cloud ?? (t0.policy.mode === "cloud_first" ? t0.local : null));
+    if (!p) {
+      if (transcriptBlocked || t0.selectedKind === "ollama")
+        throw new ProviderError(`Meeting notes need a local model here (privacy restriction keeps transcripts on this device), but ${t0.localReason ?? "none is ready"}.`, "routing_blocked", false);
+      throw new ProviderError("No API key is configured for the selected AI provider.", "missing_credentials", false);
+    }
     const memory = transcriptId.startsWith("mem-") ? this.liveSegments(transcriptId) : null;
     if (transcriptId.startsWith("mem-") && !memory) throw new ProviderError("This in-memory transcript has already been discarded.", "bad_request", false);
     const t = memory ? null : this.deps.store.getTranscriptSession(transcriptId);
     if (!memory && t?.sessionId !== this.activeSessionId) throw new ProviderError("That transcript belongs to another session.", "bad_request", false);
-    return generateInsights(p, this.deps.store, this.settings, transcriptId, signal, { segments: memory ?? undefined });
+    return generateInsights(p, this.deps.store, this.settings, transcriptId, signal, { segments: memory ?? undefined, model: p.kind === "ollama" ? this.settings.inference.local.model : undefined });
   }
 
   // ---------------- data ----------------
@@ -913,6 +986,7 @@ export class AppCore {
     this.stopLiveScreen();
     this.chat.cancelAll();
     this.deps.store.deleteAll();
+    this.responseCache.clear();
     this.engine.dropAll();
     this.settings = applySettingsPatch(this.settings, { activeSessionId: null });
     const s = this.ensureActiveSession();

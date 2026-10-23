@@ -6,6 +6,7 @@
 // Live mode uses the user's configured provider and must be started explicitly by the caller.
 
 import { randomUUID } from "node:crypto";
+import os from "node:os";
 import { AppCore } from "../app";
 import type { PipelineOverrides } from "../chatService";
 import { DEFAULT_BUDGET } from "../context/promptBuilder";
@@ -29,7 +30,7 @@ export interface RunOptions {
   /** The user's settings; only provider, personalization and technical preferences are used. */
   settings: Settings;
   /** Builds the user's configured provider (live mode). Never called in deterministic mode. */
-  liveProvider?: () => AIProvider | null;
+  liveProvider?: () => AIProvider | null | Promise<AIProvider | null>;
   variant?: Variant;
   repeat?: number;
   limits?: Partial<RunLimits>;
@@ -38,6 +39,8 @@ export interface RunOptions {
   onProgress?: (run: EvalRun) => void;
   now?: () => number;
   experiment?: EvalRun["experiment"];
+  /** Local runtime details (version, loaded models and memory) recorded with local-model runs. */
+  describeLocal?: () => Promise<{ runtimeVersion: string | null; loaded: { name: string; sizeBytes: number; vramBytes: number }[] }>;
 }
 
 export function caseHash(c: EvalCase): string {
@@ -93,7 +96,13 @@ function setupCase(c: EvalCase, provider: AIProvider | null, baseSettings: Setti
     screen: { requirePreview: false, ocr: false },
     assistant: { useKnowledgeBase: true, useConversationHistory: true, useProjectMemory: true },
     privacy: { redactSensitive: true },
-    provider: { dailySpendLimitUsd: 0 },
+    // The case's provider is injected as the selected one (even a local model), so the hybrid
+    // router has exactly one target and never probes the user's runtime.
+    provider: { dailySpendLimitUsd: 0, ...(baseSettings.provider.kind === "ollama" ? { kind: "anthropic" } : {}) },
+    // The provider under test is injected directly; hybrid routing, privacy restriction and the
+    // user's usage limits must not change which model a benchmark case measures.
+    inference: { mode: "manual", privacyRestricted: false, responseCache: false, local: { embeddingModel: "" } },
+    limits: { requestsPerSession: 0, costPerSessionUsd: 0 },
     ...(c.settings ?? {}),
   });
   const core = new AppCore(
@@ -323,10 +332,11 @@ export async function runEvaluation(o: RunOptions): Promise<EvalRun> {
 
   let provider: AIProvider | null = null;
   if (o.mode === "live") {
-    provider = o.liveProvider?.() ?? null;
+    provider = (await o.liveProvider?.()) ?? null;
     if (!provider || provider.isMock) throw new Error("Live evaluation needs a configured, real AI provider. Development mode cannot be used for live results.");
   }
-  const model = o.mode === "live" ? (variant?.model ?? settings.provider.model) : "scripted";
+  const isLocal = provider?.kind === "ollama";
+  const model = o.mode === "live" ? (variant?.model ?? (isLocal ? settings.inference.local.model : settings.provider.model)) : "scripted";
   const selected = o.cases.slice(0, limits.maxCases);
   const run: EvalRun = {
     schemaVersion: EVAL_SCHEMA_VERSION,
@@ -372,7 +382,8 @@ export async function runEvaluation(o: RunOptions): Promise<EvalRun> {
   let spent = 0;
   let reserved = 0;
   let stopReason: string | undefined;
-  const pricingKnown = o.mode !== "live" || hasPricing(model);
+  // Local inference has no per-request price, so its "cost" is genuinely zero.
+  const pricingKnown = o.mode !== "live" || isLocal || hasPricing(model);
   if (!pricingKnown) run.limitations.push(`No bundled pricing for "${model}": cost is not estimated and the cost limit cannot be enforced; only the case limit (${limits.maxCases}) bounds this run.`);
   const worker = async () => {
     while (queue.length) {
@@ -395,8 +406,25 @@ export async function runEvaluation(o: RunOptions): Promise<EvalRun> {
       publish();
     }
   };
+  run.environment = {
+    os: `${os.type()} ${os.release()} (${os.arch()})`,
+    cpu: os.cpus()[0]?.model ?? "unknown",
+    cpuCount: os.cpus().length,
+    memoryGb: Math.round((os.totalmem() / 1e9) * 10) / 10,
+    location: o.mode === "deterministic" ? "none" : isLocal ? "local" : "cloud",
+  };
   publish();
   await Promise.all(Array.from({ length: run.config.concurrency }, worker));
+  if (isLocal && o.describeLocal) {
+    try {
+      const d = await o.describeLocal();
+      run.environment.runtimeVersion = d.runtimeVersion;
+      run.environment.loadedModels = d.loaded;
+    } catch {
+      run.limitations.push("Could not read the local runtime's memory usage after the run.");
+    }
+    run.limitations.push("Local results depend on this computer's hardware (recorded under Environment) and on other load during the run.");
+  }
   run.finishedAt = now();
   const counts = summarize(run.results, run.caseIds, repeat).counts;
   run.status = o.signal?.aborted ? "cancelled" : stopReason ? "partial" : counts.not_run > 0 || counts.inconclusive > 0 ? "partial" : "complete";

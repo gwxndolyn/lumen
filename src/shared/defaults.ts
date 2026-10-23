@@ -96,6 +96,23 @@ export const DEFAULT_SETTINGS: Settings = {
   diagnostics: {
     logLevel: "info",
   },
+  inference: {
+    mode: "manual",
+    local: { baseUrl: "http://127.0.0.1:11434", model: "", numCtx: 8192, embeddingModel: "" },
+    privacyRestricted: false,
+    cloudAllowed: { screen: false, transcript: false, documents: false },
+    fallback: { cloudToLocal: true, localToCloud: false },
+    responseCache: false,
+  },
+  limits: {
+    requestsPerSession: 0,
+    costPerSessionUsd: 0,
+    warnAtPercent: 80,
+    maxConcurrentRequests: 3,
+    maxContextChars: 60_000,
+    maxAttempts: 4,
+    retryTimeouts: false,
+  },
 };
 
 export const MODE_LABELS: Record<Settings["assistant"]["mode"], string> = {
@@ -137,9 +154,17 @@ export function activeModel(p: { kind: string; model: string; openai: { model: s
       return override && override.startsWith("gemini") ? override : p.gemini.model;
     case "openai_compat":
       return p.openaiCompat.model;
+    case "ollama":
+      // The local model lives in settings.inference.local; callers resolve it via inferenceModel().
+      return "local";
     case "mock":
       return "mock";
     default:
       return override && override.startsWith("claude") ? override : p.model;
   }
+}
+
+/** The model id for the provider kind actually used, including the local runtime. */
+export function inferenceModel(s: { provider: Parameters<typeof activeModel>[0]; inference: { local: { model: string } } }, kind: string, override?: string): string {
+  return kind === "ollama" ? s.inference.local.model : activeModel({ ...s.provider, kind }, override);
 }
