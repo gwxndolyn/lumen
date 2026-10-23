@@ -47,6 +47,16 @@ function expiresIn(ts: number | null): string | null {
   return min >= 60 ? `${Math.round(min / 60)}h` : `${min}m`;
 }
 
+const SOURCE_LABEL: Partial<Record<ContextSource, string>> = {
+  selected_text: "Selected text",
+  clipboard: "Clipboard",
+  document: "Document",
+  screenshot: "Screen capture",
+  ocr: "Screen text",
+  transcript: "Transcript",
+  note: "Note",
+};
+
 function itemTooltip(i: ContextItemSummary) {
   const parts = [i.title];
   if (i.preview) parts.push(i.preview);
@@ -54,6 +64,7 @@ function itemTooltip(i: ContextItemSummary) {
   if (i.sensitivity === "sensitive") parts.push(`Contains: ${i.sensitiveKinds.join(", ")}${"\n"}(masked before sending when redaction is on)`);
   if (i.suspicious) parts.push("⚠ Contains text that looks like instructions to the AI. It is treated as data only.");
   if (i.warning) parts.push(`⚠ ${i.warning}`);
+  parts.push(`${SOURCE_LABEL[i.source] ?? i.source} · added ${new Date(i.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}${i.enabled ? "" : " · turned off for answers"}`);
   const e = expiresIn(i.expiresAt);
   if (e) parts.push(`Expires in ${e}`);
   return parts.join("\n\n");
@@ -114,7 +125,13 @@ export function ContextChips({ items, compact }: { items: ContextItemSummary[]; 
       {active.length > 0 && (
         <div className="overlay-context" aria-label="Active context">
           {active.map((i) => (
-            <span key={i.id} className={`chip ${i.enabled ? "on" : ""} ${i.suspicious || i.warning ? "warn" : ""}`} title={itemTooltip(i)}>
+            <span
+              key={i.id}
+              role="group"
+              aria-label={`${SOURCE_LABEL[i.source] ?? i.source}: ${i.title}${i.enabled ? "" : " (off)"}`}
+              className={`chip ${i.enabled ? "on" : ""} ${i.suspicious || i.warning ? "warn" : ""}`}
+              title={itemTooltip(i)}
+            >
               <button aria-label={`${i.enabled ? "Disable" : "Enable"} ${i.title}`} aria-pressed={i.enabled} onClick={() => void api.updateContext(i.id, { enabled: !i.enabled })}>
                 {i.ocr === "running" ? <span className="spinner" style={{ width: 10, height: 10 }} /> : KIND_ICON[i.source]}
               </button>
@@ -454,13 +471,26 @@ export function RecordingControls({ live, compact }: { live: LiveTranscript; com
   );
 }
 
+const localToasts = new Set<(level: "info" | "error", message: string) => void>();
+/** Show a toast from the renderer (same stack as main-process toasts). */
+export function showToast(message: string, level: "info" | "error" = "info") {
+  for (const f of localToasts) f(level, message);
+}
+
 export function Toasts() {
   const [toasts, setToasts] = useState<{ id: number; level: string; message: string }[]>([]);
+  const push = (level: string, message: string) => {
+    const id = Date.now() + Math.random();
+    setToasts((t) => [...t, { id, level, message }]);
+    setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 6000);
+  };
+  useEffect(() => {
+    localToasts.add(push);
+    return () => void localToasts.delete(push);
+  }, []);
   useAppEvent((e) => {
     if (e.type !== "toast") return;
-    const id = Date.now() + Math.random();
-    setToasts((t) => [...t, { id, level: e.level, message: e.message }]);
-    setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 6000);
+    push(e.level, e.message);
   });
   return (
     <div className="toast-stack" role="status" aria-live="polite">

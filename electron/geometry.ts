@@ -116,3 +116,21 @@ export function isBlankBitmap(bitmap: Uint8Array, width: number, height: number)
   }
   return samples > 0 && differing / samples < 0.002;
 }
+
+export const MAIN_MIN = { width: 860, height: 560 };
+export const MAIN_DEFAULT = { width: 1180, height: 780 };
+
+/**
+ * Where to open the main window: the saved rect if it's still mostly on a connected display
+ * (clamped, never smaller than the minimum), otherwise centred on the fallback display.
+ */
+export function resolveMainBounds(saved: (Rect & { displayId?: number | null }) | null, displays: DisplayLike[], fallback: DisplayLike): Rect {
+  const area = fallback.workArea;
+  const centred = clampToArea(
+    { x: area.x + Math.round((area.width - MAIN_DEFAULT.width) / 2), y: area.y + Math.round((area.height - MAIN_DEFAULT.height) / 2), width: MAIN_DEFAULT.width, height: MAIN_DEFAULT.height },
+    area,
+  );
+  if (!saved || !(saved.width > 0 && saved.height > 0)) return centred;
+  const r = resolveBounds({ ...saved, width: Math.max(MAIN_MIN.width, saved.width), height: Math.max(MAIN_MIN.height, saved.height) }, displays, fallback);
+  return { x: r.x, y: r.y, width: r.width, height: r.height };
+}

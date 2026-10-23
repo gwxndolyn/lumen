@@ -103,6 +103,8 @@ export interface Settings {
     ocr: boolean;
     liveIntervalSec: number;
   };
+  /** Main window geometry, restored on next open (null = centred default). */
+  mainWindow: { bounds: OverlayBounds | null; maximized: boolean };
   overlay: {
     opacity: number;
     alwaysOnTop: boolean;

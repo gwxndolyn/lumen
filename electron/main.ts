@@ -1143,6 +1143,13 @@ function startup() {
     () => core.settings,
     (bounds, patch) => core.updateSettings({ overlay: { bounds, ...patch } }),
     (mode) => emitApp({ type: "overlay-mode", mode }),
+    (mainWindow) => {
+      try {
+        core.updateSettings({ mainWindow });
+      } catch (err) {
+        logger.warn("main window bounds not saved", { message: (err as Error).message });
+      }
+    },
   );
   applyCsp();
   registerIpc();
@@ -1154,6 +1161,11 @@ function startup() {
   else windows.showOverlay();
 
   registerLifecycle();
+  if (core.recoveredTranscripts > 0) {
+    const n = core.recoveredTranscripts;
+    // A quiet notice (not a dialog): nothing was lost, the recording just didn't end cleanly.
+    setTimeout(() => toast("info", `Lumen closed while recording. ${n === 1 ? "That transcript was" : `${n} transcripts were`} kept up to the last line and marked as ended.`), 1200);
+  }
   if (startupNotice) {
     const notice = startupNotice;
     setTimeout(() => void dialog.showMessageBox({ type: "warning", title: "Lumen recovered your data", message: "Lumen started with a fresh database", detail: notice }), 800);

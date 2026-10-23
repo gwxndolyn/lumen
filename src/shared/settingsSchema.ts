@@ -80,6 +80,18 @@ export const settingsSchema = z.object({
     ocr: z.boolean(),
     liveIntervalSec: z.number().int().min(3).max(300),
   }),
+  mainWindow: z.object({
+    bounds: z
+      .object({
+        x: z.number().int(),
+        y: z.number().int(),
+        width: z.number().int().min(400).max(10000),
+        height: z.number().int().min(300).max(10000),
+        displayId: z.number().nullable(),
+      })
+      .nullable(),
+    maximized: z.boolean(),
+  }),
   overlay: z.object({
     opacity: z.number().min(0.4).max(1),
     alwaysOnTop: z.boolean(),

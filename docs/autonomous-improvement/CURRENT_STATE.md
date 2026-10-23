@@ -45,6 +45,13 @@ Note: vitest and the smoke run need to write to `node_modules/.vite-temp`; under
 - Manual HTTPS update check; no downloads. Config is empty in this repo → open build, no purchase or feed URL.
 - Launch blockers (vendor credentials): signing/notarization, license key pair + store + webhook, update feed hosting, live-provider verification, Windows hand testing, legal pages.
 
+## Prompt 12: desktop UX (2026-10-23, committed)
+
+- Command palette (⌘K/Ctrl+K, state-aware commands, fuzzy, keyboard, focus trap/return, no double-fire), verified with real key events in smoke.
+- Main-window geometry persisted (settings.mainWindow); narrow layout collapses sidebar; context chips show source/time; interrupted recordings recovered at startup.
+- Tokens extended (type scale, elevation, z-index, timing). Shortcut registry already met requirements — unchanged.
+- See `docs/DESKTOP_UX.md` for verified vs unverified (Windows, screen readers, real restart of geometry).
+
 **Next:** with an API key, run live evaluations (cloud and a local Ollama model) and record a baseline; then LUM-011.
 
 ## How to resume (any session, no chat history needed)

@@ -205,6 +205,47 @@ export async function runSmokeTest({ app, core, store, windows, capture, shortcu
     }
     check("screensRender", broken.length === 0, broken);
 
+    // ---- command palette: real keyboard input through Electron ----
+    await js(`location.hash = '/main/assistant'`);
+    await wait(300);
+    win.focus();
+    const key = (keyCode: string, modifiers: ("meta" | "control")[] = []) => {
+      win.webContents.sendInputEvent({ type: "keyDown", keyCode, modifiers });
+      win.webContents.sendInputEvent({ type: "keyUp", keyCode, modifiers });
+    };
+    key("K", [process.platform === "darwin" ? "meta" : "control"]);
+    await wait(250);
+    const opened = await js<boolean>("!!document.querySelector('.palette') && document.activeElement?.classList.contains('palette-input')");
+    for (const ch of "keyboard") win.webContents.sendInputEvent({ type: "char", keyCode: ch });
+    await wait(150);
+    const top = await js<string>("document.querySelector('.palette-item[aria-selected=\"true\"] .palette-title')?.textContent ?? ''");
+    await wait(300); // let the fade-in finish before the screenshot
+    const paletteBg = await js<string>("getComputedStyle(document.querySelector('.palette')).backgroundColor");
+    await shot(win, "07-palette");
+    key("Return");
+    await wait(400);
+    const navigated = await js<string>("location.hash");
+    const closed = await js<boolean>("!document.querySelector('.palette')");
+    key("K", [process.platform === "darwin" ? "meta" : "control"]);
+    await wait(200);
+    key("Escape");
+    await wait(150);
+    const escClosed = await js<boolean>("!document.querySelector('.palette')");
+    const opaque = /^rgb\(/.test(paletteBg) || /rgba\([^)]*,\s*1\)$/.test(paletteBg);
+    check("CP_palette", opened && /shortcuts/i.test(top) && navigated.endsWith("/shortcuts") && closed && escClosed && opaque, { opened, top, navigated, closed, escClosed, paletteBg });
+
+    // ---- narrow main window: sidebar collapses, workspace stays usable ----
+    const prevBounds = win.getBounds();
+    win.setBounds({ ...prevBounds, width: 880 });
+    await js(`location.hash = '/main/assistant'`);
+    await wait(400);
+    const narrow = await js<{ sidebar: number; overflow: boolean }>(
+      "({ sidebar: document.querySelector('.sidebar').getBoundingClientRect().width, overflow: document.documentElement.scrollWidth > window.innerWidth + 1 })",
+    );
+    await shot(win, "08-narrow");
+    win.setBounds(prevBounds);
+    check("UX_narrowLayout", narrow.sidebar <= 80 && !narrow.overflow, narrow);
+
     // ---- overlay modes & display recovery ----
     windows.setMode("expanded");
     await wait(200);

@@ -670,6 +670,21 @@ export class Store {
     return { id, sessionId, title, startedAt: now, endedAt: null, segmentCount: 0, provider, persisted: true };
   }
 
+  /**
+   * Close transcripts left open by a crash or forced quit (no live recording can exist at startup).
+   * The end time is the last segment's time, so durations stay truthful. Returns how many were closed.
+   */
+  closeInterruptedTranscripts(): number {
+    return Number(
+      this.db
+        .prepare(
+          `UPDATE transcript_sessions SET ended_at = started_at + COALESCE((SELECT MAX(end_ms) FROM transcript_segments g WHERE g.session_id = transcript_sessions.id), 0)
+           WHERE ended_at IS NULL`,
+        )
+        .run().changes,
+    );
+  }
+
   endTranscriptSession(id: string, now = Date.now()) {
     this.db.prepare("UPDATE transcript_sessions SET ended_at = ? WHERE id = ? AND ended_at IS NULL").run(now, id);
   }

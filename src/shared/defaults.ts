@@ -73,6 +73,7 @@ export const DEFAULT_SETTINGS: Settings = {
     ocr: true,
     liveIntervalSec: 10,
   },
+  mainWindow: { bounds: null, maximized: false },
   overlay: {
     opacity: 0.96,
     alwaysOnTop: true,

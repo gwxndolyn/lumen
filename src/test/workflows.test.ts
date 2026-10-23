@@ -461,3 +461,17 @@ describe("H. deleting a session removes its stored and indexed data", () => {
     expect(h.store.listSessions()).toHaveLength(1);
   });
 });
+
+describe("interrupted recording recovery", () => {
+  it("transcripts left open by a crash are closed at startup with their last segment time, and kept", async () => {
+    const { Store } = await import("../core/storage/db");
+    const store = new Store(":memory:");
+    const sess = store.createSession({ title: "S", type: "meeting" });
+    const t = store.createTranscriptSession(sess.id, "Standup", "deepgram", 1_000);
+    store.addSegment({ sessionId: t.id, startMs: 0, endMs: 4_000, speaker: "A", channel: null, text: "First", confidence: 0.9 });
+    store.addSegment({ sessionId: t.id, startMs: 4_000, endMs: 9_000, speaker: "B", channel: null, text: "Second", confidence: 0.9 });
+    expect(store.closeInterruptedTranscripts()).toBe(1);
+    expect(store.getTranscriptSession(t.id)).toMatchObject({ endedAt: 10_000, segmentCount: 2 });
+    expect(store.closeInterruptedTranscripts()).toBe(0);
+  });
+});

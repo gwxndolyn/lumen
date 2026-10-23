@@ -243,7 +243,14 @@ export class AppCore {
       this.now,
     );
     this.ensureActiveSession();
+    // Recover from a crash during recording: the transcript so far is kept and marked ended.
+    const closed = deps.store.closeInterruptedTranscripts();
+    if (closed) deps.log?.("info", "interrupted transcripts recovered", { count: closed });
+    this.recoveredTranscripts = closed;
   }
+
+  /** Transcripts closed at startup because the previous run ended while recording. */
+  readonly recoveredTranscripts: number;
 
   // ---------------- settings & permissions ----------------
 

@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react";
-import type { SessionSummary } from "../shared/types";
+import { useEffect, useMemo, useState } from "react";
+import { CommandPalette, buildCommands } from "./components/CommandPalette";
+import type { LiveScreenState, SessionSummary } from "../shared/types";
 import { MODE_LABELS } from "../shared/defaults";
 import { api } from "./lib/api";
 import { isRecordingStatus, useActiveSession, useAppEvent, useLiveTranscript, useProviderHealth, useSettings } from "./lib/hooks";
-import { ProviderStatus, RecordingControls, Toasts, useTheme } from "./components/ui";
+import { ProviderStatus, RecordingControls, Toasts, showToast, useTheme } from "./components/ui";
 import { AssistantScreen } from "./screens/Assistant";
 import { CaptureScreen } from "./screens/Capture";
 import { DiagnosticsScreen } from "./screens/Diagnostics";
@@ -92,6 +93,33 @@ export function MainWindow() {
   const [route, setRoute] = useState(routeFromHash);
   const live = useLiveTranscript();
   const health = useProviderHealth();
+  const active = useActiveSession();
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [paletteData, setPaletteData] = useState<{ sessions: SessionSummary[]; liveScreen: LiveScreenState | null; latest: string | null }>({ sessions: [], liveScreen: null, latest: null });
+  useEffect(() => {
+    // ⌘K / Ctrl+K inside Lumen's own window only (not a global shortcut).
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        if (!e.repeat) setPaletteOpen((o) => !o);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+  useEffect(() => {
+    if (!paletteOpen) return;
+    // Fresh state each time the palette opens, so commands match what is true now.
+    void Promise.all([
+      api.listSessions(),
+      api.liveScreenState().catch(() => null),
+      api
+        .openConversation()
+        .then((id) => (id ? api.getMessages(id) : []))
+        .then((m) => m.findLast((x) => x.role === "assistant" && !x.meta.cancelled && x.content.trim())?.content ?? null)
+        .catch(() => null),
+    ]).then(([sessions, liveScreen, latest]) => setPaletteData({ sessions, liveScreen, latest }));
+  }, [paletteOpen]);
 
   useEffect(() => {
     const onHash = () => setRoute(routeFromHash());
@@ -105,6 +133,23 @@ export function MainWindow() {
     location.hash = `/main/${r}`;
   };
 
+  const commands = useMemo(
+    () =>
+      settings
+        ? buildCommands({
+            settings,
+            sessions: paletteData.sessions,
+            activeSessionId: active?.id ?? null,
+            live,
+            liveScreen: paletteData.liveScreen,
+            latestAnswer: paletteData.latest,
+            go,
+            notify: (m) => showToast(m),
+          })
+        : [],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [settings, paletteData, active?.id, live.status],
+  );
   if (!settings) return null;
   if (route === "onboarding") return <OnboardingScreen settings={settings} update={update} onDone={() => go("assistant")} />;
 
@@ -171,12 +216,15 @@ export function MainWindow() {
         {NAV.map((n) => (
           <div key={n.route}>
             {n.section && <div className="nav-section">{n.section}</div>}
-            <button className="nav-item" aria-current={route === n.route ? "page" : undefined} onClick={() => go(n.route)}>
+            <button className="nav-item" aria-current={route === n.route ? "page" : undefined} aria-label={n.label} title={n.label} onClick={() => go(n.route)}>
               <span aria-hidden>{n.icon}</span> {n.label}
             </button>
           </div>
         ))}
         <div className="spacer" />
+        <button className="nav-item" onClick={() => setPaletteOpen(true)} title="Command palette" aria-keyshortcuts={api.platform === "darwin" ? "Meta+K" : "Control+K"}>
+          <span aria-hidden>⌘</span> Commands <kbd style={{ marginLeft: "auto" }}>{api.platform === "darwin" ? "⌘K" : "Ctrl+K"}</kbd>
+        </button>
         <div className="col" style={{ padding: 8, gap: 6, WebkitAppRegion: "no-drag" } as React.CSSProperties}>
           {recording && <RecordingControls live={live} />}
           <ProviderStatus health={health} />
@@ -184,6 +232,7 @@ export function MainWindow() {
         </div>
       </nav>
       <main className="content">{screen}</main>
+      <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} commands={commands} />
       <Toasts />
     </div>
   );

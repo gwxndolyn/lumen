@@ -2,7 +2,7 @@ import { app, BrowserWindow, screen, shell, type Rectangle } from "electron";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import type { Settings, WindowRole } from "../src/shared/types";
-import { defaultOverlayRect, moveToDisplay, presetRect, resizeAnchored, resolveBounds } from "./geometry";
+import { defaultOverlayRect, MAIN_MIN, moveToDisplay, presetRect, resizeAnchored, resolveBounds, resolveMainBounds } from "./geometry";
 
 /** A dev-server URL is honoured only in unpackaged development builds. */
 const DEV_URL = !app.isPackaged ? process.env.LUMEN_DEV_URL : undefined;
@@ -74,6 +74,8 @@ export class WindowManager {
     private readonly getSettings: () => Settings,
     private readonly saveBounds: (b: Settings["overlay"]["bounds"], patch?: Partial<Settings["overlay"]>) => void,
     private readonly onModeChange: (mode: "compact" | "expanded" | "discreet") => void = () => undefined,
+    /** Persist main-window geometry (debounced by the caller's settings writes). */
+    private readonly saveMainBounds: (m: Settings["mainWindow"]) => void = () => undefined,
   ) {
     const relayout = () => this.ensureOverlayVisible();
     screen.on("display-removed", relayout);
@@ -101,9 +103,7 @@ export class WindowManager {
   private initialRect(s: Settings): Rectangle {
     const width = s.overlay.bounds?.width ?? 560;
     if (s.overlay.position !== "custom") return presetRect(this.primary().workArea, s.overlay.position, width, COMPACT_HEIGHT);
-    return s.overlay.bounds
-      ? resolveBounds({ ...s.overlay.bounds, height: COMPACT_HEIGHT }, this.displays(), this.primary())
-      : defaultOverlayRect(this.primary().workArea, width, COMPACT_HEIGHT);
+    return s.overlay.bounds ? resolveBounds({ ...s.overlay.bounds, height: COMPACT_HEIGHT }, this.displays(), this.primary()) : defaultOverlayRect(this.primary().workArea, width, COMPACT_HEIGHT);
   }
 
   createOverlay(): BrowserWindow {
@@ -208,9 +208,7 @@ export class WindowManager {
       const current = screen.getDisplayMatching(b);
       if (current.id !== cursorDisplay.id) {
         this.setBounds(
-          s.overlay.position === "custom"
-            ? (moveToDisplay(b, current.workArea, cursorDisplay.workArea) as Rectangle)
-            : presetRect(cursorDisplay.workArea, s.overlay.position, b.width, b.height),
+          s.overlay.position === "custom" ? (moveToDisplay(b, current.workArea, cursorDisplay.workArea) as Rectangle) : presetRect(cursorDisplay.workArea, s.overlay.position, b.width, b.height),
         );
       }
     }
@@ -314,11 +312,12 @@ export class WindowManager {
       this.main.focus();
       return this.main;
     }
+    const saved = this.getSettings().mainWindow;
+    const rect = resolveMainBounds(saved.bounds, this.displays(), this.primary());
     const win = new BrowserWindow({
-      width: 1180,
-      height: 780,
-      minWidth: 860,
-      minHeight: 560,
+      ...rect,
+      minWidth: MAIN_MIN.width,
+      minHeight: MAIN_MIN.height,
       show: false,
       title: "Lumen",
       backgroundColor: "#0b0d12",
@@ -326,8 +325,24 @@ export class WindowManager {
       webPreferences: webPreferences("main"),
     });
     hardenWebContents(win);
-    win.once("ready-to-show", () => win.show());
+    win.once("ready-to-show", () => {
+      if (saved.maximized) win.maximize();
+      win.show();
+    });
+    // Remember the normal (unmaximised) geometry and maximised state, debounced.
+    let t: NodeJS.Timeout | null = null;
+    const remember = () => {
+      if (t) clearTimeout(t);
+      t = setTimeout(() => {
+        if (win.isDestroyed() || win.isMinimized() || win.isFullScreen()) return;
+        const b = win.getNormalBounds();
+        const d = screen.getDisplayMatching(b);
+        this.saveMainBounds({ bounds: { ...b, displayId: d.id }, maximized: win.isMaximized() });
+      }, 400);
+    };
+    for (const ev of ["resize", "move", "maximize", "unmaximize"] as const) win.on(ev as "resize", remember);
     win.on("closed", () => {
+      if (t) clearTimeout(t);
       this.main = null;
     });
     win.webContents.on("render-process-gone", (_e, d) => {
