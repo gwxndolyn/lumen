@@ -25,6 +25,8 @@ export interface OverlayBounds {
 export interface Settings {
   version: 1;
   onboardingComplete: boolean;
+  /** Last onboarding step reached, so a restart resumes there. */
+  onboardingStep: number;
   theme: ThemePref;
   activeSessionId: string | null;
   provider: {

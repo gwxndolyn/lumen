@@ -29,6 +29,7 @@ export const DEFAULT_SHORTCUTS: Settings["shortcuts"] = {
 export const DEFAULT_SETTINGS: Settings = {
   version: 1,
   onboardingComplete: false,
+  onboardingStep: 0,
   theme: "dark",
   activeSessionId: null,
   provider: {

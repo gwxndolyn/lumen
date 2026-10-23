@@ -37,6 +37,8 @@ export interface EvalServiceDeps {
   describeLocal?: () => Promise<{ runtimeVersion: string | null; loaded: { name: string; sizeBytes: number; vramBytes: number }[] }>;
   emit: (e: EvalEvent) => void;
   cases?: EvalCase[];
+  /** Throws when live evaluations aren't included in the plan (deterministic runs are always allowed). */
+  requireLive?: () => void;
   /** User-approved cases created from feedback (local only). */
   userCases?: () => EvalCase[];
   onUserCaseResult?: (caseId: string, result: { status: string; runId: string; at: number; checks: { describe: string; passed: boolean; detail: string }[] }) => void;
@@ -99,6 +101,7 @@ export class EvalService {
 
   start(req: StartRequest): void {
     if (this.active) throw new Error("An evaluation is already running. Stop it first.");
+    if (req.mode === "live") this.deps.requireLive?.();
     if (req.mode === "live" && !req.confirmLive) throw new Error("Live evaluation sends benchmark prompts to your AI provider. Confirm before starting.");
     const settings = this.deps.getSettings();
     if (req.mode === "live" && settings.provider.kind === "mock") throw new Error("Live evaluation needs a real AI provider; development mode cannot produce live results.");

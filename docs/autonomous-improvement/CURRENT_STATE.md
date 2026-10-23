@@ -37,6 +37,14 @@ Note: vitest and the smoke run need to write to `node_modules/.vite-temp`; under
 - Gate result on this machine: READY FOR BETA (445 tests, 64/64 benchmark, 0 regressions vs baseline, smoke pass; live skipped).
 - No AI coding workflow exists in Lumen, so §7 is covered by this repo's process (branch, tests, gate, user approval before merge), not new code.
 
+## Prompt 11: commercial layer (2026-10-23, committed)
+
+- Model: Free (full assistant, BYO key or local) + Pro via offline Ed25519 license key; no accounts, no in-app payment (store page opens in the browser). `core/commerce/{license,entitlements,updates,config}.ts`, `scripts/issue-license.mjs`, `docs/COMMERCIAL.md`.
+- Entitlements enforced in core (settings, routing, memory, embeddings, live eval). Expiry → 7-day grace → Free; data never locked.
+- Onboarding: 6 resumable steps (persisted `onboardingStep`), local-model path, real first question. New Plan & updates and Help screens; developer screens grouped under "Developer".
+- Manual HTTPS update check; no downloads. Config is empty in this repo → open build, no purchase or feed URL.
+- Launch blockers (vendor credentials): signing/notarization, license key pair + store + webhook, update feed hosting, live-provider verification, Windows hand testing, legal pages.
+
 **Next:** with an API key, run live evaluations (cloud and a local Ollama model) and record a baseline; then LUM-011.
 
 ## How to resume (any session, no chat history needed)

@@ -40,6 +40,8 @@ export class MemoryService {
   constructor(
     private readonly store: Store,
     private readonly now: () => number = Date.now,
+    /** Plan limit on saved memories (null = only the hard cap). Existing memories are never removed. */
+    private readonly planLimit: () => number | null = () => null,
   ) {}
 
   list(): MemoryItem[] {
@@ -48,7 +50,10 @@ export class MemoryService {
 
   add(kind: MemoryKind, text: string, opts: { sessionId?: string | null; ttlDays?: number | null } = {}): MemoryItem {
     const t = validateMemory(text);
-    if (this.store.listMemories(this.now()).length >= MAX_MEMORIES) throw new MemoryError(`Memory is full (${MAX_MEMORIES} items). Delete some before adding more.`);
+    const count = this.store.listMemories(this.now()).length;
+    if (count >= MAX_MEMORIES) throw new MemoryError(`Memory is full (${MAX_MEMORIES} items). Delete some before adding more.`);
+    const lim = this.planLimit();
+    if (lim != null && count >= lim) throw new MemoryError(`The Free plan keeps up to ${lim} memories. Delete some, or upgrade to Pro for more. Your existing memories keep working.`);
     const dup = this.list().find((m) => m.text.toLowerCase() === t.toLowerCase());
     if (dup) return dup;
     return this.store.addMemory({ kind, text: t, sessionId: opts.sessionId ?? null, expiresAt: opts.ttlDays ? this.now() + opts.ttlDays * 86_400_000 : null }, this.now());

@@ -21,6 +21,7 @@ export const toneEnum = z.enum(["neutral", "friendly", "formal", "confident"]);
 export const settingsSchema = z.object({
   version: z.literal(1),
   onboardingComplete: z.boolean(),
+  onboardingStep: z.number().int().min(0).max(10),
   theme: z.enum(["dark", "light", "system"]),
   activeSessionId: z.string().max(100).nullable(),
   provider: z.object({

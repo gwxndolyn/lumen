@@ -77,6 +77,8 @@ export interface HarnessOpts {
   secrets?: Partial<Record<SecretName, string>>;
   /** fetch for the local (Ollama) runtime. Defaults to "not running". */
   localFetch?: typeof fetch;
+  /** License public key; default "" = open build (all features). */
+  licensePublicKey?: string;
 }
 
 /** A full AppCore wired to an in-memory DB, a fake Anthropic HTTP backend and fake STT sockets. */
@@ -113,6 +115,7 @@ export function harness(opts: HarnessOpts = {}) {
           return s;
         }),
       ocrWaitMs: 2000,
+      licensePublicKey: opts.licensePublicKey ?? "",
       localFetch:
         opts.localFetch ??
         ((async () => {

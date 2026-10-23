@@ -11,6 +11,8 @@ import { singleFlight } from "../src/core/singleFlight";
 import { EvalService } from "../src/core/eval/service";
 import { EvalStore } from "../src/core/eval/store";
 import { buildProposals } from "../src/core/quality/proposals";
+import { COMMERCIAL } from "../src/core/commerce/config";
+import { checkForUpdate } from "../src/core/commerce/updates";
 import { TesseractOcr } from "../src/core/ocr";
 import { SUPPORTED_DOC_EXTENSIONS, extractDocumentText } from "../src/core/knowledge";
 import type { Store } from "../src/core/storage/db";
@@ -489,6 +491,7 @@ function registerIpc() {
   });
   let embedJob: AbortController | null = null;
   handle("local:buildIndex", async (_e, rebuild) => {
+    core.entitlements.require("semantic_search");
     if (embedJob) throw new Error("The index is already being built.");
     embedJob = new AbortController();
     try {
@@ -504,6 +507,25 @@ function registerIpc() {
   handle("usage:report", (_e, days) => ({ rows: core.usage.report(z.number().int().min(1).max(90).parse(days)), budget: core.usage.status(core.activeSessionId) }));
   handle("cache:stats", () => core.responseCache.stats());
   handle("cache:clear", () => core.responseCache.clear());
+
+  // ---- plan, license and updates ----
+  handle("plan:state", () => core.entitlements.state());
+  handle("plan:activate", (_e, key) => {
+    const st = core.entitlements.activate(z.string().min(10).max(4000).parse(key));
+    logger.info("license activated", { plan: st.plan });
+    return st;
+  });
+  handle("plan:deactivate", () => core.entitlements.deactivate());
+  handle("plan:purchase", async () => {
+    if (!COMMERCIAL.purchaseUrl.startsWith("https://")) throw new Error("This build has no purchase page.");
+    await shell.openExternal(COMMERCIAL.purchaseUrl);
+  });
+  handle("updates:check", () => checkForUpdate({ feedUrl: COMMERCIAL.updateFeedUrl, current: app.getVersion() }));
+  handle("updates:open", async (_e, url) => {
+    const u = new URL(z.string().url().max(500).parse(url));
+    if (u.protocol !== "https:") throw new Error("Only HTTPS download links are opened.");
+    await shell.openExternal(u.toString());
+  });
 
   // ---- quality loop (local only; nothing is sent anywhere) ----
   const feedbackKind = z.enum(["helpful", "incorrect", "incomplete", "irrelevant_context", "too_slow", "too_verbose", "bad_formatting", "other"]);
@@ -1093,6 +1115,7 @@ function startup() {
     (s) => store.setKv("settings", JSON.stringify(s)),
   );
   evals = new EvalService({
+    requireLive: () => core.entitlements.require("live_evaluation"),
     userCases: () => core.quality.userCases().map((u) => u.case),
     onUserCaseResult: (cid, result) => store.setUserCaseRun(cid, result),
     store: new EvalStore(path.join(userData, "evaluations"), os.homedir()),

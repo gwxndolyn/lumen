@@ -44,6 +44,9 @@ import { LruCache, type CachedResponse } from "./inference/cache";
 import { EmbeddingIndex } from "./inference/embeddings";
 import type { InferenceTargets } from "./chatService";
 import { QualityService } from "./quality/service";
+import { Entitlements } from "./commerce/entitlements";
+import { loadPublicKey } from "./commerce/license";
+import { COMMERCIAL } from "./commerce/config";
 import { BASE_SYSTEM_PROMPT } from "./context/promptBuilder";
 import { shortHash } from "./eval/prompts";
 import { ProviderError, type AIProvider } from "./providers/types";
@@ -94,6 +97,8 @@ export interface AppCoreDeps {
   /** fetch used for the local (loopback) runtime; injected by tests. */
   localFetch?: typeof fetch;
   appVersion?: string;
+  /** License public key (PEM). Defaults to the build's COMMERCIAL config; "" = open build. */
+  licensePublicKey?: string;
 }
 
 /**
@@ -150,6 +155,7 @@ export class AppCore {
   readonly usage: UsageService;
   readonly embeddings: EmbeddingIndex;
   readonly quality: QualityService;
+  readonly entitlements: Entitlements;
   /** In-memory only; cleared on restart, session deletion, "Delete everything" and on request. */
   readonly responseCache = new LruCache<CachedResponse>({ maxEntries: 100, maxBytes: 2_000_000, ttlMs: 10 * 60_000, size: (v) => v.text.length * 2 });
   live: TranscriptSession | null = null;
@@ -167,7 +173,13 @@ export class AppCore {
     this.now = deps.now ?? Date.now;
     this.settings = initial;
     this.health = this.initialHealth();
-    this.memory = new MemoryService(deps.store, this.now);
+    this.entitlements = new Entitlements({
+      publicKey: loadPublicKey(deps.licensePublicKey ?? COMMERCIAL.licensePublicKey),
+      store: { get: () => deps.store.getKv("license"), set: (v) => (v ? deps.store.setKv("license", v) : deps.store.deleteKv("license")) },
+      now: this.now,
+      revoked: new Set(COMMERCIAL.revokedLicenses),
+    });
+    this.memory = new MemoryService(deps.store, this.now, () => this.entitlements.limit("memories"));
     this.local = new LocalInference(() => this.settings, deps.localFetch, this.now);
     this.usage = new UsageService(deps.store, () => this.settings, this.now);
     this.embeddings = new EmbeddingIndex(deps.store, () => this.local.runtime());
@@ -220,7 +232,8 @@ export class AppCore {
       responseCache: this.responseCache,
       semanticKnowledge: (q, sessionId, signal) => {
         const m = this.settings.inference.local.embeddingModel;
-        return m ? this.embeddings.search(m, q, sessionId, 6, signal) : Promise.resolve(null);
+        // Keyword search always works; semantic search is a Pro feature.
+        return m && this.entitlements.can("semantic_search") ? this.embeddings.search(m, q, sessionId, 6, signal) : Promise.resolve(null);
       },
     });
     this.liveScreen = new LiveScreen(
@@ -242,6 +255,7 @@ export class AppCore {
   updateSettings(patch: unknown): Settings {
     const prev = this.settings;
     const next = applySettingsPatch(this.settings, patch);
+    if (next.inference.mode !== "manual" && prev.inference.mode !== next.inference.mode) this.entitlements.require("hybrid_routing");
     if (next.provider.kind === "mock" && prev.provider.kind !== "mock" && !this.devModeAllowed) {
       throw new Error("Development mode is not available in this build.");
     }
@@ -320,8 +334,10 @@ export class AppCore {
     const cloud = selectedKind === "ollama" ? null : this.providerFor(session);
     const localState = this.local.state();
     const local = this.local.wanted ? this.local.provider() : null;
+    // A plan change (e.g. an expired license) falls back to Manual; privacy restriction stays on for everyone.
+    const mode = s.inference.mode !== "manual" && !this.entitlements.can("hybrid_routing") ? "manual" : s.inference.mode;
     return {
-      policy: { mode: s.inference.mode, privacyRestricted: s.inference.privacyRestricted, cloudAllowed: s.inference.cloudAllowed, fallback: s.inference.fallback },
+      policy: { mode, privacyRestricted: s.inference.privacyRestricted, cloudAllowed: s.inference.cloudAllowed, fallback: s.inference.fallback },
       selectedKind,
       cloud,
       cloudLabel: cloud
