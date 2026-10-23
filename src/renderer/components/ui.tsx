@@ -266,6 +266,7 @@ export function MessageView({ m, onRetry, onCopy }: { m: UiMessage; onRetry?: ()
               Retry
             </button>
           )}
+          {m.status === "done" && !m.meta?.isMock && <FeedbackButton messageId={m.id} />}
         </div>
       )}
       {m.status !== "streaming" && m.selection && <ContextInspector m={m} />}
@@ -280,6 +281,87 @@ export function MessageView({ m, onRetry, onCopy }: { m: UiMessage; onRetry?: ()
         </div>
       )}
     </div>
+  );
+}
+
+const FEEDBACK_OPTIONS: { kind: "helpful" | "incorrect" | "incomplete" | "irrelevant_context" | "too_slow" | "too_verbose" | "bad_formatting" | "other"; label: string }[] = [
+  { kind: "helpful", label: "Helpful" },
+  { kind: "incorrect", label: "Incorrect" },
+  { kind: "incomplete", label: "Incomplete" },
+  { kind: "irrelevant_context", label: "Irrelevant context" },
+  { kind: "too_slow", label: "Too slow" },
+  { kind: "too_verbose", label: "Too verbose" },
+  { kind: "bad_formatting", label: "Incorrect formatting" },
+  { kind: "other", label: "Other" },
+];
+
+/**
+ * Optional feedback on one answer. Stored only on this computer, with the answer's metadata
+ * (task type, model, timings) — not the question, answer or context. Manage it in Diagnostics → Quality.
+ */
+function FeedbackButton({ messageId }: { messageId: string }) {
+  const [open, setOpen] = useState(false);
+  const [kind, setKind] = useState<(typeof FEEDBACK_OPTIONS)[number]["kind"] | null>(null);
+  const [note, setNote] = useState("");
+  const [expected, setExpected] = useState("");
+  const [state, setState] = useState<"idle" | "saved" | string>("idle");
+  if (state === "saved") return <span className="small faint">Thanks — saved locally</span>;
+  const send = (k: NonNullable<typeof kind>) =>
+    void api
+      .addFeedback({ messageId, kind: k, note: note || undefined, expected: expected || undefined })
+      .then(() => setState("saved"))
+      .catch((e) => setState(errMsg(e)));
+  return (
+    <span style={{ position: "relative" }}>
+      <button className="btn ghost sm" aria-expanded={open} onClick={() => setOpen(!open)} title="Rate this answer (stored only on this computer)">
+        Feedback
+      </button>
+      {open && (
+        <div className="card" role="dialog" aria-label="Answer feedback" style={{ position: "absolute", right: 0, bottom: "110%", width: 320, zIndex: 20, padding: 12 }}>
+          <div className="row" style={{ flexWrap: "wrap", gap: 4 }}>
+            {FEEDBACK_OPTIONS.map((o) => (
+              <button key={o.kind} className={`btn sm ${kind === o.kind ? "primary" : ""}`} aria-pressed={kind === o.kind} onClick={() => (o.kind === "helpful" ? send("helpful") : setKind(o.kind))}>
+                {o.label}
+              </button>
+            ))}
+          </div>
+          {kind && (
+            <div className="col" style={{ marginTop: 8 }}>
+              <textarea
+                className="textarea"
+                rows={2}
+                maxLength={2000}
+                aria-label="What was wrong (optional)"
+                placeholder="What was wrong? (optional)"
+                value={note}
+                onChange={(e) => setNote(e.target.value)}
+              />
+              {(kind === "incorrect" || kind === "incomplete") && (
+                <textarea
+                  className="textarea"
+                  rows={2}
+                  maxLength={4000}
+                  aria-label="Expected answer (optional)"
+                  placeholder="What should it have said? (optional)"
+                  value={expected}
+                  onChange={(e) => setExpected(e.target.value)}
+                />
+              )}
+              <div className="small faint">Saved on this computer only, with the answer's task type, model and timings — not the question, answer or context. Secrets you type are masked.</div>
+              <div className="row">
+                <button className="btn sm primary" onClick={() => send(kind)}>
+                  Save feedback
+                </button>
+                <button className="btn sm ghost" onClick={() => setOpen(false)}>
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
+          {state !== "idle" && <div className="alert error small">{state}</div>}
+        </div>
+      )}
+    </span>
   );
 }
 

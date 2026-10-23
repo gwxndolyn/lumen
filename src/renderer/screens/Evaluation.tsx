@@ -144,6 +144,7 @@ function RunPanel({ catalog, running, onStarted, onError }: { catalog: EvalCatal
   const [maxOut, setMaxOut] = useState(catalog.defaultLimits.maxOutputTokens);
   const [maxCases, setMaxCases] = useState(catalog.defaultLimits.maxCases);
   const [kind, setKind] = useState<"single" | "experiment">("single");
+  const [collection, setCollection] = useState<"benchmark" | "user" | "all">("benchmark");
   const [preset, setPreset] = useState(0);
   const [estimate, setEstimate] = useState<EvalEstimate | null>(null);
   const [confirm, setConfirm] = useState(false);
@@ -154,13 +155,14 @@ function RunPanel({ catalog, running, onStarted, onError }: { catalog: EvalCatal
     repeat,
     limits: { maxCostUsd: maxCost, concurrency, maxOutputTokens: maxOut, maxCases },
     experiment: kind === "experiment" ? catalog.presets[preset] : undefined,
+    collection,
     confirmLive: mode === "live" ? confirm : undefined,
   });
   useEffect(() => {
     setConfirm(false);
     if (mode !== "live") return setEstimate(null);
     void api.evalEstimate(req()).then(setEstimate, (e) => onError(errMsg(e)));
-  }, [mode, cats.join(","), repeat, maxOut, kind, preset]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [mode, cats.join(","), repeat, maxOut, kind, preset, collection]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const selectedCount = catalog.cases.filter((c) => !cats.length || cats.includes(c.category)).length;
   const toggle = (c: string) => setCats((x) => (x.includes(c) ? x.filter((y) => y !== c) : [...x, c]));
@@ -189,6 +191,22 @@ function RunPanel({ catalog, running, onStarted, onError }: { catalog: EvalCatal
             options={[
               { value: "deterministic", label: "Deterministic" },
               { value: "live", label: "Live model" },
+            ]}
+          />
+        </div>
+        <div className="field">
+          <div>
+            <div className="label">Cases</div>
+            <div className="hint">“My cases” are the test cases you created from feedback (Quality). They stay on this computer.</div>
+          </div>
+          <Segmented<"benchmark" | "user" | "all">
+            label="Case collection"
+            value={collection}
+            onChange={setCollection}
+            options={[
+              { value: "benchmark", label: "Benchmark" },
+              { value: "user", label: "My cases" },
+              { value: "all", label: "Both" },
             ]}
           />
         </div>

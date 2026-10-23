@@ -10,6 +10,7 @@ import { buildSupportBundle } from "../src/core/supportBundle";
 import { singleFlight } from "../src/core/singleFlight";
 import { EvalService } from "../src/core/eval/service";
 import { EvalStore } from "../src/core/eval/store";
+import { buildProposals } from "../src/core/quality/proposals";
 import { TesseractOcr } from "../src/core/ocr";
 import { SUPPORTED_DOC_EXTENSIONS, extractDocumentText } from "../src/core/knowledge";
 import type { Store } from "../src/core/storage/db";
@@ -504,6 +505,30 @@ function registerIpc() {
   handle("cache:stats", () => core.responseCache.stats());
   handle("cache:clear", () => core.responseCache.clear());
 
+  // ---- quality loop (local only; nothing is sent anywhere) ----
+  const feedbackKind = z.enum(["helpful", "incorrect", "incomplete", "irrelevant_context", "too_slow", "too_verbose", "bad_formatting", "other"]);
+  handle("quality:addFeedback", (_e, input) => {
+    const r = z.object({ messageId: id.nullable(), kind: feedbackKind, note: z.string().max(2000).optional(), expected: z.string().max(4000).optional() }).parse(input);
+    return core.quality.addFeedback(r);
+  });
+  handle("quality:listFeedback", () => core.quality.listFeedback());
+  handle("quality:deleteFeedback", (_e, fid) => core.quality.deleteFeedback(id.parse(fid)));
+  handle("quality:metrics", (_e, days) => core.quality.metrics(z.number().int().min(1).max(365).parse(days)));
+  handle("quality:proposals", () => {
+    const ev = store.qualityEvents(Date.now() - 30 * 86_400_000);
+    const runs = evals.list();
+    const latest = runs.find((r) => r.mode === "deterministic" && r.status === "complete");
+    const latestRun = latest ? evals.get(latest.id) : null;
+    const baselineId = runs.find((r) => r.isBaseline)?.id;
+    const baselineComparison = baselineId && latest && latest.id !== baselineId ? evals.compare(baselineId, latest.id) : null;
+    return buildProposals({ events: ev, feedback: core.quality.listFeedback(), latestRun, baselineComparison });
+  });
+  handle("quality:draftCase", (_e, fid) => core.quality.draftCase(id.parse(fid)));
+  handle("quality:saveCase", (_e, def, fid) => core.quality.saveCase(z.record(z.string(), z.unknown()).parse(def) as never, fid == null ? null : id.parse(fid)));
+  handle("quality:userCases", () => core.quality.userCases());
+  handle("quality:deleteUserCase", (_e, cid) => store.deleteUserCase(z.string().max(60).parse(cid)));
+  handle("quality:clear", () => store.clearQuality());
+
   // ---- evaluation lab (synthetic benchmark; live runs need explicit confirmation) ----
   const limitsSchema = z
     .object({
@@ -525,6 +550,7 @@ function registerIpc() {
     mode: z.enum(["deterministic", "live"]),
     caseIds: z.array(z.string().max(40)).max(500).optional(),
     categories: z.array(z.string().max(40)).max(20).optional(),
+    collection: z.enum(["benchmark", "user", "all"]).optional(),
     repeat: z.number().int().min(1).max(5).optional(),
     limits: limitsSchema.optional(),
     variant: variantSchema.optional(),
@@ -842,7 +868,16 @@ function registerIpc() {
     }
     const d = diagnostics();
     // Request rows carry only timings and token counts, but drop them to keep the file small.
-    const slim = { ...d, metrics: { ...d.metrics, requests: d.metrics.requests.slice(0, 20) } };
+    const q = core.quality.metrics(30);
+    const slim = {
+      ...d,
+      metrics: { ...d.metrics, requests: d.metrics.requests.slice(0, 20) },
+      os: { type: os.type(), release: os.release(), arch: os.arch(), memoryGb: Math.round(os.totalmem() / 1e8) / 10 },
+      schemaVersion: store.schemaVersion(),
+      // Counts and rates only — no feedback notes, questions or answers.
+      quality: { requests: q.requests, successRate: q.successRate, failuresByCode: q.failuresByCode, verificationByCheck: q.verificationByCheck, feedbackByKind: q.feedbackByKind, latency: q.latency },
+      inference: { mode: core.settings.inference.mode, privacyRestricted: core.settings.inference.privacyRestricted, localRuntime: core.local.state().status?.available ?? null },
+    };
     writeFileAtomic(res.filePath, buildSupportBundle({ diagnostics: slim as unknown as Record<string, unknown>, logText, home: os.homedir(), now: new Date() }), 0o600);
     logger.info("support bundle saved");
     return res.filePath;
@@ -1045,6 +1080,7 @@ function startup() {
       },
       log: (level, msg, data) => logger.log(level, msg, data),
       devModeAllowed: !app.isPackaged || process.env.LUMEN_ALLOW_DEV_MODE === "1",
+      appVersion: app.getVersion(),
       liveScreenCapture: async () => {
         // Live sampling captures the display under the cursor. The overlay is a normal window, so
         // it may appear in the frame; that is visible to the user and harmless.
@@ -1057,6 +1093,8 @@ function startup() {
     (s) => store.setKv("settings", JSON.stringify(s)),
   );
   evals = new EvalService({
+    userCases: () => core.quality.userCases().map((u) => u.case),
+    onUserCaseResult: (cid, result) => store.setUserCaseRun(cid, result),
     store: new EvalStore(path.join(userData, "evaluations"), os.homedir()),
     getSettings: () => core.settings,
     // A live run measures the selected provider; selecting "Local model" benchmarks the local model.

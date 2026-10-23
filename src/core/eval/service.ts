@@ -23,6 +23,8 @@ export interface StartRequest {
   /** Required for live runs: the user confirmed sending synthetic benchmark data to their provider. */
   confirmLive?: boolean;
   experiment?: ExperimentDef;
+  /** benchmark (default): shipped cases only; user: your cases from feedback; all: both. */
+  collection?: "benchmark" | "user" | "all";
 }
 
 export type EvalEvent = { type: "progress"; run: EvalRun } | { type: "finished"; runIds: string[]; error?: string };
@@ -35,6 +37,9 @@ export interface EvalServiceDeps {
   describeLocal?: () => Promise<{ runtimeVersion: string | null; loaded: { name: string; sizeBytes: number; vramBytes: number }[] }>;
   emit: (e: EvalEvent) => void;
   cases?: EvalCase[];
+  /** User-approved cases created from feedback (local only). */
+  userCases?: () => EvalCase[];
+  onUserCaseResult?: (caseId: string, result: { status: string; runId: string; at: number; checks: { describe: string; passed: boolean; detail: string }[] }) => void;
 }
 
 export class EvalService {
@@ -62,8 +67,14 @@ export class EvalService {
     return this.active !== null;
   }
 
-  select(req: Pick<StartRequest, "caseIds" | "categories">): EvalCase[] {
-    let out = this.cases;
+  /** The shipped benchmark plus the user's own cases (kept as a separate, user-approved collection). */
+  private allCases(includeUser: boolean): EvalCase[] {
+    return includeUser ? [...this.cases, ...(this.deps.userCases?.() ?? [])] : this.cases;
+  }
+
+  select(req: Pick<StartRequest, "caseIds" | "categories" | "collection">): EvalCase[] {
+    const col = req.collection ?? "benchmark";
+    let out = col === "user" ? (this.deps.userCases?.() ?? []) : this.allCases(col === "all");
     if (req.categories?.length) out = out.filter((c) => req.categories!.includes(c.category));
     if (req.caseIds?.length) out = out.filter((c) => req.caseIds!.includes(c.id));
     return out;
@@ -114,7 +125,17 @@ export class EvalService {
     const job = req.experiment ? runExperiment(req.experiment, base).then((r) => r.runs) : runEvaluation({ ...base, variant: req.variant, label: req.label }).then((r) => [r]);
     void job
       .then((runs) => {
-        for (const r of runs) this.deps.store.save(r);
+        for (const r of runs) {
+          this.deps.store.save(r);
+          for (const res of r.results)
+            if (res.caseId.startsWith("user-"))
+              this.deps.onUserCaseResult?.(res.caseId, {
+                status: res.status,
+                runId: r.id,
+                at: r.finishedAt ?? Date.now(),
+                checks: res.checks.map((c) => ({ describe: c.describe, passed: c.passed, detail: c.detail })),
+              });
+        }
         this.deps.emit({ type: "finished", runIds: runs.map((r) => r.id) });
       })
       .catch((e: Error) => this.deps.emit({ type: "finished", runIds: [], error: e.message }))

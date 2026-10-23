@@ -49,6 +49,11 @@ export function compareRuns(baseline: EvalRun, candidate: EvalRun): RunCompariso
     comparable = false;
     warnings.push(`Different modes (${baseline.config.mode} vs ${candidate.config.mode}): results measure different things.`);
   }
+  // Regressions cannot be hidden by editing a case: a changed definition is reported, not compared.
+  const edited = baseline.results.filter((b) => candidate.results.some((c) => c.caseId === b.caseId && c.caseHash !== b.caseHash)).map((b) => b.caseId);
+  if (edited.length) warnings.push(`${new Set(edited).size} case definition(s) changed since the baseline (${[...new Set(edited)].slice(0, 5).join(", ")}); they are inconclusive, not passes.`);
+  const dropped = [...new Set(baseline.results.map((r) => r.caseId))].filter((id) => !candidate.results.some((c) => c.caseId === id));
+  if (dropped.length) warnings.push(`${dropped.length} baseline case(s) were not run in the candidate (${dropped.slice(0, 5).join(", ")}).`);
   if (baseline.benchmarkVersion !== candidate.benchmarkVersion)
     warnings.push(`Benchmark versions differ (${baseline.benchmarkVersion} vs ${candidate.benchmarkVersion}); changed cases are inconclusive.`);
   if (baseline.status !== "complete") warnings.push(`The baseline run is ${baseline.status}.`);

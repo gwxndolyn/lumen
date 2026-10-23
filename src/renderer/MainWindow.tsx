@@ -21,6 +21,7 @@ import { InterviewScreen } from "./screens/Interview";
 import { TechnicalScreen } from "./screens/Technical";
 import { MemoryScreen } from "./screens/Memory";
 import { EvaluationScreen } from "./screens/Evaluation";
+import { QualityScreen } from "./screens/Quality";
 
 const MODES: { route: string; label: string; sub: string }[] = [
   { route: "interview", label: "Interview", sub: "Copilot" },
@@ -41,6 +42,7 @@ const NAV: { section?: string; route: string; label: string; icon: string }[] = 
   { route: "permissions", label: "Permissions", icon: "⛉" },
   { route: "privacy", label: "Privacy & data", icon: "◐" },
   { route: "diagnostics", label: "Diagnostics", icon: "≋" },
+  { route: "quality", label: "Quality", icon: "✓" },
   { route: "evaluation", label: "Evaluation Lab", icon: "⚗" },
 ];
 
@@ -135,6 +137,8 @@ export function MainWindow() {
         return <DiagnosticsScreen />;
       case "evaluation":
         return <EvaluationScreen />;
+      case "quality":
+        return <QualityScreen />;
       default:
         return <AssistantScreen settings={settings} update={update} live={live} />;
     }

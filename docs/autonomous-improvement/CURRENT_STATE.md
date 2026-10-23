@@ -28,7 +28,16 @@ Note: vitest and the smoke run need to write to `node_modules/.vite-temp`; under
 - Migration 7. Timeouts are no longer retried by default (behaviour change; test updated). Settings UI in AI provider. Eval runs can target the local model and record hardware/memory. Docs: `docs/LOCAL_AI.md`.
 - **Not verified against a real Ollama** (not installed here): all local tests use a stand-in speaking the documented wire format.
 
-**Next:** Prompt 10 (feedback, quality analytics, improvement proposals, release gate) — not started.
+## Prompt 10: quality loop (2026-10-23, committed)
+
+- Migration 8: `feedback`, `quality_events` (content-free), `user_eval_cases`. `quality/service.ts` (feedback, events, metrics, feedback → reviewed test case), `quality/proposals.ts` (evidence-gated proposals; ≥5 to raise, <30 preliminary).
+- Feedback button on answers; Quality screen (overview, feedback, proposals, my cases); "My cases" collection in the Evaluation Lab.
+- Comparisons now warn when case definitions changed or baseline cases were dropped (edited cases are inconclusive, never passes).
+- `npm run release:gate`: runs every check, writes `release-report.json`; NOT READY if a critical check fails or didn't run; READY FOR BETA without live-provider tests; signing never checked.
+- Gate result on this machine: READY FOR BETA (445 tests, 64/64 benchmark, 0 regressions vs baseline, smoke pass; live skipped).
+- No AI coding workflow exists in Lumen, so §7 is covered by this repo's process (branch, tests, gate, user approval before merge), not new code.
+
+**Next:** with an API key, run live evaluations (cloud and a local Ollama model) and record a baseline; then LUM-011.
 
 ## How to resume (any session, no chat history needed)
 

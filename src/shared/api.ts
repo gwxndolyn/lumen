@@ -42,6 +42,11 @@ import type { LoadedModel } from "../core/providers/ollama";
 import type { BudgetStatus, UsageService } from "../core/inference/usage";
 import type { CacheStats } from "../core/inference/cache";
 
+import type { FeedbackKind, FeedbackRecord, QualityService } from "../core/quality/service";
+import type { Proposal } from "../core/quality/proposals";
+import type { EvalCase } from "../core/eval/types";
+export type QualityMetrics = ReturnType<QualityService["metrics"]>;
+export type { FeedbackKind, FeedbackRecord, Proposal, EvalCase };
 export type UsageRow = ReturnType<UsageService["report"]>[number];
 export type { LocalState, EmbeddingIndexState, LoadedModel, BudgetStatus, CacheStats };
 type EvalCatalog = ReturnType<EvalService["catalog"]>;
@@ -211,6 +216,26 @@ export interface LumenApi {
   deleteMemory(id: string): Promise<void>;
   /** Save a support file (technical metadata + log tail, no content). Returns the path or null if cancelled. */
   saveSupportBundle(): Promise<string | null>;
+
+  // Quality loop (local only)
+  addFeedback(input: { messageId: string | null; kind: FeedbackKind; note?: string; expected?: string }): Promise<FeedbackRecord>;
+  listFeedback(): Promise<FeedbackRecord[]>;
+  deleteFeedback(id: string): Promise<void>;
+  qualityMetrics(days: number): Promise<QualityMetrics>;
+  qualityProposals(): Promise<Proposal[]>;
+  draftCase(feedbackId: string): Promise<{ draft: EvalCase; question: string; answer: string; warnings: string[] }>;
+  saveCase(def: EvalCase, feedbackId: string | null): Promise<EvalCase>;
+  userCases(): Promise<
+    {
+      case: EvalCase;
+      createdAt: number;
+      feedbackId: string | null;
+      lastRun: { status: string; runId: string; at: number; checks: { describe: string; passed: boolean; detail: string }[] } | null;
+      hash: string;
+    }[]
+  >;
+  deleteUserCase(id: string): Promise<boolean>;
+  clearQuality(): Promise<void>;
 
   // Hybrid inference (local runtime is contacted on loopback only; nothing is ever downloaded)
   localStatus(): Promise<LocalState & { embeddingIndex: EmbeddingIndexState }>;

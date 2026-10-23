@@ -125,6 +125,17 @@ export const MIGRATIONS: string[] = [
      chunk_id TEXT PRIMARY KEY REFERENCES knowledge_chunks(id) ON DELETE CASCADE,
      model TEXT NOT NULL, dims INTEGER NOT NULL, vector BLOB NOT NULL, created_at INTEGER NOT NULL);
    CREATE INDEX idx_chunk_embeddings_model ON chunk_embeddings(model, dims);`,
+  // 8: local quality loop — response feedback, content-free quality events, user benchmark cases
+  `CREATE TABLE feedback (
+     id TEXT PRIMARY KEY, message_id TEXT, created_at INTEGER NOT NULL, kind TEXT NOT NULL,
+     note TEXT, expected TEXT, meta TEXT NOT NULL);
+   CREATE INDEX idx_feedback_at ON feedback(created_at);
+   CREATE TABLE quality_events (
+     id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, type TEXT NOT NULL, provider TEXT, model TEXT,
+     category TEXT, code TEXT, latency_ms INTEGER, ttft_ms INTEGER, route TEXT, detail TEXT);
+   CREATE INDEX idx_quality_events_at ON quality_events(at, type);
+   CREATE TABLE user_eval_cases (
+     id TEXT PRIMARY KEY, created_at INTEGER NOT NULL, feedback_id TEXT, definition TEXT NOT NULL, last_run TEXT);`,
 ];
 
 type Row = Record<string, unknown>;
@@ -380,6 +391,110 @@ export class Store {
       retries: Number(r.rt),
       avgLatencyMs: r.lat == null ? null : Math.round(Number(r.lat)),
     }));
+  }
+
+  // ---- quality loop (local only) ----
+  addFeedback(f: { id: string; messageId: string | null; createdAt: number; kind: string; note: string | null; expected: string | null; meta: unknown }) {
+    this.db
+      .prepare("INSERT INTO feedback (id, message_id, created_at, kind, note, expected, meta) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .run(f.id, f.messageId, f.createdAt, f.kind, f.note, f.expected, JSON.stringify(f.meta));
+  }
+
+  listFeedback(limit = 500): { id: string; messageId: string | null; createdAt: number; kind: string; note: string | null; expected: string | null; meta: Record<string, unknown> }[] {
+    return (this.db.prepare("SELECT * FROM feedback ORDER BY created_at DESC LIMIT ?").all(limit) as Row[]).map((r) => ({
+      id: String(r.id),
+      messageId: r.message_id == null ? null : String(r.message_id),
+      createdAt: Number(r.created_at),
+      kind: String(r.kind),
+      note: r.note == null ? null : String(r.note),
+      expected: r.expected == null ? null : String(r.expected),
+      meta: safeJson<Record<string, unknown>>(String(r.meta), {}),
+    }));
+  }
+
+  getFeedback(id: string) {
+    return this.listFeedback(100_000).find((f) => f.id === id) ?? null;
+  }
+
+  deleteFeedback(id: string): boolean {
+    return Number(this.db.prepare("DELETE FROM feedback WHERE id = ?").run(id).changes) > 0;
+  }
+
+  addQualityEvent(e: {
+    at: number;
+    type: string;
+    provider?: string | null;
+    model?: string | null;
+    category?: string | null;
+    code?: string | null;
+    latencyMs?: number | null;
+    ttftMs?: number | null;
+    route?: string | null;
+    detail?: string | null;
+  }) {
+    this.db
+      .prepare("INSERT INTO quality_events (at, type, provider, model, category, code, latency_ms, ttft_ms, route, detail) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .run(e.at, e.type, e.provider ?? null, e.model ?? null, e.category ?? null, e.code ?? null, e.latencyMs ?? null, e.ttftMs ?? null, e.route ?? null, e.detail ?? null);
+  }
+
+  qualityEvents(since: number): {
+    at: number;
+    type: string;
+    provider: string | null;
+    model: string | null;
+    category: string | null;
+    code: string | null;
+    latencyMs: number | null;
+    ttftMs: number | null;
+    route: string | null;
+    detail: string | null;
+  }[] {
+    return (this.db.prepare("SELECT * FROM quality_events WHERE at >= ? ORDER BY at").all(since) as Row[]).map((r) => ({
+      at: Number(r.at),
+      type: String(r.type),
+      provider: r.provider == null ? null : String(r.provider),
+      model: r.model == null ? null : String(r.model),
+      category: r.category == null ? null : String(r.category),
+      code: r.code == null ? null : String(r.code),
+      latencyMs: r.latency_ms == null ? null : Number(r.latency_ms),
+      ttftMs: r.ttft_ms == null ? null : Number(r.ttft_ms),
+      route: r.route == null ? null : String(r.route),
+      detail: r.detail == null ? null : String(r.detail),
+    }));
+  }
+
+  pruneQuality(before: number): number {
+    const a = Number(this.db.prepare("DELETE FROM quality_events WHERE at < ?").run(before).changes);
+    const b = Number(this.db.prepare("DELETE FROM feedback WHERE created_at < ?").run(before).changes);
+    return a + b;
+  }
+
+  clearQuality() {
+    this.db.exec("DELETE FROM quality_events; DELETE FROM feedback; DELETE FROM user_eval_cases;");
+  }
+
+  saveUserCase(id: string, definition: unknown, feedbackId: string | null, now = Date.now()) {
+    this.db
+      .prepare("INSERT OR REPLACE INTO user_eval_cases (id, created_at, feedback_id, definition, last_run) VALUES (?, ?, ?, ?, (SELECT last_run FROM user_eval_cases WHERE id = ?))")
+      .run(id, now, feedbackId, JSON.stringify(definition), id);
+  }
+
+  listUserCases(): { id: string; createdAt: number; feedbackId: string | null; definition: unknown; lastRun: unknown }[] {
+    return (this.db.prepare("SELECT * FROM user_eval_cases ORDER BY created_at DESC").all() as Row[]).map((r) => ({
+      id: String(r.id),
+      createdAt: Number(r.created_at),
+      feedbackId: r.feedback_id == null ? null : String(r.feedback_id),
+      definition: safeJson(String(r.definition), null),
+      lastRun: r.last_run == null ? null : safeJson(String(r.last_run), null),
+    }));
+  }
+
+  setUserCaseRun(id: string, result: unknown) {
+    this.db.prepare("UPDATE user_eval_cases SET last_run = ? WHERE id = ?").run(JSON.stringify(result), id);
+  }
+
+  deleteUserCase(id: string): boolean {
+    return Number(this.db.prepare("DELETE FROM user_eval_cases WHERE id = ?").run(id).changes) > 0;
   }
 
   // ---- local embeddings (one model per index; mixing spaces is rejected) ----
@@ -848,7 +963,7 @@ export class Store {
 
   deleteAll() {
     this.db.exec(
-      "BEGIN; DELETE FROM sessions; DELETE FROM conversations; DELETE FROM transcript_sessions; DELETE FROM knowledge_docs; DELETE FROM meeting_insights; DELETE FROM context_items; DELETE FROM memories; DELETE FROM chunk_embeddings; UPDATE usage_ledger SET session_id = NULL, category = NULL; COMMIT;",
+      "BEGIN; DELETE FROM sessions; DELETE FROM conversations; DELETE FROM transcript_sessions; DELETE FROM knowledge_docs; DELETE FROM meeting_insights; DELETE FROM context_items; DELETE FROM memories; DELETE FROM chunk_embeddings; DELETE FROM feedback; DELETE FROM quality_events; DELETE FROM user_eval_cases; UPDATE usage_ledger SET session_id = NULL, category = NULL; COMMIT;",
     );
     this.purgeDeleted();
     this.db.exec("VACUUM");

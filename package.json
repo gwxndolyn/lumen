@@ -33,7 +33,8 @@
     "format:all": "prettier --check \"electron/**/*.ts\" \"src/**/*.{ts,tsx}\" \"scripts/**/*.mjs\"",
     "audit:raw": "npm audit --omit=dev --audit-level=high",
     "eval": "npm run build:main && node scripts/eval.mjs",
-    "eval:live": "npm run build:main && node scripts/eval.mjs --live"
+    "eval:live": "npm run build:main && node scripts/eval.mjs --live",
+    "release:gate": "npm run build:main && node scripts/release-gate.mjs"
   },
   "license": "UNLICENSED",
   "dependencies": {

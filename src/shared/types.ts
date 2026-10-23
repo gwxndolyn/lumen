@@ -398,6 +398,8 @@ export interface MessageMeta {
   verification?: { checksRun: number; findings: { check: string; severity: "warn" | "info"; message: string }[] };
   /** Set when economy routing chose a different model of the same provider. */
   routedFrom?: string;
+  /** Provider kind that produced the answer. */
+  provider?: ProviderKind;
   /** Where hybrid routing ran it. */
   route?: "local" | "cloud";
   cached?: boolean;

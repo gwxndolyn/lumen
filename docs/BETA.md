@@ -93,20 +93,29 @@ Data folder:
 - per-stage timings: time to first token, total, context prep, OCR wait, input → request sent, transcription, OCR, screen capture, stop → stopped
 - memory, and failures by error code
 
-**Save support file** writes versions, health and the log tail with keys and your home path scrubbed. It contains no content.
+**Save support file** writes the app version, OS and architecture, schema version, health, routing mode, quality counts (success rate, failures by code, feedback counts) and the log tail, with keys and your home path scrubbed. It contains no questions, answers, context or feedback notes. Attach it to a bug report.
 
 | Symptom | Cause / fix |
 |---|---|
 | "No API key is configured…" | Add a key in *Settings → AI provider* |
 | "The … API key was rejected" | Key revoked or mistyped. Replace it. Lumen doesn't retry auth failures. |
-| "Rate limited…" / "overloaded" | Lumen retries up to 3 times with backoff (honouring `retry-after`) **before** any text appears. After that, press Retry. |
+| "Rate limited…" / "overloaded" | Lumen retries up to 3 times with backoff (honouring `retry-after`) **before** any text appears (configurable: *AI provider → Usage limits → Attempts per request*). After that, press Retry. |
+| "The AI provider timed out" | Not retried automatically (the request may already have been processed and billed). Press Retry, or allow *Retry after a timeout*. |
+| "Privacy restriction keeps … on this device" | Privacy restriction is on and no local model can take the request. Set up a local model, remove that context, or allow it to go to the cloud. |
 | "The connection … was interrupted" mid-answer | The partial answer is kept and marked incomplete. Retry regenerates it. |
 | "The capture came back blank" (macOS) | Screen Recording permission is not active yet. Grant it and restart Lumen. |
 | "Microphone capture failed" | Device unplugged or permission denied. Recording stops and the transcript so far is kept. |
 | Shortcut shows "conflict" | Another app owns it. Rebind it in *Settings → Shortcuts*. |
 | "Lumen started with a fresh database" | The old database was corrupt or a migration failed. It was moved aside (not deleted), and its path is in the dialog. |
 
-## 8. Tests and quality gates
+## 8. Feedback and quality (beta testers)
+
+- Under any answer, **Feedback** → Helpful / Incorrect / Incomplete / Irrelevant context / Too slow / Too verbose / Incorrect formatting / Other, with an optional note and expected answer. It is stored **only on this computer** with the answer's metadata (task type, provider, model, route, timings, answer-check results) — not the question, answer or context. Secrets you type are masked.
+- *Quality* (sidebar) shows metrics computed from recorded events (requests, success and cancel rates, latency p50/p95, failures by error, answer-check flags, feedback), your feedback (inspect, delete), **proposals** (recurring problems with evidence; nothing below 5 occurrences; under 30 is marked preliminary), and **My test cases**.
+- **Create test case** turns flagged feedback into an evaluation case: you review and edit it first; the question is redacted; context is not copied. It joins a local "My cases" collection, separate from the shipped benchmark, runs in the Evaluation Lab, and keeps its last result.
+- Events and feedback follow the conversation-retention setting and are removed by *Delete everything*. Nothing is uploaded; to share, export the support file or a run and send it yourself.
+
+## 9. Tests and quality gates
 
 ```bash
 npm run typecheck        # strict TS, main + renderer
@@ -116,15 +125,21 @@ npm run check:secrets    # no real-looking keys in tracked files
 npm run audit:prod       # advisories in code that actually ships
 npm run smoke            # real Electron app + UI vs local Anthropic/Deepgram stand-ins and the real mic
 npm run release:check    # all of the above except smoke
+npm run eval             # deterministic intelligence benchmark (64 cases)
+npm run release:gate     # everything, recorded in release-report.json, with a READY / NOT READY verdict
 npm run test:live        # real providers; needs ANTHROPIC_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY / DEEPGRAM_API_KEY
 ```
 
 `npm run smoke` exits non-zero unless the app prints `SMOKE PASS`. It needs a display, permission to bind 127.0.0.1, and a working microphone. It cannot run headless in CI.
 
+### Release gate
+
+`npm run release:gate -- --baseline <recorded-run.json>` runs type check, lint, tests, secret scan, audit, build, the deterministic benchmark (compared with the baseline), the Electron smoke test and — if `ANTHROPIC_API_KEY` is set — live provider tests. It writes `release-report.json` with each check's actual result. A critical check that **fails or could not run** makes the verdict NOT READY; it is never counted as passed. With all critical checks passing the verdict is *READY FOR BETA*; it becomes *READY FOR RELEASE CANDIDATE* only when live provider tests also ran and passed. Code signing is never checked by the gate. Baseline thresholds are the recorded run itself: any regressed case blocks.
+
 ### Pre-release smoke procedure (run before every beta build, ~10 min)
 
-1. `npm run release:check`: must exit 0.
-2. `npm run smoke`: must print `SMOKE PASS`.
+1. `npm run release:gate -- --baseline <last release-benchmark.json>`: must exit 0 (READY FOR BETA or better).
+2. (included in 1) `npm run smoke`: must print `SMOKE PASS`.
 3. `npm run package:mac` (or `package:win` on Windows), then `npm run smoke:packaged`: must print `SMOKE PASS`.
 4. Manual, in the packaged app with a **real** key (this is the only step that touches real services):
    1. Fresh profile: `LUMEN_USER_DATA=$(mktemp -d) <app>`. Onboarding appears. Configure the provider; **Test connection** shows *Connected*.
@@ -137,7 +152,7 @@ npm run test:live        # real providers; needs ANTHROPIC_API_KEY / OPENAI_API_
    8. *Privacy → Delete everything*: Sessions, History and Transcript are empty.
 5. Record the results (pass/fail per step, OS version, build) in the release notes.
 
-## 9. Platform status and known limitations
+## 10. Platform status and known limitations
 
 Verified on **macOS 26 arm64** only:
 - unit and integration suite
@@ -158,7 +173,9 @@ Still requires a person on the other platform or with credentials:
 | Real Anthropic / OpenAI / Gemini / Deepgram calls | ⬜ no keys on the build machine; `npm run test:live` is ready | — |
 
 Other limitations:
-- Retrieval is keyword (BM25) based, not semantic. Paraphrased questions can miss relevant passages.
+- Retrieval is keyword (BM25) based unless you set up a local embedding model (see `docs/LOCAL_AI.md`). Paraphrased questions can miss relevant passages.
+- Local models (Ollama) are supported but not yet verified against a real runtime; see `docs/LOCAL_AI.md`.
+- Quality metrics and proposals are local to one install. With little use they are preliminary; they are not a measure of answer quality — the Evaluation Lab is.
 - Oversized documents are reduced to their opening plus the passages matching the question. A passage that shares no words with the question can still be omitted.
 - Response-planner intent rules score 78% / 42% (relations / categories) on a held-out set. A miss falls back to a general strategy; it does not refuse.
 - Memory use is about 670 MB across Electron processes on macOS.

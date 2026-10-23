@@ -43,6 +43,9 @@ import { UsageService } from "./inference/usage";
 import { LruCache, type CachedResponse } from "./inference/cache";
 import { EmbeddingIndex } from "./inference/embeddings";
 import type { InferenceTargets } from "./chatService";
+import { QualityService } from "./quality/service";
+import { BASE_SYSTEM_PROMPT } from "./context/promptBuilder";
+import { shortHash } from "./eval/prompts";
 import { ProviderError, type AIProvider } from "./providers/types";
 import { toUserError } from "./errors";
 import type { Store } from "./storage/db";
@@ -90,6 +93,7 @@ export interface AppCoreDeps {
   pipelineOverrides?: PipelineOverrides;
   /** fetch used for the local (loopback) runtime; injected by tests. */
   localFetch?: typeof fetch;
+  appVersion?: string;
 }
 
 /**
@@ -145,6 +149,7 @@ export class AppCore {
   readonly local: LocalInference;
   readonly usage: UsageService;
   readonly embeddings: EmbeddingIndex;
+  readonly quality: QualityService;
   /** In-memory only; cleared on restart, session deletion, "Delete everything" and on request. */
   readonly responseCache = new LruCache<CachedResponse>({ maxEntries: 100, maxBytes: 2_000_000, ttlMs: 10 * 60_000, size: (v) => v.text.length * 2 });
   live: TranscriptSession | null = null;
@@ -166,6 +171,14 @@ export class AppCore {
     this.local = new LocalInference(() => this.settings, deps.localFetch, this.now);
     this.usage = new UsageService(deps.store, () => this.settings, this.now);
     this.embeddings = new EmbeddingIndex(deps.store, () => this.local.runtime());
+    this.quality = new QualityService({
+      store: deps.store,
+      appVersion: deps.appVersion ?? "dev",
+      promptHash: shortHash(BASE_SYSTEM_PROMPT),
+      now: this.now,
+      // Quality events follow the conversation retention setting (0 = keep).
+      retentionDays: () => this.settings.privacy.conversationRetentionDays,
+    });
     this.engine = new ContextEngine(
       deps.store,
       {
@@ -186,6 +199,11 @@ export class AppCore {
       getLiveTranscript: (sessionId) => this.transcriptContext(sessionId),
       awaitPending: (sessionId) => this.awaitOcr(sessionId),
       emit: (e) => {
+        try {
+          this.quality.observe(e);
+        } catch (err) {
+          deps.log?.("warn", "quality event not recorded", { error: (err as Error)?.name ?? "Error" });
+        }
         deps.emitChat(e);
         if (e.type === "done" || e.type === "cancelled" || e.type === "error") deps.emitApp({ type: "history-changed" });
       },
@@ -1008,6 +1026,7 @@ export class AppCore {
   sweep() {
     const n = this.engine.sweep();
     this.deps.store.sweepMemories(this.now());
+    this.quality.sweep();
     const r = this.deps.store.applyRetention(this.settings.privacy.conversationRetentionDays, this.settings.privacy.transcriptRetentionDays, this.now());
     return { ...r, context: n + r.context };
   }

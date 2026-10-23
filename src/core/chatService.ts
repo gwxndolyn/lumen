@@ -527,6 +527,7 @@ export class ChatService {
         meta: {
           model: result.model,
           isMock: servedBy.isMock,
+          provider: servedBy.kind,
           estimatedCostUsd: cost,
           stopReason: result.stopReason,
           style,
