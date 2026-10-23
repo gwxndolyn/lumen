@@ -34,7 +34,8 @@
     "audit:raw": "npm audit --omit=dev --audit-level=high",
     "eval": "npm run build:main && node scripts/eval.mjs",
     "eval:live": "npm run build:main && node scripts/eval.mjs --live",
-    "release:gate": "npm run build:main && node scripts/release-gate.mjs"
+    "release:gate": "npm run build:main && node scripts/release-gate.mjs",
+    "bench:reliability": "npm run build:main && node --expose-gc scripts/reliability-bench.mjs"
   },
   "license": "UNLICENSED",
   "dependencies": {

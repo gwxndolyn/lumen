@@ -46,7 +46,14 @@ export function CaptureScreen({ settings, update, go }: { settings: Settings; up
     return (
       <>
         {header}
-        <Empty title="Screen context is off" action={<button className="btn primary" onClick={() => go("permissions")}>Open permissions</button>}>
+        <Empty
+          title="Screen context is off"
+          action={
+            <button className="btn primary" onClick={() => go("permissions")}>
+              Open permissions
+            </button>
+          }
+        >
           Lumen never captures your screen in the background. Enable screen context to capture a screen, a window or a region when you ask.
         </Empty>
       </>
@@ -106,7 +113,8 @@ export function CaptureScreen({ settings, update, go }: { settings: Settings; up
               <div className="grow">
                 <h3 style={{ margin: 0 }}>Live screen context</h3>
                 <div className="small muted">
-                  Off by default. While on, Lumen samples the display under your cursor every {settings.screen.liveIntervalSec}s and keeps only the latest frame. A “Live screen” indicator stays visible in the panel and menu bar.
+                  Off by default. While on, Lumen samples the display under your cursor every {settings.screen.liveIntervalSec}s and keeps only the latest frame. A “Live screen” indicator stays
+                  visible in the panel and menu bar.
                 </div>
               </div>
               {live?.active ? (
@@ -131,9 +139,22 @@ export function CaptureScreen({ settings, update, go }: { settings: Settings; up
               )}
             </div>
             {live?.active && (
-              <div className="small faint" style={{ marginTop: 6 }}>
-                {live.captures} frames{live.skipped ? ` (${live.skipped} unchanged, skipped)` : ""} · {live.lastCaptureAt ? `last ${Math.max(0, Math.round((now - live.lastCaptureAt) / 1000))}s ago` : "starting…"}
+              <div className="small faint" style={{ marginTop: 6 }} role="status" aria-live="polite">
+                {live.status === "paused" ? "Paused · " : live.status === "recovering" ? "Retrying after a failed capture · " : ""}
+                {live.captures} frames{live.skipped ? ` (${live.skipped} unchanged, skipped)` : ""} ·{" "}
+                {live.lastCaptureAt ? `last ${Math.max(0, Math.round((now - live.lastCaptureAt) / 1000))}s ago` : "starting…"}
+                {live.status === "active" && live.effectiveIntervalSec > live.intervalSec && ` · screen unchanged, checking every ${live.effectiveIntervalSec}s`}
                 {live.lastError && <span style={{ color: "var(--danger)" }}> · {live.lastError}</span>}
+              </div>
+            )}
+            {!live?.active && live && (live.status === "permission_required" || live.status === "failed" || live.status === "unsupported") && (
+              <div className="alert error small" role="alert" style={{ marginTop: 8 }}>
+                {live.status === "permission_required"
+                  ? "Live screen context stopped: screen capture permission is needed. "
+                  : live.status === "failed"
+                    ? "Live screen context stopped. "
+                    : "Live screen context isn't available here. "}
+                {live.lastError}
               </div>
             )}
           </div>
@@ -167,7 +188,15 @@ export function CaptureScreen({ settings, update, go }: { settings: Settings; up
             }
           />
         ) : sources === null ? (
-          <div className="row muted">{busy ? <><span className="spinner" /> Looking for screens and windows…</> : "No capture sources loaded."}</div>
+          <div className="row muted">
+            {busy ? (
+              <>
+                <span className="spinner" /> Looking for screens and windows…
+              </>
+            ) : (
+              "No capture sources loaded."
+            )}
+          </div>
         ) : sources.length === 0 ? (
           <Empty title="Nothing to capture">
             {api.platform === "darwin"
@@ -178,17 +207,21 @@ export function CaptureScreen({ settings, update, go }: { settings: Settings; up
           <>
             <div className="section-label">Screens</div>
             <div className="capture-grid">
-              {sources.filter((s) => s.kind === "screen").map((s) => (
-                <Tile key={s.id} s={s} onPick={pick} />
-              ))}
+              {sources
+                .filter((s) => s.kind === "screen")
+                .map((s) => (
+                  <Tile key={s.id} s={s} onPick={pick} />
+                ))}
             </div>
             {caps?.windows !== false && (
               <>
                 <div className="section-label">Windows</div>
                 <div className="capture-grid">
-                  {sources.filter((s) => s.kind === "window").map((s) => (
-                    <Tile key={s.id} s={s} onPick={pick} />
-                  ))}
+                  {sources
+                    .filter((s) => s.kind === "window")
+                    .map((s) => (
+                      <Tile key={s.id} s={s} onPick={pick} />
+                    ))}
                 </div>
               </>
             )}
@@ -199,7 +232,9 @@ export function CaptureScreen({ settings, update, go }: { settings: Settings; up
           <details className="card" style={{ marginTop: 16 }}>
             <summary className="small">Platform support ({caps.platform})</summary>
             <ul className="small muted">
-              <li>Screens: {caps.screens ? "yes" : "no"} · Windows: {caps.windows ? "yes" : "no"} · Regions: {caps.region ? "yes" : "no"} · Image import: yes · OCR: on-device</li>
+              <li>
+                Screens: {caps.screens ? "yes" : "no"} · Windows: {caps.windows ? "yes" : "no"} · Regions: {caps.region ? "yes" : "no"} · Image import: yes · OCR: on-device
+              </li>
               <li>OS permission: {caps.permission}</li>
               {caps.notes.map((n) => (
                 <li key={n}>{n}</li>
@@ -215,7 +250,13 @@ export function CaptureScreen({ settings, update, go }: { settings: Settings; up
 function Tile({ s, onPick }: { s: CaptureSource; onPick: (s: CaptureSource) => void }) {
   return (
     <button className="capture-tile" onClick={() => onPick(s)}>
-      {s.thumbnailDataUrl ? <img src={s.thumbnailDataUrl} alt="" /> : <div className="muted small" style={{ height: 110, display: "grid", placeItems: "center" }}>No preview</div>}
+      {s.thumbnailDataUrl ? (
+        <img src={s.thumbnailDataUrl} alt="" />
+      ) : (
+        <div className="muted small" style={{ height: 110, display: "grid", placeItems: "center" }}>
+          No preview
+        </div>
+      )}
       <div title={s.name}>{s.name}</div>
     </button>
   );

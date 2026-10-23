@@ -26,6 +26,12 @@ export class Metrics {
     this.totalRetries += m.retries;
   }
 
+  /** OCR jobs skipped because their frame was superseded or removed first. */
+  ocrCancelled = 0;
+  recordOcrCancelled() {
+    this.ocrCancelled++;
+  }
+
   recordTranscriptionLatency(ms: number) {
     this.transcriptionLatencies.push(ms);
     if (this.transcriptionLatencies.length > this.cap) this.transcriptionLatencies.shift();
@@ -87,6 +93,7 @@ export class Metrics {
       sessionCostUsd: Math.round(this.sessionCostUsd * 1e6) / 1e6,
       transcriptionP50LatencyMs: percentile(this.transcriptionLatencies, 50),
       ocrP50Ms: percentile(this.ocrDurations, 50),
+      ocrCancelled: this.ocrCancelled,
       verification: { ...this.verifications, byCheck: { ...this.verifications.byCheck } },
       captureP50Ms: percentile(this.captureDurations, 50),
       cancelP50Ms: percentile(this.cancelDurations, 50),

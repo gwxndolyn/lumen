@@ -591,6 +591,17 @@ export interface LiveScreenState {
   captures: number;
   /** Frames skipped because the screen had not changed since the last accepted frame. */
   skipped: number;
+  /** inactive · active · paused · recovering (transient failure, retrying with backoff) ·
+   *  permission_required · unsupported · failed (gave up after repeated failures). */
+  status: "inactive" | "active" | "paused" | "recovering" | "permission_required" | "unsupported" | "failed";
+  /** Consecutive failed captures. */
+  failures: number;
+  /** Current sampling interval after adaptive backoff (≥ intervalSec). */
+  effectiveIntervalSec: number;
+  /** Captures that finished after Stop or a session switch and were thrown away. */
+  discarded: number;
+  /** Display of the latest capture, when known. */
+  display?: string | null;
 }
 
 export interface RequestMetric {
@@ -628,6 +639,8 @@ export interface Diagnostics {
   capture: CaptureCapabilities;
   platformProfile: import("../core/platform").PlatformProfile;
   shortcutsRegistered: Record<string, boolean>;
+  /** Capture/processing pipeline state (counts and statuses only). */
+  pipeline?: ReturnType<import("../core/app").AppCore["pipelineState"]>;
   metrics: {
     requests: RequestMetric[];
     p50TtftMs: number | null;
@@ -643,6 +656,8 @@ export interface Diagnostics {
     sessionCostUsd: number;
     transcriptionP50LatencyMs: number | null;
     ocrP50Ms: number | null;
+    /** OCR jobs skipped because the frame was superseded first. */
+    ocrCancelled: number;
     captureP50Ms: number | null;
     cancelP50Ms: number | null;
     cancelMaxMs: number | null;

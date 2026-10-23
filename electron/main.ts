@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, dialog, globalShortcut, ipcMain, Menu, nativeImage, powerMonitor, safeStorage, session, shell, Tray, type IpcMainInvokeEvent } from "electron";
+import { app, BrowserWindow, clipboard, dialog, globalShortcut, ipcMain, Menu, nativeImage, powerMonitor, safeStorage, screen, session, shell, Tray, type IpcMainInvokeEvent } from "electron";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -13,6 +13,7 @@ import { EvalStore } from "../src/core/eval/store";
 import { buildProposals } from "../src/core/quality/proposals";
 import { COMMERCIAL } from "../src/core/commerce/config";
 import { checkForUpdate } from "../src/core/commerce/updates";
+import { LiveScreenFatal } from "../src/core/liveScreen";
 import { TesseractOcr } from "../src/core/ocr";
 import { SUPPORTED_DOC_EXTENSIONS, extractDocumentText } from "../src/core/knowledge";
 import type { Store } from "../src/core/storage/db";
@@ -22,7 +23,7 @@ import { CATEGORY_LABELS } from "../src/core/interview/questions";
 import type { AppEvent } from "../src/shared/api";
 import { loadSettingsJson, modeEnum, styleEnum, toneEnum, effortEnum } from "../src/shared/settingsSchema";
 import type { AudioInputState, Diagnostics } from "../src/shared/types";
-import { CaptureService, IMAGE_EXTENSIONS, permissionSettingsUrl, permissionStatus, requestMicrophone } from "./capture";
+import { CaptureError, CaptureService, IMAGE_EXTENSIONS, permissionSettingsUrl, permissionStatus, requestMicrophone } from "./capture";
 import { Logger } from "./logger";
 import { SecretStore } from "./secrets";
 import { isTrustedUrl, WindowManager } from "./windows";
@@ -962,6 +963,7 @@ function diagnostics(): Diagnostics {
     platformProfile: currentPlatform(),
     shortcutsRegistered: { ...shortcutStatus },
     metrics: core.metrics.snapshot(),
+    pipeline: core.pipelineState(),
     process: { memoryMb: Math.round(allMem), cpuPercent: elapsed > 0 ? Math.round(((cpu.user + cpu.system) / elapsed) * 1000) / 10 : 0 },
     storage: store.counts(),
   };
@@ -1106,7 +1108,14 @@ function startup() {
       liveScreenCapture: async () => {
         // Live sampling captures the display under the cursor. The overlay is a normal window, so
         // it may appear in the frame; that is visible to the user and harmless.
-        const held = await capture.captureCursorDisplay();
+        let held: Awaited<ReturnType<typeof capture.captureCursorDisplay>>;
+        try {
+          held = await capture.captureCursorDisplay();
+        } catch (err) {
+          // The OS blocked capture: retrying won't help, the user has to grant permission.
+          if (err instanceof CaptureError && err.code === "permission") throw new LiveScreenFatal(err.message, "permission_required");
+          throw err;
+        }
         const f = capture.finalize(held.captureId, null);
         return { title: f.title, sourceId: f.sourceId, vision: f.vision, ocrPng: f.ocrPng, thumbnailDataUrl: f.thumbnailDataUrl, fingerprint: f.fingerprint };
       },
@@ -1188,10 +1197,20 @@ function registerLifecycle() {
   });
   powerMonitor.on("resume", () => {
     windows.ensureOverlayVisible();
+    // Live screen was paused for sleep; it stays paused until the user resumes it (like audio).
+    if (core.liveScreenState.active && core.liveScreenState.paused) toast("info", "Live screen context was paused while your computer slept. Resume it from Screen context.");
     if (wasRecording) toast("info", "Recording was paused while your computer slept. Press Resume to continue.");
     wasRecording = false;
     logger.info("system resume");
   });
+  // Display layout changed: the next live frame should reflect it promptly instead of waiting out
+  // an adaptive (longer) interval. The capture backend picks the display under the cursor each time.
+  for (const ev of ["display-added", "display-removed", "display-metrics-changed"] as const) {
+    screen.on(ev as "display-added", () => {
+      logger.info("display change", { event: ev, displays: screen.getAllDisplays().length });
+      core.liveScreen.nudge();
+    });
+  }
   windows.onRendererGone = (role, reason) => {
     logger.error("renderer gone", { role, reason });
     // The overlay hosts audio capture; if it died the microphone stream is gone too.

@@ -10,7 +10,8 @@ export interface OcrResult {
 
 /** Text recognition backend. Runs fully on-device; implementations must not upload images. */
 export interface OcrEngine {
-  recognize(image: Buffer): Promise<OcrResult>;
+  /** `signal`: abort before the job starts (e.g. the frame was superseded) to skip the work. */
+  recognize(image: Buffer, signal?: AbortSignal): Promise<OcrResult>;
   dispose(): Promise<void>;
 }
 
@@ -31,9 +32,7 @@ export class TesseractOcr implements OcrEngine {
   /** Captures waiting for OCR beyond this are rejected immediately instead of queueing forever. */
   static readonly MAX_PENDING = 4;
 
-  constructor(
-    private readonly opts: { langPath?: string; timeoutMs?: number; cachePath?: string } = {},
-  ) {}
+  constructor(private readonly opts: { langPath?: string; timeoutMs?: number; cachePath?: string } = {}) {}
 
   private langPath(): string {
     if (this.opts.langPath) return this.opts.langPath;
@@ -59,10 +58,19 @@ export class TesseractOcr implements OcrEngine {
     return this.worker;
   }
 
-  recognize(image: Buffer): Promise<OcrResult> {
+  /** Jobs skipped because they were cancelled before starting (diagnostics). */
+  cancelled = 0;
+
+  recognize(image: Buffer, signal?: AbortSignal): Promise<OcrResult> {
+    if (signal?.aborted) return Promise.reject(new OcrCancelled());
     if (this.pending >= TesseractOcr.MAX_PENDING) return Promise.reject(new Error("text recognition is busy — try again in a moment"));
     this.pending++;
     const job = this.queue.then(async () => {
+      // Superseded while waiting in the queue: don't spend seconds of CPU on a frame nobody needs.
+      if (signal?.aborted) {
+        this.cancelled++;
+        throw new OcrCancelled();
+      }
       const started = Date.now();
       const worker = await this.start();
       const timeout = this.opts.timeoutMs ?? 30_000;
@@ -94,14 +102,23 @@ export class TesseractOcr implements OcrEngine {
   }
 }
 
+export class OcrCancelled extends Error {
+  constructor() {
+    super("text recognition was cancelled");
+    this.name = "OcrCancelled";
+  }
+}
+
 /** Collapse OCR noise: stray single-symbol lines and runs of whitespace. */
 export function cleanOcrText(text: string): string {
-  return text
-    .split("\n")
-    .map((l) => l.replace(/[ \t]+/g, " ").trim())
-    // Keep blank lines (paragraph breaks); drop lines that are a lone stray symbol.
-    .filter((l) => l.length === 0 || l.length > 1 || /[\p{L}\p{N}]/u.test(l))
-    .join("\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
+  return (
+    text
+      .split("\n")
+      .map((l) => l.replace(/[ \t]+/g, " ").trim())
+      // Keep blank lines (paragraph breaks); drop lines that are a lone stray symbol.
+      .filter((l) => l.length === 0 || l.length > 1 || /[\p{L}\p{N}]/u.test(l))
+      .join("\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim()
+  );
 }

@@ -23,7 +23,7 @@ import type {
 import { ChatService, type LiveTranscriptContext, type PipelineOverrides } from "./chatService";
 import { ContextEngine, type ContextRecord } from "./context/engine";
 import { addKnowledgeText, importKnowledge } from "./knowledge";
-import { LiveScreen } from "./liveScreen";
+import { LiveScreen, LiveScreenFatal, type TickResult } from "./liveScreen";
 import { MemoryService } from "./intelligence/memory";
 import { hasChanged } from "./frameDiff";
 import { generateInsights, notesToMarkdown } from "./meetingService";
@@ -33,7 +33,7 @@ import { interviewPrompt, technicalPrompt, type AnswerLength, type TechnicalDeta
 import { chunkText, normalizeText } from "./context/text";
 import { PROFILE_SECTIONS, type ProfileSection } from "./interview/profile";
 import { Metrics } from "./metrics";
-import type { OcrEngine } from "./ocr";
+import { OcrCancelled, type OcrEngine } from "./ocr";
 import { AnthropicProvider } from "./providers/anthropic";
 import { MockProvider } from "./providers/mock";
 import { OpenAICompatProvider } from "./providers/openaiCompat";
@@ -161,6 +161,8 @@ export class AppCore {
   live: TranscriptSession | null = null;
   health: ProviderHealth;
   private ocrJobs = new Map<string, Promise<void>>();
+  /** Cancels queued OCR for a capture that was removed or superseded before OCR started. */
+  private ocrAborts = new Map<string, AbortController>();
   private liveScreenItemId: string | null = null;
   private liveFingerprint: Uint8Array | null = null;
   private readonly now: () => number;
@@ -237,7 +239,7 @@ export class AppCore {
       },
     });
     this.liveScreen = new LiveScreen(
-      () => this.liveScreenTick(),
+      (run) => this.liveScreenTick(run),
       (s) => deps.emitApp({ type: "live-screen", state: s }),
       () => this.isPermitted("screen"),
       this.now,
@@ -273,6 +275,8 @@ export class AppCore {
     if (prev.consent.screen && !this.settings.consent.screen) {
       this.liveScreen.stop();
       this.engine.revoke("screen");
+      for (const c of this.ocrAborts.values()) c.abort();
+      this.ocrAborts.clear();
       this.ocrJobs.clear();
       this.deps.emitApp({ type: "permission-revoked", permission: "screen" });
     }
@@ -450,7 +454,11 @@ export class AppCore {
     const s = this.deps.store.getSession(id);
     if (!s) throw new Error("Session not found.");
     const prev = this.settings.activeSessionId;
-    if (prev && prev !== id) this.chat.cancelSession(prev);
+    if (prev && prev !== id) {
+      this.chat.cancelSession(prev);
+      // Live screen samples one session's screen; switching ends it (the user restarts it in the new one).
+      if (this.liveScreen.snapshot.active) this.stopLiveScreen();
+    }
     this.settings = applySettingsPatch(this.settings, { activeSessionId: id });
     this.persist(this.settings);
     this.deps.emitApp({ type: "session-switched", sessionId: id });
@@ -524,22 +532,36 @@ export class AppCore {
       ocr: this.settings.screen.ocr && this.deps.ocr ? "running" : "none",
     });
     let job: Promise<void> = Promise.resolve();
+    // ingest() de-duplicates: an identical image already in this session returns the existing
+    // record. Re-running OCR on it would waste CPU and race its finished result.
+    const existingJob = this.ocrJobs.get(record.id);
+    if (existingJob) return { record, ocr: existingJob };
+    if (record.ocr === "done" || record.ocr === "failed") return { record, ocr: job };
     if (this.settings.screen.ocr && this.deps.ocr) {
       const ocr = this.deps.ocr;
+      const ctrl = new AbortController();
+      this.ocrAborts.set(record.id, ctrl);
       // Started inside a promise chain so an engine that throws synchronously is handled like any
       // other OCR failure instead of leaving the capture stuck in "running".
       job = Promise.resolve()
-        .then(() => ocr.recognize(input.ocrPng))
+        .then(() => ocr.recognize(input.ocrPng, ctrl.signal))
         .then((r) => {
           this.metrics.recordOcr(r.ms);
           // The capture may have been discarded or consent revoked while OCR ran.
           if (this.engine.get(record.id) && this.isPermitted("screen")) this.engine.setOcr(record.id, { text: r.text, confidence: r.confidence });
         })
         .catch((err: Error) => {
+          if (err instanceof OcrCancelled || ctrl.signal.aborted) {
+            this.metrics.recordOcrCancelled();
+            return;
+          }
           this.deps.log?.("warn", "ocr failed", { message: err.message });
           if (this.engine.get(record.id)) this.engine.setOcr(record.id, { error: err.message });
         })
-        .finally(() => this.ocrJobs.delete(record.id));
+        .finally(() => {
+          this.ocrJobs.delete(record.id);
+          this.ocrAborts.delete(record.id);
+        });
       this.ocrJobs.set(record.id, job);
     }
     return { record, ocr: job };
@@ -555,30 +577,60 @@ export class AppCore {
     await Promise.race([Promise.allSettled(jobs), new Promise((r) => setTimeout(r, this.deps.ocrWaitMs ?? 8000))]);
   }
 
-  private async liveScreenTick() {
-    if (!this.deps.liveScreenCapture) throw new Error("Live screen context is not supported on this platform.");
+  private async liveScreenTick(run: number): Promise<TickResult> {
+    if (!this.deps.liveScreenCapture) throw new LiveScreenFatal("Live screen context is not supported on this platform.", "unsupported");
+    // The session the run was started for; a capture finishing after a switch must not land elsewhere.
+    const sessionId = this.liveScreenSession;
     const frame = await this.deps.liveScreenCapture();
+    if (!this.liveScreen.isCurrent(run) || !sessionId || sessionId !== this.activeSessionId || !this.isPermitted("screen")) {
+      this.liveScreen.noteDiscarded();
+      return "unchanged";
+    }
     // Skip unchanged screens: no new OCR, no new context item, nothing re-sent.
-    if (frame.fingerprint && this.liveScreenItemId && !hasChanged(this.liveFingerprint, frame.fingerprint)) return false;
+    if (frame.fingerprint && this.liveScreenItemId && this.engine.get(this.liveScreenItemId) && !hasChanged(this.liveFingerprint, frame.fingerprint)) return "unchanged";
     this.liveFingerprint = frame.fingerprint ?? null;
-    // Replace the previous live frame instead of accumulating captures.
-    if (this.liveScreenItemId) this.engine.remove(this.liveScreenItemId);
-    const { record, ocr } = this.addCapture({ ...frame, title: `Live screen — ${frame.title}` }, { pending: false, live: true });
+    // Replace the previous live frame instead of accumulating captures; the replaced frame's OCR
+    // result is dropped (addCapture checks the record still exists).
+    if (this.liveScreenItemId) {
+      this.ocrAborts.get(this.liveScreenItemId)?.abort();
+      this.engine.remove(this.liveScreenItemId);
+    }
+    const { record, ocr } = this.addCapture({ ...frame, title: `Live screen — ${frame.title}` }, { pending: false, live: true, sessionId });
     this.liveScreenItemId = record.id;
     await ocr;
-    return true;
+    return "captured";
   }
+
+  /** Workspace session the current live-screen run belongs to. */
+  private liveScreenSession: string | null = null;
 
   startLiveScreen() {
     if (!this.deps.liveScreenCapture) throw new Error("Live screen context is not supported on this platform.");
+    // A different session must not inherit the previous run's frame.
+    if (this.liveScreenSession && this.liveScreenSession !== this.activeSessionId) this.stopLiveScreen();
+    this.liveScreenSession = this.activeSessionId;
     this.liveScreen.start(this.settings.screen.liveIntervalSec);
   }
 
   stopLiveScreen(clear = true) {
     this.liveScreen.stop();
+    this.liveScreenSession = null;
     if (clear && this.liveScreenItemId) this.engine.remove(this.liveScreenItemId);
     this.liveScreenItemId = null;
     this.liveFingerprint = null;
+  }
+
+  /** Content-free pipeline state for diagnostics and the support file. */
+  pipelineState() {
+    const live = this.live;
+    return {
+      liveScreen: this.liveScreen.snapshot,
+      ocr: { pendingJobs: this.ocrJobs.size, cancelled: this.metrics.ocrCancelled },
+      transcription: live ? { status: live.status, bufferedAudioBytes: live.bufferedAudioBytes, droppedChunks: live.droppedChunks, reconnects: live.reconnectStats, persisted: live.persisted } : null,
+      context: this.engine.stats(),
+      chat: { inFlight: this.chat.activeRequests },
+      recoveredTranscripts: this.recoveredTranscripts,
+    };
   }
 
   get liveScreenState(): LiveScreenState {

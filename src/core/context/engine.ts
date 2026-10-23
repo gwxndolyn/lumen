@@ -95,6 +95,23 @@ export class ContextEngine {
     if (store) for (const p of store.listContextItems()) this.items.set(p.id, this.fromPersisted(p));
   }
 
+  /** Counts only (no content): items held in memory, by status, and how many carry images. */
+  stats() {
+    let pending = 0;
+    let images = 0;
+    let imageBytes = 0;
+    const sessions = new Set<string>();
+    for (const r of this.items.values()) {
+      sessions.add(r.sessionId);
+      if (r.status === "pending") pending++;
+      if (r.image) {
+        images++;
+        imageBytes += r.image.data.length;
+      }
+    }
+    return { items: this.items.size, sessions: sessions.size, pending, images, imageBytes };
+  }
+
   configure(patch: Partial<EngineConfig>) {
     this.config = { ...this.config, ...patch };
   }

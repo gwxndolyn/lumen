@@ -52,6 +52,14 @@ Note: vitest and the smoke run need to write to `node_modules/.vite-temp`; under
 - Tokens extended (type scale, elevation, z-index, timing). Shortcut registry already met requirements — unchanged.
 - See `docs/DESKTOP_UX.md` for verified vs unverified (Windows, screen readers, real restart of geometry).
 
+## Prompt 13: capture reliability (2026-10-23, committed)
+
+- Live screen: explicit lifecycle (inactive/active/paused/recovering/permission_required/unsupported/failed), run tokens discard in-flight work after pause/stop/session switch (found: a capture in flight during a session switch landed in the new session), bounded failure backoff (5 then failed), OS permission denial is terminal (no retry loop), adaptive sampling on unchanged screens, display-change nudge, bound to its session.
+- OCR: cancellable before start (superseded frames, consent revoked); duplicate captures reuse OCR.
+- Content-free `pipelineState()` in Diagnostics/support file. UI shows recovering/stopped reasons.
+- `npm run bench:reliability` (simulated). Baseline vs final: identical throughput/OCR counts/memory on this workload — the gains are correctness, not speed.
+- Docs: `docs/CAPTURE_RELIABILITY.md`; troubleshooting rows in `docs/BETA.md`. Hardware steps listed, not run.
+
 **Next:** with an API key, run live evaluations (cloud and a local Ollama model) and record a baseline; then LUM-011.
 
 ## How to resume (any session, no chat history needed)

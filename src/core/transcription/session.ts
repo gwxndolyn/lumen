@@ -39,6 +39,7 @@ export class TranscriptSession {
   private buffer: Uint8Array[] = [];
   private bufferedBytes = 0;
   private reconnects = 0;
+  private totalReconnects = 0;
   /** ms offset of the current provider stream relative to session start. */
   private streamOffsetMs = 0;
   private keepAliveTimer: unknown = null;
@@ -119,6 +120,7 @@ export class TranscriptSession {
             return;
           }
           this.reconnects++;
+          this.totalReconnects++;
           const delay = Math.min(500 * 2 ** (this.reconnects - 1), 8000);
           const wasPaused = this.status === "paused";
           if (!wasPaused) this.setStatus("reconnecting", `Connection lost — retrying in ${Math.round(delay / 100) / 10}s (audio is buffered)`);
@@ -165,12 +167,22 @@ export class TranscriptSession {
    * duplicate if the same channel already has identical text overlapping the same time window.
    */
   private isDuplicate(text: string, startMs: number, endMs: number, channel: TranscriptSegment["channel"]): boolean {
-    const norm = text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+    const norm = text
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N}]+/gu, " ")
+      .trim();
     for (let i = this.segments.length - 1; i >= 0 && i >= this.segments.length - 20; i--) {
       const s = this.segments[i]!;
       if (s.channel !== channel) continue;
       const overlaps = startMs <= s.endMs + 1500 && endMs >= s.startMs - 1500;
-      if (overlaps && s.text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim() === norm) return true;
+      if (
+        overlaps &&
+        s.text
+          .toLowerCase()
+          .replace(/[^\p{L}\p{N}]+/gu, " ")
+          .trim() === norm
+      )
+        return true;
     }
     return false;
   }
@@ -221,6 +233,11 @@ export class TranscriptSession {
   }
 
   /** Audio chunks discarded because the buffer cap was reached (exposed for diagnostics). */
+  /** Reconnects performed since the stream last became healthy, and in total (diagnostics). */
+  get reconnectStats() {
+    return { current: this.reconnects, total: this.totalReconnects };
+  }
+
   get droppedChunks() {
     return this.dropped;
   }

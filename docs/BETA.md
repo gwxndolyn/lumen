@@ -104,6 +104,10 @@ Data folder:
 | "Privacy restriction keeps … on this device" | Privacy restriction is on and no local model can take the request. Set up a local model, remove that context, or allow it to go to the cloud. |
 | "The connection … was interrupted" mid-answer | The partial answer is kept and marked incomplete. Retry regenerates it. |
 | "The capture came back blank" (macOS) | Screen Recording permission is not active yet. Grant it and restart Lumen. |
+| Live screen "stopped: screen capture permission is needed" | The OS blocked capture. Grant Screen Recording (macOS), restart Lumen, start it again. Lumen doesn't retry this automatically. |
+| Live screen "Retrying after a failed capture" / "stopped after 5 failed captures" | Transient capture failures are retried with backoff; after 5 in a row it stops and shows the last reason. Press Start to try again. |
+| Live screen "checking every 20s/40s" | The screen hasn't changed, so Lumen samples less often. It returns to your interval as soon as something changes. |
+| "Lumen closed while recording" notice | The previous run ended mid-recording; the transcript was kept up to its last line. |
 | "Microphone capture failed" | Device unplugged or permission denied. Recording stops and the transcript so far is kept. |
 | Shortcut shows "conflict" | Another app owns it. Rebind it in *Settings → Shortcuts*. |
 | "Lumen started with a fresh database" | The old database was corrupt or a migration failed. It was moved aside (not deleted), and its path is in the dialog. |
@@ -126,6 +130,7 @@ npm run audit:prod       # advisories in code that actually ships
 npm run smoke            # real Electron app + UI vs local Anthropic/Deepgram stand-ins and the real mic
 npm run release:check    # all of the above except smoke
 npm run eval             # deterministic intelligence benchmark (64 cases)
+npm run bench:reliability # simulated long-session benchmark of the capture pipeline (docs/CAPTURE_RELIABILITY.md)
 npm run release:gate     # everything, recorded in release-report.json, with a READY / NOT READY verdict
 npm run test:live        # real providers; needs ANTHROPIC_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY / DEEPGRAM_API_KEY
 ```
