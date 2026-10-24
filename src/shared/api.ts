@@ -44,12 +44,14 @@ import type { CacheStats } from "../core/inference/cache";
 
 import type { FeedbackKind, FeedbackRecord, QualityService } from "../core/quality/service";
 import type { Proposal } from "../core/quality/proposals";
+import type { ReportRecord } from "../core/beta/service";
+import type { ReportInput } from "../core/beta/report";
 import type { EvalCase } from "../core/eval/types";
 import type { EntitlementState } from "../core/commerce/entitlements";
 import type { UpdateCheck } from "../core/commerce/updates";
 export type { EntitlementState, UpdateCheck };
 export type QualityMetrics = ReturnType<QualityService["metrics"]>;
-export type { FeedbackKind, FeedbackRecord, Proposal, EvalCase };
+export type { FeedbackKind, FeedbackRecord, Proposal, EvalCase, ReportRecord, ReportInput };
 export type UsageRow = ReturnType<UsageService["report"]>[number];
 export type { LocalState, EmbeddingIndexState, LoadedModel, BudgetStatus, CacheStats };
 type EvalCatalog = ReturnType<EvalService["catalog"]>;
@@ -219,6 +221,19 @@ export interface LumenApi {
   deleteMemory(id: string): Promise<void>;
   /** Save a support file (technical metadata + log tail, no content). Returns the path or null if cancelled. */
   saveSupportBundle(): Promise<string | null>;
+  /** The support file exactly as it would be saved. */
+  previewSupportBundle(): Promise<string>;
+
+  // Beta reports (local drafts → a file the user saves and sends; nothing is uploaded)
+  listReports(): Promise<ReportRecord[]>;
+  saveReport(id: string | null, input: unknown): Promise<ReportRecord>;
+  discardReport(id: string): Promise<void>;
+  reportExcerpt(messageId: string): Promise<{ question: string; answer: string } | null>;
+  previewReport(id: string): Promise<{ text: string; bytes: number; contents: { included: string[]; excluded: string[] }; warnings: string[] }>;
+  /** Null when the user cancels the save dialog. */
+  exportReport(id: string): Promise<{ record: ReportRecord; path: string } | null>;
+  revealFile(path: string): Promise<void>;
+  activation(): Promise<ReturnType<QualityService["activation"]>>;
 
   // Plan and updates
   planState(): Promise<EntitlementState>;

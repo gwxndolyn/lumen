@@ -92,8 +92,38 @@ export function PrivacyScreen({ settings, update }: Props) {
             <li>API keys: encrypted with your OS keychain.</li>
             <li>Sent to Anthropic: your question, attached context and retrieved passages, only when you ask.</li>
             <li>Sent to Deepgram: microphone/system audio, only while recording.</li>
-            <li>No analytics or telemetry is collected.</li>
+            <li>No analytics or telemetry is sent anywhere. Lumen has no server of its own.</li>
+            <li>Beta reports and support files are saved only where you choose; they reach the Lumen team only if you send them.</li>
           </ul>
+        </div>
+
+        <div className="card">
+          <h3>Usage events on this computer</h3>
+          <div className="field">
+            <div>
+              <div className="label">Record usage events</div>
+              <div className="hint">
+                Request outcomes, error codes, timings, task types, models and setup milestones (first launch, provider test results, onboarding finished, context turned on). Never questions, answers,
+                screen text, transcripts or file contents. Used for the Quality screen and, only if you tick it, a beta report. Kept for your conversation retention period. Turning this off stops new
+                recording at once; nothing else in Lumen changes.
+              </div>
+            </div>
+            <Switch label="Record usage events" checked={settings.diagnostics.recordUsageEvents} onChange={(v) => void update({ diagnostics: { recordUsageEvents: v } })} />
+          </div>
+          <div className="row">
+            <span className="grow small muted">Delete recorded events, ratings and your test cases now.</span>
+            <button
+              className="btn"
+              onClick={() =>
+                void api
+                  .clearQuality()
+                  .then(() => setStatus("Usage events, ratings and test cases deleted."))
+                  .catch((e) => setStatus(`Could not delete: ${errMsg(e)}`))
+              }
+            >
+              Delete usage events
+            </button>
+          </div>
         </div>
 
         <div className="card">

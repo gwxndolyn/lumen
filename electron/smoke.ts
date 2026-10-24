@@ -330,6 +330,7 @@ export async function runSmokeTest({ app, core, store, windows, capture, shortcu
       "quality",
       "plan",
       "help",
+      "report",
     ];
     const broken: string[] = [];
     for (const r of routes) {
@@ -545,6 +546,35 @@ export async function runSmokeTest({ app, core, store, windows, capture, shortcu
       // Read the system clipboard from the main process (what another app would paste).
       const clip = await clipboard.readText();
       check("I_codeCopy", code.trim() === "const uniq = (xs) => [...new Set(xs)];" && clip.trim() === code.trim() && /Copied/.test(copied), { code, clip: clip.slice(0, 80), copied });
+    }
+
+    // ---- R: beta report through the real form: draft → preview (no key) → export requires preview ----
+    {
+      await js(`location.hash = '/main/report'`);
+      await wait(300);
+      const setVal = (sel: string, v: string) =>
+        js(
+          `(() => { const el = document.querySelector(${JSON.stringify(sel)}); const proto = el.tagName === 'SELECT' ? HTMLSelectElement.prototype : HTMLTextAreaElement.prototype; Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, ${JSON.stringify(v)}); el.dispatchEvent(new Event(el.tagName === 'SELECT' ? 'change' : 'input', { bubbles: true })); })()`,
+        );
+      const click = (label: string) => js(`[...document.querySelectorAll('button')].find((b) => b.innerText.trim() === ${JSON.stringify(label)})?.click()`);
+      await click("New report");
+      await wait(200);
+      await setVal("#rep-cat", "privacy");
+      await setVal("#rep-desc", "Smoke report: key sk-proj-FAKEsmoke0a1b2c3d4e5f6g7h8i9 appeared in the context list");
+      await wait(100);
+      const saveDisabledBefore = await js<boolean>(`[...document.querySelectorAll('button')].find((b) => b.innerText.includes('Save report file'))?.disabled ?? false`);
+      await click("Preview");
+      await until(() => js<boolean>("!!document.querySelector('[aria-label=\"Report preview\"]')"), 4000);
+      const previewText = await js<string>("document.querySelector('[aria-label=\"Report preview\"] pre')?.textContent ?? ''");
+      const drafts = core.beta.list();
+      check("R_betaReport", saveDisabledBefore && /"category": "privacy"/.test(previewText) && !previewText.includes("FAKEsmoke") && drafts.length === 1 && drafts[0]!.status === "draft", {
+        saveDisabledBefore,
+        previewChars: previewText.length,
+        drafts: drafts.map((d) => d.status),
+      });
+      for (const d of drafts) core.beta.discard(d.id);
+      await js(`location.hash = '/main/assistant'`);
+      await wait(200);
     }
 
     // ---- H: delete session removes data incl. index ----

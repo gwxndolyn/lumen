@@ -1,6 +1,6 @@
 # Lumen — current improvement state
 
-Last updated: 2026-10-23 · Branch: `improve/autonomous-loop` (from `master` @ `871ca43`)
+Last updated: 2026-10-24 · Branch: `improve/autonomous-loop` (from `master` @ `871ca43`)
 
 ## Latest: Prompt 7 committed (2026-10-23)
 
@@ -67,6 +67,19 @@ Note: vitest and the smoke run need to write to `node_modules/.vite-temp`; under
 - Added: credential/onboarding-resume, network-drop + retry, code-copy smoke checks; two-launch restart check; upgrade check from an older build's schema; both in the gate. Packaged app and DMG built and smoke-tested (unsigned).
 
 **Next:** with an API key, run live evaluations (cloud and a local Ollama model) and record a baseline; then LUM-011.
+
+## Prompt 15: beta programme (2026-10-24, uncommitted on this branch)
+
+- **Audit result:** in-app answer ratings, local quality events, proposals and user test cases already existed (Prompt 10). Missing: general product feedback, any way for feedback to reach the team, triage, a trusted regression path, a bounded/previewable support file, release artifacts. No backend, accounts or telemetry exist.
+- **Decision:** local-only reports exported as files the tester sends; reviewer CLI outside the app; no feedback server, remote analytics or feature flags yet (justification and server requirements: `docs/BETA_PROGRAMME.md` §1, §8, §9).
+- **Fixed (LUM-018):** OpenAI project keys reached the provider unmasked; the log missed OpenAI/Gemini/GitHub keys. One shared credential list now.
+- Added: `src/core/beta/{report,service,triage,regressions}.ts`, `src/core/credentials.ts`, migration 9 (`beta_reports`), Send feedback screen, Report link on answers, support-file preview/window/cap, Privacy usage-events switch, milestones + `activation()`, `scripts/triage.mjs`, `scripts/release-artifacts.mjs`, `src/core/eval/regression-cases.json`, gate checks `regressions` and `beta-blockers`, smoke check `R_betaReport`.
+- Verified: `npm run check` 532 passed / 4 skipped; `smoke` PASS (`R_betaReport`, `screensRender` incl. report); `eval` 64/64; `check:secrets`, `audit:prod`, `format` pass. A negative test planted a source map, `.env` and a key into an asar; `release:artifacts` caught all three.
+- **Worked example (synthetic):** BETA-001 imported from a generated report → class security_privacy (release blocker) → `repro` → case reg-001 proposed (self-approval refused) → approved by a second name → `eval --collection regressions` passes → `fix` → `verify` passed → `blockers` clear. Malicious reports (ANSI escapes, 300 KB, missing fields) were neutralised or rejected.
+- `reg-001` is committed as **proposed**: a human reviewer must approve it (`npm run triage -- approve-case reg-001-openai-project-key --by <name>`).
+- Real beta data: **none**. All metrics report null until events exist.
+
+**Next:** LUM-019 — invite testers, set up the triage workspace, then decide thresholds from two weeks of real reports.
 
 ## How to resume (any session, no chat history needed)
 

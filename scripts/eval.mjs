@@ -6,6 +6,7 @@
 //   npm run eval -- --case ctx-001 --case fu-002  specific cases
 //   npm run eval -- --out run.json                save the full run
 //   npm run eval -- --baseline run.json           compare with a saved run; exit 1 on regressions
+//   npm run eval -- --collection benchmark        shipped benchmark only (default "all" adds approved beta regression cases)
 //   npm run eval:live -- --yes --max-cost 0.50    live: ANTHROPIC_API_KEY must be set; --yes is required
 //   npm run eval:live -- --local llama3.2 --yes   live against a local Ollama model (nothing leaves the device)
 //
@@ -44,6 +45,7 @@ function parseArgs(argv) {
     else if (k === "--budget") a.budget = Number(v());
     else if (k === "--no-verification") a.noVerification = true;
     else if (k === "--yes") a.yes = true;
+    else if (k === "--collection") a.collection = v();
     else if (k === "--help" || k === "-h") usage();
     else usage(`unknown option ${k}`);
   }
@@ -56,7 +58,7 @@ function usage(msg) {
     fs
       .readFileSync(fileURLToPath(import.meta.url), "utf8")
       .split("\n")
-      .slice(0, 13)
+      .slice(0, 14)
       .join("\n"),
   );
   process.exit(2);
@@ -69,9 +71,28 @@ const { compareRuns } = await core("core/eval/compare.js");
 const { DEFAULT_SETTINGS } = await core("shared/defaults.js");
 const { applySettingsPatch } = await core("shared/settingsSchema.js");
 
-let cases = BENCHMARK;
+// Approved beta regression cases (src/core/eval/regression-cases.json). Proposed, edited-since-
+// approval and invalid entries are never run; an invalid file fails the run.
+const { loadRegressions } = await core("core/beta/regressions.js");
+const regFile = path.join(root, "src/core/eval/regression-cases.json");
+const reg = loadRegressions(fs.existsSync(regFile) ? JSON.parse(fs.readFileSync(regFile, "utf8")) : null);
+const collection = args.collection ?? "all";
+if (!["all", "benchmark", "regressions"].includes(collection)) usage("--collection must be all, benchmark or regressions");
+if (reg.invalid.length) {
+  console.error(`Regression case file has problems:\n  ${reg.invalid.join("\n  ")}`);
+  process.exit(1);
+}
+let cases = collection === "benchmark" ? BENCHMARK : collection === "regressions" ? reg.trusted : [...BENCHMARK, ...reg.trusted];
+if (collection !== "benchmark")
+  console.log(
+    `Beta regression cases: ${reg.trusted.length} approved${reg.proposed.length ? `, ${reg.proposed.length} awaiting review (not run: ${reg.proposed.join(", ")})` : ""}${reg.stale.length ? `, ${reg.stale.length} edited since approval (not run until re-approved: ${reg.stale.join(", ")})` : ""}`,
+  );
 if (args.categories.length) cases = cases.filter((c) => args.categories.includes(c.category));
 if (args.cases.length) cases = cases.filter((c) => args.cases.includes(c.id));
+if (!cases.length && collection === "regressions" && !args.categories.length && !args.cases.length) {
+  console.log("No approved beta regression cases yet: nothing to run.");
+  process.exit(0);
+}
 if (!cases.length) usage("no cases match the selection");
 
 let settings = DEFAULT_SETTINGS;

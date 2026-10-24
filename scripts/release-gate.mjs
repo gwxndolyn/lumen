@@ -9,7 +9,7 @@
 //
 // Exit codes: 0 = all critical checks passed (verdict says beta vs release candidate), 1 = NOT READY.
 
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -39,6 +39,20 @@ const CHECKS = [
     label: "Deterministic intelligence benchmark",
     critical: true,
     cmd: ["node", "scripts/eval.mjs", "--out", path.join(tmp, "bench.json"), ...(baseline ? ["--baseline", baseline] : [])],
+  },
+  {
+    id: "regressions",
+    label: "Beta regression cases (approved)",
+    critical: true,
+    cmd: ["node", "scripts/eval.mjs", "--collection", "regressions"],
+    // An empty approved collection is a pass with a note, not a skip: there is nothing to regress.
+  },
+  {
+    id: "beta-blockers",
+    label: "Open security/privacy and data-loss beta issues",
+    critical: true,
+    cmd: ["node", "scripts/triage.mjs", "blockers"],
+    needsEnv: ["LUMEN_TRIAGE_DIR"],
   },
   { id: "smoke", label: "End-to-end smoke (Electron)", critical: true, cmd: ["bash", "scripts/smoke.sh"], needsDisplay: true },
   { id: "restart", label: "Restart persistence (two launches)", critical: true, cmd: ["bash", "scripts/smoke-restart.sh"], needsDisplay: true },
@@ -112,10 +126,18 @@ const limitations = [
   "Code signing and notarization are not checked here.",
   results.find((r) => r.id === "live")?.status !== "passed" ? "Live provider behaviour was not verified (no API key)." : null,
   !baseline ? "No --baseline given: the benchmark was not compared with a recorded run." : null,
+  results.find((r) => r.id === "beta-blockers")?.status === "skipped" ? "Beta triage was not checked (set LUMEN_TRIAGE_DIR to the team's triage workspace)." : null,
 ].filter(Boolean);
+let commit = null;
+try {
+  commit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
+} catch {
+  /* not a git checkout */
+}
 const report = {
   kind: "lumen-release-report",
   version: pkg.version,
+  commit,
   generatedAt: new Date().toISOString(),
   platform: { os: os.type(), release: os.release(), arch: os.arch(), node: process.version },
   verdict: !ready ? "NOT READY" : liveVerified ? "READY FOR RELEASE CANDIDATE (signing not checked)" : "READY FOR BETA (not production: live providers unverified)",

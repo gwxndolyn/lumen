@@ -93,7 +93,9 @@ Data folder:
 - per-stage timings: time to first token, total, context prep, OCR wait, input → request sent, transcription, OCR, screen capture, stop → stopped
 - memory, and failures by error code
 
-**Save support file** writes the app version, OS and architecture, schema version, health, routing mode, quality counts (success rate, failures by code, feedback counts) and the log tail, with keys and your home path scrubbed. It contains no questions, answers, context or feedback notes. Attach it to a bug report.
+**Preview support file** shows exactly what **Save support file** writes: the app version, OS and architecture, schema version, support-relevant settings (no keys), health, routing mode, quality counts (success rate, failures by code, feedback counts) and operational log lines from the last 24 hours (capped at 512 KB), with keys, data paths and your home folder scrubbed. It contains no questions, answers, context or feedback notes.
+
+**Send feedback** (sidebar, or **Report** under an answer) is the beta feedback form: category, description, optional impact/area/steps, and opt-in diagnostics, usage summary or an editable question/answer excerpt. Preview the exact file, save it, and send it to your beta contact — Lumen never uploads it. How the team triages reports into fixes and regression tests: `docs/BETA_PROGRAMME.md`.
 
 | Symptom | Cause / fix |
 |---|---|
@@ -185,4 +187,4 @@ Other limitations:
 - Response-planner intent rules score 78% / 42% (relations / categories) on a held-out set. A miss falls back to a general strategy; it does not refuse.
 - Memory use is about 670 MB across Electron processes on macOS.
 
-**External services:** your AI provider (Anthropic, OpenAI, Google or a compatible endpoint) and, optionally, Deepgram. No Lumen backend, account or telemetry exists.
+**External services:** your AI provider (Anthropic, OpenAI, Google or a compatible endpoint) and, optionally, Deepgram. No Lumen backend, account or telemetry exists; beta reports are files you send yourself.

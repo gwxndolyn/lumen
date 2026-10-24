@@ -58,7 +58,27 @@ export interface FeedbackRecord {
   meta: FeedbackMeta;
 }
 
-export type QualityEventType = "request_completed" | "request_failed" | "request_cancelled" | "retry" | "verification_flagged" | "feedback" | "context_selected";
+export type QualityEventType =
+  | "request_completed"
+  | "request_failed"
+  | "request_cancelled"
+  | "retry"
+  | "verification_flagged"
+  | "feedback"
+  | "context_selected"
+  // Setup and lifecycle milestones (content-free; `code` holds a short outcome or kind).
+  | "app_started"
+  | "onboarding_completed"
+  | "provider_test"
+  | "context_activated"
+  | "session_restored"
+  | "report_exported"
+  | "diagnostics_exported"
+  | "update_check";
+
+/** Milestones recordable through `record()`. Request events come only from observe(). */
+export const MILESTONES = ["app_started", "onboarding_completed", "provider_test", "context_activated", "session_restored", "report_exported", "diagnostics_exported", "update_check"] as const;
+export type Milestone = (typeof MILESTONES)[number];
 
 const MAX_NOTE = 2000;
 const clean = (s: string | null | undefined, max = MAX_NOTE) => {
@@ -72,6 +92,8 @@ export interface QualityDeps {
   promptHash: string;
   now?: () => number;
   retentionDays?: () => number;
+  /** Settings → Privacy → "Record usage events". When false nothing new is recorded. */
+  enabled?: () => boolean;
 }
 
 export class QualityService {
@@ -83,8 +105,26 @@ export class QualityService {
     this.now = d.now ?? Date.now;
   }
 
+  private get on() {
+    return this.d.enabled?.() ?? true;
+  }
+
+  /**
+   * Record a setup or lifecycle milestone. `code` is a short machine value (an outcome, a source
+   * kind, an error code) — never user content; it is truncated and restricted to a safe alphabet.
+   */
+  record(type: Milestone, code: string | null = null, extra: { provider?: string | null; latencyMs?: number | null } = {}) {
+    if (!this.on || !MILESTONES.includes(type)) return;
+    const c = code == null ? null : code.replace(/[^a-z0-9_.:-]/gi, "").slice(0, 40) || null;
+    this.d.store.addQualityEvent({ at: this.now(), type, code: c, provider: extra.provider ?? null, latencyMs: extra.latencyMs ?? null });
+  }
+
   /** Observe chat events. Records content-free facts only. */
   observe(e: ChatEvent) {
+    if (!this.on) {
+      this.pending.clear();
+      return;
+    }
     const s = this.d.store;
     switch (e.type) {
       case "start":
@@ -176,7 +216,7 @@ export class QualityService {
       meta: this.metaFor(msg),
     };
     this.d.store.addFeedback(rec);
-    this.d.store.addQualityEvent({ at: rec.createdAt, type: "feedback", model: rec.meta.model, category: rec.meta.category, code: rec.kind, route: rec.meta.route });
+    if (this.on) this.d.store.addQualityEvent({ at: rec.createdAt, type: "feedback", model: rec.meta.model, category: rec.meta.category, code: rec.kind, route: rec.meta.route });
     return rec;
   }
 
@@ -253,6 +293,43 @@ export class QualityService {
       daily: dailySeries(ev, this.now(), days),
       last7: { requests: ev.filter((e) => e.at >= days7 && e.type.startsWith("request_")).length },
       preliminary: finished < 30,
+    };
+  }
+
+  /**
+   * Activation facts for this install, from recorded milestones only (definitions in
+   * docs/BETA_PROGRAMME.md §5). A value is null when the events it needs were never recorded —
+   * e.g. the install predates event recording, or recording is off — never estimated.
+   */
+  activation() {
+    const ev = this.d.store.qualityEvents(0);
+    const first = (t: string, pred: (e: (typeof ev)[number]) => boolean = () => true) => ev.find((e) => e.type === t && pred(e))?.at ?? null;
+    const started = first("app_started");
+    const onboarded = first("onboarding_completed");
+    const firstAnswer = first("request_completed", (e) => e.provider !== "mock" && e.detail !== "cached");
+    const tests = ev.filter((e) => e.type === "provider_test");
+    const testFailed = tests.filter((e) => e.code !== "ok");
+    const reqs = ev.filter((e) => e.type === "request_completed" || e.type === "request_failed");
+    const days = new Set(ev.filter((e) => e.type === "request_completed").map((e) => new Date(e.at).toDateString()));
+    const ratings = this.listFeedback();
+    return {
+      recordingSince: ev[0]?.at ?? null,
+      firstLaunchAt: started,
+      onboardingCompletedAt: onboarded,
+      firstSuccessfulAnswerAt: firstAnswer,
+      /** First recorded launch → first real (non-mock, non-cached) completed answer. */
+      timeToFirstAnswerMs: started != null && firstAnswer != null && firstAnswer >= started ? firstAnswer - started : null,
+      providerTests: { total: tests.length, failed: testFailed.length, failureCodes: countBy(testFailed.map((e) => e.code ?? "unknown")) },
+      requests: { technicalSuccess: reqs.length ? reqs.filter((e) => e.type === "request_completed").length / reqs.length : null, n: reqs.length },
+      contextActivated: countBy(ev.filter((e) => e.type === "context_activated").map((e) => e.code ?? "unknown")),
+      sessionsRestored: ev.filter((e) => e.type === "session_restored").length,
+      launches: ev.filter((e) => e.type === "app_started").length,
+      /** Distinct calendar days with at least one completed answer. */
+      activeDays: days.size,
+      /** User-perceived usefulness: answers rated helpful vs. rated anything else. Separate from technical success. */
+      ratedAnswers: { helpful: ratings.filter((f) => f.kind === "helpful").length, notHelpful: ratings.filter((f) => f.kind !== "helpful").length },
+      reportsExported: ev.filter((e) => e.type === "report_exported").length,
+      updateChecks: countBy(ev.filter((e) => e.type === "update_check").map((e) => e.code ?? "unknown")),
     };
   }
 
@@ -341,6 +418,12 @@ const FEEDBACK_TO_CATEGORY: Record<string, EvalCategory> = {
   testing: "coding_debugging",
   system_design: "research_factual",
 };
+
+function countBy(xs: string[]): Record<string, number> {
+  const m: Record<string, number> = {};
+  for (const x of xs) m[x] = (m[x] ?? 0) + 1;
+  return m;
+}
 
 function escapeRe(s: string) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");

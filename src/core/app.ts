@@ -44,6 +44,8 @@ import { LruCache, type CachedResponse } from "./inference/cache";
 import { EmbeddingIndex } from "./inference/embeddings";
 import type { InferenceTargets } from "./chatService";
 import { QualityService } from "./quality/service";
+import { BetaService, recentLogEvents } from "./beta/service";
+import type { BetaReport, InteractionMeta } from "./beta/report";
 import { Entitlements } from "./commerce/entitlements";
 import { loadPublicKey } from "./commerce/license";
 import { COMMERCIAL } from "./commerce/config";
@@ -97,6 +99,8 @@ export interface AppCoreDeps {
   /** fetch used for the local (loopback) runtime; injected by tests. */
   localFetch?: typeof fetch;
   appVersion?: string;
+  /** Beta reports: environment facts and the log reader (Electron supplies them; tests may omit). */
+  beta?: { home: string; app: BetaReport["app"]; readLog: () => string; diagnostics: () => Record<string, unknown> };
   /** License public key (PEM). Defaults to the build's COMMERCIAL config; "" = open build. */
   licensePublicKey?: string;
 }
@@ -155,6 +159,7 @@ export class AppCore {
   readonly usage: UsageService;
   readonly embeddings: EmbeddingIndex;
   readonly quality: QualityService;
+  readonly beta: BetaService;
   readonly entitlements: Entitlements;
   /** In-memory only; cleared on restart, session deletion, "Delete everything" and on request. */
   readonly responseCache = new LruCache<CachedResponse>({ maxEntries: 100, maxBytes: 2_000_000, ttlMs: 10 * 60_000, size: (v) => v.text.length * 2 });
@@ -192,6 +197,36 @@ export class AppCore {
       now: this.now,
       // Quality events follow the conversation retention setting (0 = keep).
       retentionDays: () => this.settings.privacy.conversationRetentionDays,
+      enabled: () => this.settings.diagnostics.recordUsageEvents,
+    });
+    const b = deps.beta;
+    this.beta = new BetaService({
+      store: deps.store,
+      now: this.now,
+      home: b?.home ?? "",
+      app: b?.app ?? { version: deps.appVersion ?? "dev", platform: process.platform, arch: process.arch, osRelease: "", electron: null, packaged: false },
+      interaction: (id) => this.interactionMeta(id),
+      excerptSource: (id) => this.excerptSource(id),
+      diagnostics: (hours) => {
+        const { events, truncated } = recentLogEvents(b?.readLog() ?? "", this.now() - hours * 3_600_000);
+        return { summary: b?.diagnostics() ?? { pipeline: this.pipelineState(), metrics: this.metrics.snapshot() }, log: events, logTruncated: truncated };
+      },
+      usage: () => {
+        const q = this.quality.metrics(30);
+        return {
+          windowDays: 30,
+          requests: q.requests,
+          successRate: q.successRate,
+          failuresByCode: q.failuresByCode,
+          verificationByCheck: q.verificationByCheck,
+          feedbackByKind: q.feedbackByKind,
+          latency: q.latency,
+          activation: this.quality.activation(),
+        };
+      },
+      // Reports follow conversation retention (0 = keep until deleted).
+      retentionDays: () => this.settings.privacy.conversationRetentionDays,
+      onExported: (r) => this.quality.record("report_exported", r.category),
     });
     this.engine = new ContextEngine(
       deps.store,
@@ -271,6 +306,8 @@ export class AppCore {
     this.settings = next;
     this.persist(this.settings);
     this.engine.configure({ screenTtlMinutes: this.settings.privacy.screenContextTtlMinutes, redactSensitive: this.settings.privacy.redactSensitive });
+    for (const k of ["screen", "microphone", "systemAudio"] as const) if (!prev.consent[k] && this.settings.consent[k]) this.quality.record("context_activated", k);
+    if (!prev.onboardingComplete && this.settings.onboardingComplete) this.quality.record("onboarding_completed");
     // Revocations take effect immediately: stop the source and discard what it captured.
     if (prev.consent.screen && !this.settings.consent.screen) {
       this.liveScreen.stop();
@@ -405,11 +442,15 @@ export class AppCore {
       const res = lp ? await lp.test() : { ok: false, message: `Local model unavailable: ${this.local.state().problem}.`, latencyMs: null, code: "model_unavailable" as const };
       this.health = { ...this.initialHealth(), state: res.ok ? "ok" : "down", message: res.message, checkedAt: this.now(), latencyMs: res.latencyMs };
       this.deps.emitApp({ type: "provider-health", health: this.health });
+      this.quality.record("provider_test", res.ok ? "ok" : (res.code ?? "failed"), { provider: "ollama", latencyMs: res.latencyMs });
       return res;
     }
     const p = this.providerFor();
     this.health = this.initialHealth();
-    if (!p) return { ok: false, message: this.health.message, latencyMs: null, code: "missing_credentials" as const };
+    if (!p) {
+      this.quality.record("provider_test", "missing_credentials", { provider: this.settings.provider.kind });
+      return { ok: false, message: this.health.message, latencyMs: null, code: "missing_credentials" as const };
+    }
     const res = await p.test(activeModel(this.settings.provider));
     this.health = {
       ...this.health,
@@ -419,7 +460,42 @@ export class AppCore {
       latencyMs: res.latencyMs,
     };
     this.deps.emitApp({ type: "provider-health", health: this.health });
+    if (!p.isMock) this.quality.record("provider_test", res.ok ? "ok" : (res.code ?? "failed"), { provider: this.settings.provider.kind, latencyMs: res.latencyMs });
     return res;
+  }
+
+  /** Content-free metadata for one answer (for linking a beta report to it). */
+  interactionMeta(messageId: string): InteractionMeta | null {
+    const m = this.deps.store.getMessage(messageId);
+    if (!m || m.role !== "assistant") return null;
+    const f = this.quality.metaFor(m);
+    return {
+      messageId,
+      category: f.category,
+      provider: f.provider,
+      model: f.model,
+      route: f.route,
+      contextSources: f.contextSources,
+      ttftMs: f.ttftMs,
+      totalMs: f.totalMs,
+      verificationFlags: f.verificationFlags,
+      stopReason: f.stopReason,
+      promptHash: f.promptHash,
+    };
+  }
+
+  /** The question and answer text, offered (never attached by default) for a report excerpt. */
+  private excerptSource(messageId: string): { question: string; answer: string } | null {
+    const m = this.deps.store.getMessage(messageId);
+    if (!m || m.role !== "assistant") return null;
+    const msgs = this.deps.store.listMessages(m.conversationId);
+    const q = msgs
+      .slice(
+        0,
+        msgs.findIndex((x) => x.id === m.id),
+      )
+      .findLast((x) => x.role === "user");
+    return { question: (q?.content ?? "").slice(0, 2000), answer: m.content.slice(0, 2000) };
   }
 
   // ---------------- sessions ----------------
@@ -510,8 +586,15 @@ export class AppCore {
     this.deps.store.setLastConversation(sid, conversationId);
   }
 
+  private restoredRecorded = false;
   openConversation(): string | null {
-    return this.deps.store.getLastConversation(this.activeSessionId);
+    const id = this.deps.store.getLastConversation(this.activeSessionId);
+    // Count one restore per launch: the panel asks again on every reload.
+    if (id && !this.restoredRecorded) {
+      this.restoredRecorded = true;
+      this.quality.record("session_restored");
+    }
+    return id;
   }
 
   // ---------------- context ----------------
@@ -1109,6 +1192,7 @@ export class AppCore {
     const n = this.engine.sweep();
     this.deps.store.sweepMemories(this.now());
     this.quality.sweep();
+    this.beta.sweep();
     const r = this.deps.store.applyRetention(this.settings.privacy.conversationRetentionDays, this.settings.privacy.transcriptRetentionDays, this.now());
     return { ...r, context: n + r.context };
   }

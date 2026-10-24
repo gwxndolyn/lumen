@@ -1,6 +1,21 @@
 # Changelog
 
-## Unreleased: beta reliability
+## Unreleased: beta programme
+Privacy fixes
+- Pasted OpenAI project/service keys (`sk-proj-…`, `sk-svcacct-…`) and GitHub fine-grained/app tokens were not masked before context was sent to the AI provider. They are now (regression case `reg-001`).
+- `lumen.log` did not redact OpenAI project keys, Gemini keys or GitHub tokens. The log, the support file and beta reports now share one credential list (`src/core/credentials.ts`).
+
+Beta feedback
+- **Send feedback** screen and **Report** under answers: category, description, impact, area, steps; opt-in diagnostics (last 24 h), usage summary and an editable question/answer excerpt. Drafts survive restarts; preview is required and is byte-for-byte the saved file; save failures are recorded and retryable. Nothing is uploaded.
+- Support file: preview, 24-hour log window, 512 KB cap, data paths replaced, support-relevant settings included (no keys).
+- Privacy → **Record usage events** (local only) switch and **Delete usage events**. New content-free milestones: first launch, onboarding completed, provider test result, context turned on, session restored, report/diagnostics exported, update check.
+
+Team tooling (not shipped in the app)
+- `npm run triage`: import and validate report files, prioritise, reproduce, de-duplicate, record fixes, regression tests and verification, with an audit log.
+- Beta regression cases (`src/core/eval/regression-cases.json`): proposed → approved by a second reviewer → run by `npm run eval` and the release gate; edits after approval are not trusted.
+- `npm run release:artifacts`: package-content validation, SHA-256 checksums, release manifest and notes; signing status observed, never assumed. The gate now records the commit, runs approved regression cases, and checks open security/privacy beta issues.
+
+## Earlier: beta reliability
 Context quality
 - Oversized sources (long documents, big pastes) keep their opening plus the passages that match the question, in original order, with `[…]` marking omissions. Previously only the first 16k characters were sent, so a relevant passage later in the document never reached the model.
 - Every timestamped source carries an `age`. Screen captures older than 5 minutes are marked `stale`, and the policy tells the model to prefer recent sources and to say when sources disagree.

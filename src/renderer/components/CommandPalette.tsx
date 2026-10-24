@@ -52,6 +52,7 @@ export function buildCommands(ctx: {
   }
   out.push(
     { id: "assistant.open", title: "Go to assistant", section: "Navigate", run: () => go("assistant") },
+    { id: "report.new", title: "Send feedback or report a problem…", section: "Help", keywords: "bug beta issue crash feature request", run: () => go("report") },
     {
       id: "overlay.toggle",
       title: "Show or hide the floating panel",

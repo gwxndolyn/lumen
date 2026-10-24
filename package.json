@@ -35,6 +35,8 @@
     "eval": "npm run build:main && node scripts/eval.mjs",
     "eval:live": "npm run build:main && node scripts/eval.mjs --live",
     "release:gate": "npm run build:main && node scripts/release-gate.mjs",
+    "triage": "npm run -s build:main && node scripts/triage.mjs",
+    "release:artifacts": "node scripts/release-artifacts.mjs",
     "bench:reliability": "npm run build:main && node --expose-gc scripts/reliability-bench.mjs"
   },
   "license": "UNLICENSED",

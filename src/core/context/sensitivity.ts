@@ -24,7 +24,11 @@ function luhn(digits: string): boolean {
 
 const RULES: { kind: string; re: RegExp; check?: (m: string) => boolean }[] = [
   { kind: "card number", re: /\b(?:\d[ -]?){13,19}\b/g, check: (m) => luhn(m.replace(/\D/g, "")) },
-  { kind: "API key", re: /\b(?:sk-ant-[A-Za-z0-9_-]{16,}|sk-[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{36}|xox[bpa]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35})\b/g },
+  {
+    kind: "API key",
+    // OpenAI project/service keys contain hyphens (sk-proj-…, sk-svcacct-…); GitHub has several token prefixes.
+    re: /\b(?:sk-ant-[A-Za-z0-9_-]{16,}|sk-(?:proj|svcacct|admin)-[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{22,}|xox[bpa]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35})/g,
+  },
   { kind: "private key", re: /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g },
   { kind: "password", re: /\b(?:password|passwd|pwd|passcode)\s*[:=]\s*\S{4,}/gi },
   { kind: "US SSN", re: /\b\d{3}-\d{2}-\d{4}\b/g },

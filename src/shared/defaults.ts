@@ -97,6 +97,7 @@ export const DEFAULT_SETTINGS: Settings = {
   },
   diagnostics: {
     logLevel: "info",
+    recordUsageEvents: true,
   },
   inference: {
     mode: "manual",

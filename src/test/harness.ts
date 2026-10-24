@@ -79,6 +79,8 @@ export interface HarnessOpts {
   localFetch?: typeof fetch;
   /** License public key; default "" = open build (all features). */
   licensePublicKey?: string;
+  /** Beta report environment (home folder, log contents, diagnostics). */
+  beta?: { home: string; readLog: () => string; diagnostics?: () => Record<string, unknown> };
 }
 
 /** A full AppCore wired to an in-memory DB, a fake Anthropic HTTP backend and fake STT sockets. */
@@ -116,6 +118,14 @@ export function harness(opts: HarnessOpts = {}) {
         }),
       ocrWaitMs: 2000,
       licensePublicKey: opts.licensePublicKey ?? "",
+      beta: opts.beta
+        ? {
+            home: opts.beta.home,
+            app: { version: "0.3.0", platform: "darwin", arch: "arm64", osRelease: "25.6.0", electron: "44.0.0", packaged: true },
+            readLog: opts.beta.readLog,
+            diagnostics: opts.beta.diagnostics ?? (() => ({ appVersion: "0.3.0" })),
+          }
+        : undefined,
       localFetch:
         opts.localFetch ??
         ((async () => {

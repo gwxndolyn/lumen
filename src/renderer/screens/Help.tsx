@@ -60,6 +60,18 @@ const TOPICS: { q: string; a: React.ReactNode }[] = [
     ),
   },
   {
+    q: "Beta feedback: how do I report a problem or an idea?",
+    a: (
+      <>
+        Use Send feedback, or Report under an answer. You choose what to include (diagnostics and answer text are off by default), preview the exact file, and save it. Lumen never uploads it: send the
+        file to the beta contact in your invitation. Don't post it publicly if you included an excerpt.{" "}
+        <button className="btn ghost sm" onClick={() => go("report")}>
+          Send feedback
+        </button>
+      </>
+    ),
+  },
+  {
     q: "Is Lumen hidden in screen shares?",
     a: "No. Lumen is a normal visible window. Follow the rules of your meetings, interviews and exams, and tell people when you're transcribing.",
   },

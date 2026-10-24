@@ -284,6 +284,11 @@ export function MessageView({ m, onRetry, onCopy }: { m: UiMessage; onRetry?: ()
             </button>
           )}
           {m.status === "done" && !m.meta?.isMock && <FeedbackButton messageId={m.id} />}
+          {m.status === "done" && !m.meta?.isMock && (
+            <button className="btn ghost sm" title="Write a beta report about this answer (you choose what it includes)" onClick={() => void api.openMain(`/main/report?answer=${m.id}`)}>
+              Report
+            </button>
+          )}
         </div>
       )}
       {m.status !== "streaming" && m.selection && <ContextInspector m={m} />}

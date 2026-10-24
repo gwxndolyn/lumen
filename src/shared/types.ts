@@ -147,6 +147,12 @@ export interface Settings {
   };
   diagnostics: {
     logLevel: LogLevel;
+    /**
+     * Record content-free usage events (request outcomes, timings, setup milestones) on this
+     * computer for the Quality screen and, only if the user ticks it, a beta report. Nothing is
+     * transmitted. Off = nothing new is recorded.
+     */
+    recordUsageEvents: boolean;
   };
   /** Hybrid local/cloud inference. The cloud side is `provider`; the local side is an Ollama runtime. */
   inference: {

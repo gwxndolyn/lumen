@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated": "2026-10-22",
+  "updated": "2026-10-24",
   "scoring": "priority = impact (1-5) x confidence (0-1) / effort (1-5); severity classes are ranked before score. Estimates are judgements, not measurements.",
   "items": [
     {
@@ -22,7 +22,7 @@
       ],
       "verification": "vitest render test + typecheck + smoke",
       "status": "done",
-      "evidence_of_completion": "src/renderer/components/ErrorBoundary.tsx wraps both windows; diagnostics:rendererCrash logs error name + component names only. Test src/test/errorBoundary.test.tsx (2 pass) \u2014 found and fixed: host elements were reported as components."
+      "evidence_of_completion": "src/renderer/components/ErrorBoundary.tsx wraps both windows; diagnostics:rendererCrash logs error name + component names only. Test src/test/errorBoundary.test.tsx (2 pass) — found and fixed: host elements were reported as components."
     },
     {
       "id": "LUM-002",
@@ -30,7 +30,7 @@
       "category": "production-blocker",
       "subsystem": "build",
       "problem": "No .github/workflows. Typecheck, lint, tests and audit only run when someone remembers.",
-      "evidence": "ls .github \u2192 missing",
+      "evidence": "ls .github → missing",
       "benefit": "Regressions caught on every push for macOS and Windows.",
       "impact": 4,
       "confidence": 0.8,
@@ -50,7 +50,7 @@
       "category": "reliability",
       "subsystem": "build",
       "problem": "package.json format/format:write call prettier; node_modules/.bin/prettier does not exist, so the scripts fail.",
-      "evidence": "ls node_modules/.bin/prettier \u2192 No such file",
+      "evidence": "ls node_modules/.bin/prettier → No such file",
       "benefit": "Advertised scripts work.",
       "impact": 2,
       "confidence": 0.9,
@@ -85,7 +85,7 @@
     },
     {
       "id": "LUM-005",
-      "title": "3 moderate advisories via mammoth \u2192 argparse \u2192 sprintf-js",
+      "title": "3 moderate advisories via mammoth → argparse → sprintf-js",
       "category": "security",
       "subsystem": "knowledge import",
       "problem": "sprintf-js DoS advisory (GHSA-hp3w-g68c-fv3c) reachable through mammoth's CLI dependency. npm's suggested fix downgrades mammoth (breaking).",
@@ -117,7 +117,7 @@
       "effort": 2,
       "risk": "low",
       "acceptance": [
-        "\u226580 labelled synthetic examples across relations and categories",
+        "≥80 labelled synthetic examples across relations and categories",
         "Script reports accuracy per class",
         "Baseline recorded; test enforces a floor"
       ],
@@ -184,7 +184,7 @@
       "verification": "intentEval.test.ts",
       "status": "done-partial",
       "notes": "Consider a provider-backed classifier only for low-confidence cases if rules plateau; that costs a model call and latency, so measure first.",
-      "evidence_of_completion": "Protocol followed: holdout #1 folded into tuned set; holdout #2 written BEFORE tuning. Tuned set: relations 96%, ambiguity 100%, categories 99%. Holdout #2 (untouched): relations 78%, categories 42%. Rule fixes on tuned misses did not move holdout #2 at all (10/24 before and after) \u2014 keyword rules do not generalise to new phrasings. Mitigation shipped: the 'general' fallback strategy now tells the model to choose the task's structure itself, so a miss degrades to a reasonable answer instead of a generic one. Floors set at measured holdout values.",
+      "evidence_of_completion": "Protocol followed: holdout #1 folded into tuned set; holdout #2 written BEFORE tuning. Tuned set: relations 96%, ambiguity 100%, categories 99%. Holdout #2 (untouched): relations 78%, categories 42%. Rule fixes on tuned misses did not move holdout #2 at all (10/24 before and after) — keyword rules do not generalise to new phrasings. Mitigation shipped: the 'general' fallback strategy now tells the model to choose the task's structure itself, so a miss degrades to a reasonable answer instead of a generic one. Floors set at measured holdout values.",
       "lesson": "Stop tuning keyword rules; each rule fixes only the phrasing it was written for."
     },
     {
@@ -316,6 +316,36 @@
       ],
       "status": "blocked",
       "notes": "The build machine denies Screen Recording to automation; needs a person."
+    },
+    {
+      "id": "LUM-018",
+      "title": "OpenAI project keys and GitHub tokens reached the provider and the log unmasked",
+      "category": "critical-defect",
+      "severity": "security_privacy",
+      "subsystem": "context/sensitivity, electron/logger",
+      "problem": "sensitivity.ts matched sk-[A-Za-z0-9]{20,}, so sk-proj-… (hyphenated) keys in pasted context were sent to the AI provider. logger.ts redacted only Anthropic keys, so OpenAI project, Gemini and GitHub keys in error messages reached lumen.log.",
+      "acceptance": [
+        "sk-proj-/sk-svcacct- keys and gh*_ tokens masked before sending",
+        "log, support file and reports share one credential list",
+        "regression case reg-001 + tests fail when either fix is reverted"
+      ],
+      "status": "done",
+      "notes": "Found during the Prompt 15 audit; walked through the beta loop as synthetic BETA-001. Mutation-checked: reverting sensitivity.ts fails 2 tests (incl. reg-001), reverting logger.ts fails 2."
+    },
+    {
+      "id": "LUM-019",
+      "title": "Run the beta with real testers and set metric thresholds from data",
+      "category": "production-blocker",
+      "severity": "process",
+      "subsystem": "beta programme",
+      "problem": "All feedback, triage and metric infrastructure is verified on synthetic data only. No real reports exist; no thresholds are justified yet.",
+      "acceptance": [
+        "Invite testers with a named beta contact (docs/BETA_PROGRAMME.md §11)",
+        "Triage workspace in access-controlled storage; LUMEN_TRIAGE_DIR set on the release machine",
+        "After two weeks: record observed activation metrics and decide thresholds"
+      ],
+      "status": "blocked",
+      "notes": "Needs people, a beta contact address and a shared storage location."
     }
   ]
 }

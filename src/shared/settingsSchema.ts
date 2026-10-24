@@ -136,6 +136,7 @@ export const settingsSchema = z.object({
   }),
   diagnostics: z.object({
     logLevel: z.enum(["off", "error", "info", "debug"]),
+    recordUsageEvents: z.boolean(),
   }),
   inference: z.object({
     mode: z.enum(["manual", "local_first", "cloud_first"]),

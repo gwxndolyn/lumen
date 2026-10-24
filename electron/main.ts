@@ -7,6 +7,7 @@ import { AppCore } from "../src/core/app";
 import { ShortcutManager, type ShortcutAction } from "../src/core/shortcuts";
 import { formatFromPath, markdownToText, sessionToMarkdown } from "../src/core/exportFormat";
 import { buildSupportBundle } from "../src/core/supportBundle";
+import { DIAGNOSTICS_WINDOW_HOURS } from "../src/core/beta/service";
 import { singleFlight } from "../src/core/singleFlight";
 import { EvalService } from "../src/core/eval/service";
 import { EvalStore } from "../src/core/eval/store";
@@ -21,6 +22,7 @@ import { openStore } from "../src/core/storage/open";
 import { cleanupTempFiles, writeFileAtomic } from "../src/core/fsutil";
 import { CATEGORY_LABELS } from "../src/core/interview/questions";
 import type { AppEvent } from "../src/shared/api";
+import { activeModel } from "../src/shared/defaults";
 import { loadSettingsJson, modeEnum, styleEnum, toneEnum, effortEnum } from "../src/shared/settingsSchema";
 import type { AudioInputState, Diagnostics } from "../src/shared/types";
 import { CaptureError, CaptureService, IMAGE_EXTENSIONS, permissionSettingsUrl, permissionStatus, requestMicrophone } from "./capture";
@@ -530,7 +532,11 @@ function registerIpc() {
     if (!COMMERCIAL.purchaseUrl.startsWith("https://")) throw new Error("This build has no purchase page.");
     await shell.openExternal(COMMERCIAL.purchaseUrl);
   });
-  handle("updates:check", () => checkForUpdate({ feedUrl: COMMERCIAL.updateFeedUrl, current: app.getVersion() }));
+  handle("updates:check", async () => {
+    const r = await checkForUpdate({ feedUrl: COMMERCIAL.updateFeedUrl, current: app.getVersion() });
+    if (r.status !== "disabled") core.quality.record("update_check", r.status);
+    return r;
+  });
   handle("updates:open", async (_e, url) => {
     const u = new URL(z.string().url().max(500).parse(url));
     if (u.protocol !== "https:") throw new Error("Only HTTPS download links are opened.");
@@ -886,34 +892,48 @@ function registerIpc() {
     const r = z.object({ name: z.string().max(80), components: z.string().max(400) }).parse(report);
     logger.error("renderer crashed", { window: winOf(e) === windows.overlay ? "overlay" : "main", error: r.name, components: r.components });
   });
+  handle("diagnostics:previewSupportBundle", () => buildSupportFile().text);
   handle("diagnostics:saveSupportBundle", async (e) => {
+    // Build first so a failure is reported before the save dialog opens.
+    const file = buildSupportFile();
     const res = await dialog.showSaveDialog(winOf(e), {
       defaultPath: `lumen-support-${app.getVersion()}-${new Date().toISOString().slice(0, 10)}.json`,
       filters: [{ name: "JSON", extensions: ["json"] }],
     });
     if (res.canceled || !res.filePath) return null;
-    let logText = "";
-    try {
-      logText = fs.readFileSync(logger.file, "utf8");
-    } catch {
-      /* no log yet */
-    }
-    const d = diagnostics();
-    // Request rows carry only timings and token counts, but drop them to keep the file small.
-    const q = core.quality.metrics(30);
-    const slim = {
-      ...d,
-      metrics: { ...d.metrics, requests: d.metrics.requests.slice(0, 20) },
-      os: { type: os.type(), release: os.release(), arch: os.arch(), memoryGb: Math.round(os.totalmem() / 1e8) / 10 },
-      schemaVersion: store.schemaVersion(),
-      // Counts and rates only — no feedback notes, questions or answers.
-      quality: { requests: q.requests, successRate: q.successRate, failuresByCode: q.failuresByCode, verificationByCheck: q.verificationByCheck, feedbackByKind: q.feedbackByKind, latency: q.latency },
-      inference: { mode: core.settings.inference.mode, privacyRestricted: core.settings.inference.privacyRestricted, localRuntime: core.local.state().status?.available ?? null },
-    };
-    writeFileAtomic(res.filePath, buildSupportBundle({ diagnostics: slim as unknown as Record<string, unknown>, logText, home: os.homedir(), now: new Date() }), 0o600);
-    logger.info("support bundle saved");
+    writeFileAtomic(res.filePath, file.text, 0o600);
+    logger.info("support bundle saved", { bytes: file.bytes });
+    core.quality.record("diagnostics_exported");
     return res.filePath;
   });
+
+  // ---- beta reports (local drafts; exported as a file the user sends; no upload) ----
+  const reportId = z.string().uuid();
+  handle("beta:list", () => core.beta.list());
+  handle("beta:save", (_e, rid, input) => core.beta.saveDraft(rid == null ? null : reportId.parse(rid), input));
+  handle("beta:discard", (_e, rid) => core.beta.discard(reportId.parse(rid)));
+  handle("beta:excerpt", (_e, mid) => core.beta.excerptFor(id.parse(mid)));
+  handle("beta:preview", (_e, rid) => {
+    const p = core.beta.preview(reportId.parse(rid));
+    return { text: p.text, bytes: p.bytes, contents: p.contents, warnings: p.warnings };
+  });
+  handle("beta:export", async (e, rid) => {
+    const r = core.beta.get(reportId.parse(rid));
+    const res = await dialog.showSaveDialog(winOf(e), {
+      defaultPath: `lumen-report-${r.input.category}-${new Date().toISOString().slice(0, 10)}-${r.id.slice(0, 8)}.json`,
+      filters: [{ name: "Lumen beta report", extensions: ["json"] }],
+    });
+    if (res.canceled || !res.filePath) return null;
+    const done = core.beta.export(r.id, res.filePath, (text) => writeFileAtomic(res.filePath!, text, 0o600));
+    logger.info("beta report exported", { category: r.input.category });
+    return { record: done, path: res.filePath };
+  });
+  handle("beta:reveal", (_e, p) => {
+    const file = str(2000).parse(p);
+    if (path.extname(file) === ".json") shell.showItemInFolder(file);
+  });
+  handle("quality:activation", () => core.quality.activation());
+
   handle("diagnostics:openLogs", async () => {
     await shell.openPath(path.dirname(logger.file));
   });
@@ -939,7 +959,7 @@ function registerIpc() {
       route
         ? z
             .string()
-            .regex(/^\/main\/[a-z-]+$/)
+            .regex(/^\/main\/[a-z-]+(\?answer=[A-Za-z0-9-]{1,100})?$/)
             .parse(route)
         : undefined,
     );
@@ -948,6 +968,64 @@ function registerIpc() {
 
 let lastCpu = process.cpuUsage();
 let lastCpuAt = Date.now();
+/** The newest part of the operational log (bounded so a large log can't make exports slow). */
+function readLogTail(maxBytes = 2 * 1024 * 1024): string {
+  try {
+    const st = fs.statSync(logger.file);
+    const fd = fs.openSync(logger.file, "r");
+    try {
+      const len = Math.min(st.size, maxBytes);
+      const buf = Buffer.alloc(len);
+      fs.readSync(fd, buf, 0, len, st.size - len);
+      const text = buf.toString("utf8");
+      // Drop a partial first line when we started mid-file.
+      return len < st.size ? text.slice(text.indexOf("\n") + 1) : text;
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Diagnostics for the support file and beta reports: counts, statuses, timings and error codes.
+ * Paths are reduced to "set" markers; per-request rows are capped.
+ */
+function supportSummary() {
+  const d = diagnostics();
+  const q = core.quality.metrics(30);
+  return {
+    ...d,
+    userDataPath: "[data folder]",
+    dbPath: "[data folder]/lumen.db",
+    logPath: "[data folder]/lumen.log",
+    metrics: { ...d.metrics, requests: d.metrics.requests.slice(0, 20) },
+    os: { type: os.type(), release: os.release(), arch: os.arch(), memoryGb: Math.round(os.totalmem() / 1e8) / 10 },
+    schemaVersion: store.schemaVersion(),
+    settings: {
+      provider: core.settings.provider.kind,
+      model: activeModel(core.settings.provider),
+      transcription: core.settings.transcription.kind,
+      consent: core.settings.consent,
+      redactSensitive: core.settings.privacy.redactSensitive,
+      recordUsageEvents: core.settings.diagnostics.recordUsageEvents,
+      logLevel: core.settings.diagnostics.logLevel,
+    },
+    plan: core.entitlements.state().plan,
+    // Counts and rates only — no feedback notes, questions or answers.
+    quality: { requests: q.requests, successRate: q.successRate, failuresByCode: q.failuresByCode, verificationByCheck: q.verificationByCheck, feedbackByKind: q.feedbackByKind, latency: q.latency },
+    inference: { mode: core.settings.inference.mode, privacyRestricted: core.settings.inference.privacyRestricted, localRuntime: core.local.state().status?.available ?? null },
+  };
+}
+
+/** The support file exactly as it will be written (also shown in the preview). */
+function buildSupportFile() {
+  const since = Date.now() - DIAGNOSTICS_WINDOW_HOURS * 3_600_000;
+  const text = buildSupportBundle({ diagnostics: supportSummary() as unknown as Record<string, unknown>, logText: readLogTail(), home: os.homedir(), now: new Date(), sinceMs: since });
+  return { text, bytes: Buffer.byteLength(text) };
+}
+
 function diagnostics(): Diagnostics {
   const cpu = process.cpuUsage(lastCpu);
   const elapsed = (Date.now() - lastCpuAt) * 1000;
@@ -1114,6 +1192,12 @@ function startup() {
       log: (level, msg, data) => logger.log(level, msg, data),
       devModeAllowed: !app.isPackaged || process.env.LUMEN_ALLOW_DEV_MODE === "1",
       appVersion: app.getVersion(),
+      beta: {
+        home: os.homedir(),
+        app: { version: app.getVersion(), platform: process.platform, arch: process.arch, osRelease: os.release(), electron: process.versions.electron ?? null, packaged: app.isPackaged },
+        readLog: () => readLogTail(),
+        diagnostics: () => supportSummary(),
+      },
       liveScreenCapture: async () => {
         // Live sampling captures the display under the cursor. The overlay is a normal window, so
         // it may appear in the frame; that is visible to the user and harmless.
@@ -1154,6 +1238,7 @@ function startup() {
   });
   store.setKv("settings", JSON.stringify(core.settings));
   const purged = core.sweep();
+  core.quality.record("app_started", app.isPackaged ? "packaged" : "dev");
   logger.info("app ready", { version: app.getVersion(), platform: process.platform, purged, schema: store.schemaVersion() });
   setInterval(() => core.sweep(), 60_000).unref();
 

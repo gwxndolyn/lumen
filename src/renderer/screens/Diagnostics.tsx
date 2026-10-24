@@ -22,6 +22,7 @@ export function DiagnosticsScreen() {
   const [copied, setCopied] = useState(false);
   const [notice, setNotice] = useState<{ ok: boolean; text: string } | null>(null);
   const [test, setTest] = useState<ProviderTestResult | "running" | null>(null);
+  const [supportPreview, setSupportPreview] = useState<string | null>(null);
   const load = () => void api.diagnostics().then(setD);
   useEffect(() => {
     load();
@@ -73,7 +74,18 @@ export function DiagnosticsScreen() {
         </button>
         <button
           className="btn"
-          title="Saves versions, health, permission state, timings and recent log lines. No conversations, transcripts, notes, screenshots or keys."
+          onClick={() =>
+            void api
+              .previewSupportBundle()
+              .then(setSupportPreview)
+              .catch((e) => setNotice({ ok: false, text: `Could not build the support file: ${errMsg(e)}` }))
+          }
+        >
+          Preview support file
+        </button>
+        <button
+          className="btn"
+          title="Saves versions, health, permission state, timings and log lines from the last 24 hours. No conversations, transcripts, notes, screenshots or keys."
           onClick={() =>
             void api
               .saveSupportBundle()
@@ -99,6 +111,23 @@ export function DiagnosticsScreen() {
         {notice && (
           <div className={`alert ${notice.ok ? "info" : "error"} small`} role="status" style={{ marginBottom: 12 }}>
             {notice.text}
+          </div>
+        )}
+        {supportPreview != null && (
+          <div className="card" style={{ marginBottom: 12 }} aria-label="Support file preview">
+            <div className="row">
+              <h3 className="grow">Support file preview ({(new Blob([supportPreview]).size / 1024).toFixed(1)} KB)</h3>
+              <button className="btn sm ghost" onClick={() => setSupportPreview(null)}>
+                Close
+              </button>
+            </div>
+            <p className="small muted">
+              Exactly what “Save support file” writes: versions, settings without keys, health, timings, error codes and operational log events from the last 24 hours. API keys and your home folder
+              are removed. No conversations, transcripts, notes, documents or screenshots.
+            </p>
+            <pre className="mono small" style={{ whiteSpace: "pre-wrap", maxHeight: 320, overflow: "auto" }}>
+              {supportPreview}
+            </pre>
           </div>
         )}
         {test && test !== "running" && (

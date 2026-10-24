@@ -136,6 +136,13 @@ export const MIGRATIONS: string[] = [
    CREATE INDEX idx_quality_events_at ON quality_events(at, type);
    CREATE TABLE user_eval_cases (
      id TEXT PRIMARY KEY, created_at INTEGER NOT NULL, feedback_id TEXT, definition TEXT NOT NULL, last_run TEXT);`,
+  // 9: beta reports — what the user typed (draft) and the export status. The exported file itself
+  // lives wherever the user saved it; only its file name is kept here.
+  `CREATE TABLE beta_reports (
+     id TEXT PRIMARY KEY, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+     status TEXT NOT NULL CHECK (status IN ('draft','exported','export_failed')),
+     input TEXT NOT NULL, exported_at INTEGER, exported_name TEXT, last_error TEXT);
+   CREATE INDEX idx_beta_reports_updated ON beta_reports(updated_at);`,
 ];
 
 type Row = Record<string, unknown>;
@@ -475,6 +482,45 @@ export class Store {
 
   clearQuality() {
     this.db.exec("DELETE FROM quality_events; DELETE FROM feedback; DELETE FROM user_eval_cases;");
+  }
+
+  // ---- beta reports (local drafts and export status) ----
+  saveBetaReport(r: { id: string; createdAt: number; updatedAt: number; status: string; input: unknown; exportedAt?: number | null; exportedName?: string | null; lastError?: string | null }) {
+    this.db
+      .prepare(
+        `INSERT INTO beta_reports (id, created_at, updated_at, status, input, exported_at, exported_name, last_error) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET updated_at = excluded.updated_at, status = excluded.status, input = excluded.input,
+           exported_at = excluded.exported_at, exported_name = excluded.exported_name, last_error = excluded.last_error`,
+      )
+      .run(r.id, r.createdAt, r.updatedAt, r.status, JSON.stringify(r.input), r.exportedAt ?? null, r.exportedName ?? null, r.lastError ?? null);
+  }
+
+  listBetaReports(
+    limit = 200,
+  ): { id: string; createdAt: number; updatedAt: number; status: string; input: unknown; exportedAt: number | null; exportedName: string | null; lastError: string | null }[] {
+    return (this.db.prepare("SELECT * FROM beta_reports ORDER BY updated_at DESC LIMIT ?").all(limit) as Row[]).map((r) => ({
+      id: String(r.id),
+      createdAt: Number(r.created_at),
+      updatedAt: Number(r.updated_at),
+      status: String(r.status),
+      input: safeJson(String(r.input), null),
+      exportedAt: r.exported_at == null ? null : Number(r.exported_at),
+      exportedName: r.exported_name == null ? null : String(r.exported_name),
+      lastError: r.last_error == null ? null : String(r.last_error),
+    }));
+  }
+
+  getBetaReport(id: string) {
+    const r = this.db.prepare("SELECT id FROM beta_reports WHERE id = ?").get(id) as Row | undefined;
+    return r ? (this.listBetaReports(100_000).find((x) => x.id === id) ?? null) : null;
+  }
+
+  deleteBetaReport(id: string): boolean {
+    return Number(this.db.prepare("DELETE FROM beta_reports WHERE id = ?").run(id).changes) > 0;
+  }
+
+  pruneBetaReports(before: number): number {
+    return Number(this.db.prepare("DELETE FROM beta_reports WHERE updated_at < ?").run(before).changes);
   }
 
   saveUserCase(id: string, definition: unknown, feedbackId: string | null, now = Date.now()) {
@@ -982,7 +1028,7 @@ export class Store {
 
   deleteAll() {
     this.db.exec(
-      "BEGIN; DELETE FROM sessions; DELETE FROM conversations; DELETE FROM transcript_sessions; DELETE FROM knowledge_docs; DELETE FROM meeting_insights; DELETE FROM context_items; DELETE FROM memories; DELETE FROM chunk_embeddings; DELETE FROM feedback; DELETE FROM quality_events; DELETE FROM user_eval_cases; UPDATE usage_ledger SET session_id = NULL, category = NULL; COMMIT;",
+      "BEGIN; DELETE FROM sessions; DELETE FROM conversations; DELETE FROM transcript_sessions; DELETE FROM knowledge_docs; DELETE FROM meeting_insights; DELETE FROM context_items; DELETE FROM memories; DELETE FROM chunk_embeddings; DELETE FROM feedback; DELETE FROM quality_events; DELETE FROM user_eval_cases; DELETE FROM beta_reports; UPDATE usage_ledger SET session_id = NULL, category = NULL; COMMIT;",
     );
     this.purgeDeleted();
     this.db.exec("VACUUM");

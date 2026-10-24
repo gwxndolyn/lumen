@@ -1,15 +1,12 @@
 import fs from "node:fs";
 import path from "node:path";
+import { redactCredentials } from "../src/core/credentials";
 
 const MAX_BYTES = 5 * 1024 * 1024;
 
 /** Strip anything that looks like a credential before it reaches disk. */
 export function redact(input: string): string {
-  return input
-    .replace(/sk-ant-[A-Za-z0-9_-]{8,}/g, "sk-ant-[REDACTED]")
-    .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/gi, "Bearer [REDACTED]")
-    .replace(/\b(token|apikey|api_key|authorization|x-api-key)(["'\s:=]+)[^\s"',}]{8,}/gi, "$1$2[REDACTED]")
-    .replace(/\b[A-Fa-f0-9]{40}\b/g, "[REDACTED]");
+  return redactCredentials(input);
 }
 
 export type Level = "debug" | "info" | "warn" | "error";

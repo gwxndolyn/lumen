@@ -25,6 +25,7 @@ import { EvaluationScreen } from "./screens/Evaluation";
 import { QualityScreen } from "./screens/Quality";
 import { PlanScreen } from "./screens/Plan";
 import { HelpScreen } from "./screens/Help";
+import { ReportScreen } from "./screens/Report";
 
 const MODES: { route: string; label: string; sub: string }[] = [
   { route: "interview", label: "Interview", sub: "Copilot" },
@@ -46,13 +47,15 @@ const NAV: { section?: string; route: string; label: string; icon: string }[] = 
   { route: "privacy", label: "Privacy & data", icon: "◐" },
   { route: "plan", label: "Plan & updates", icon: "★" },
   { route: "help", label: "Help", icon: "?" },
+  { route: "report", label: "Send feedback", icon: "✉" },
   { section: "Developer", route: "diagnostics", label: "Diagnostics", icon: "≋" },
   { route: "quality", label: "Quality", icon: "✓" },
   { route: "evaluation", label: "Evaluation Lab", icon: "⚗" },
 ];
 
 function routeFromHash(): string {
-  return location.hash.replace(/^#\/main\/?/, "") || "assistant";
+  // Query parameters (e.g. report?answer=<id>) belong to the screen, not the route.
+  return location.hash.replace(/^#\/main\/?/, "").split("?")[0] || "assistant";
 }
 
 function SessionPicker() {
@@ -192,6 +195,8 @@ export function MainWindow() {
         return <PlanScreen />;
       case "help":
         return <HelpScreen />;
+      case "report":
+        return <ReportScreen />;
       default:
         return <AssistantScreen settings={settings} update={update} live={live} />;
     }
