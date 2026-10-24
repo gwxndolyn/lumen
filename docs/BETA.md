@@ -82,7 +82,7 @@ Data folder:
 
 **What leaves the device:** only the question, the context items selected for it (ranked, deduplicated, size-bounded, with sensitive values such as card numbers and keys masked when redaction is on), and the recent turns of that conversation. These go to the provider you configured. Audio goes to Deepgram only while a transcript is recording.
 
-**Untrusted content:** screen text, documents and transcripts are placed in a labelled `<context>` envelope in the user turn, never in the system prompt. Text that looks like instructions to the AI is flagged and treated as data. The model has no tools and cannot act on your computer.
+**Untrusted content:** screen text, documents and transcripts are placed in a labelled `<context>` envelope in the user turn, never in the system prompt. Text that looks like instructions to the AI is flagged and treated as data. In chat, the model has no tools and cannot act on your computer. In *Projects*, the agent can read files inside a project folder you added; it writes files and runs commands only after you approve each one (see SECURITY.md).
 
 ## 7. Diagnosing problems
 

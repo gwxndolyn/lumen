@@ -143,6 +143,44 @@ export const MIGRATIONS: string[] = [
      status TEXT NOT NULL CHECK (status IN ('draft','exported','export_failed')),
      input TEXT NOT NULL, exported_at INTEGER, exported_name TEXT, last_error TEXT);
    CREATE INDEX idx_beta_reports_updated ON beta_reports(updated_at);`,
+  // 10: project workspace — approved local roots, durable tasks/plans, agent evidence, traced file
+  // changes (with before/after content for conflict-safe revert), verification runs and approvals.
+  // Everything is keyed by project_id; deleting a project reference cascades to its records only
+  // (never to files on disk).
+  `CREATE TABLE projects (
+     id TEXT PRIMARY KEY, name TEXT NOT NULL, root TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL,
+     last_opened_at INTEGER, settings TEXT NOT NULL DEFAULT '{}', notes TEXT NOT NULL DEFAULT '');
+   CREATE TABLE tasks (
+     id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+     title TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', status TEXT NOT NULL, priority INTEGER NOT NULL DEFAULT 2,
+     tags TEXT NOT NULL DEFAULT '[]', reason TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+     checkpoint TEXT, verification_required INTEGER NOT NULL DEFAULT 1);
+   CREATE INDEX idx_tasks_project ON tasks(project_id, updated_at);
+   CREATE TABLE task_steps (
+     id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE, ord INTEGER NOT NULL,
+     title TEXT NOT NULL, status TEXT NOT NULL, depends_on TEXT NOT NULL DEFAULT '[]', note TEXT);
+   CREATE INDEX idx_steps_task ON task_steps(task_id, ord);
+   CREATE TABLE task_events (
+     id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+     project_id TEXT NOT NULL, run_id TEXT, at INTEGER NOT NULL, kind TEXT NOT NULL, summary TEXT NOT NULL, data TEXT);
+   CREATE INDEX idx_events_task ON task_events(task_id, at);
+   CREATE TABLE approvals (
+     id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+     task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE, run_id TEXT NOT NULL, kind TEXT NOT NULL,
+     payload TEXT NOT NULL, status TEXT NOT NULL, created_at INTEGER NOT NULL, decided_at INTEGER);
+   CREATE INDEX idx_approvals_project ON approvals(project_id, status);
+   CREATE TABLE file_changes (
+     id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+     task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL, run_id TEXT, path TEXT NOT NULL, kind TEXT NOT NULL,
+     before_hash TEXT, after_hash TEXT, before_text TEXT, after_text TEXT, created_at INTEGER NOT NULL,
+     status TEXT NOT NULL DEFAULT 'applied', note TEXT);
+   CREATE INDEX idx_changes_project ON file_changes(project_id, created_at);
+   CREATE TABLE verifications (
+     id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+     task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL, label TEXT NOT NULL, argv TEXT NOT NULL, cwd TEXT NOT NULL,
+     started_at INTEGER NOT NULL, finished_at INTEGER, status TEXT NOT NULL, exit_code INTEGER,
+     output TEXT NOT NULL DEFAULT '', fingerprint TEXT);
+   CREATE INDEX idx_verifications_project ON verifications(project_id, started_at);`,
 ];
 
 type Row = Record<string, unknown>;
@@ -1028,7 +1066,7 @@ export class Store {
 
   deleteAll() {
     this.db.exec(
-      "BEGIN; DELETE FROM sessions; DELETE FROM conversations; DELETE FROM transcript_sessions; DELETE FROM knowledge_docs; DELETE FROM meeting_insights; DELETE FROM context_items; DELETE FROM memories; DELETE FROM chunk_embeddings; DELETE FROM feedback; DELETE FROM quality_events; DELETE FROM user_eval_cases; DELETE FROM beta_reports; UPDATE usage_ledger SET session_id = NULL, category = NULL; COMMIT;",
+      "BEGIN; DELETE FROM sessions; DELETE FROM conversations; DELETE FROM transcript_sessions; DELETE FROM knowledge_docs; DELETE FROM meeting_insights; DELETE FROM context_items; DELETE FROM memories; DELETE FROM chunk_embeddings; DELETE FROM feedback; DELETE FROM quality_events; DELETE FROM user_eval_cases; DELETE FROM beta_reports; DELETE FROM projects; UPDATE usage_ledger SET session_id = NULL, category = NULL; COMMIT;",
     );
     this.purgeDeleted();
     this.db.exec("VACUUM");

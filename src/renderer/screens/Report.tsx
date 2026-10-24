@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { ReportInput, ReportRecord } from "../../shared/api";
-import { api, errMsg, formatTs } from "../lib/api";
+import { api, errMsg, formatTime } from "../lib/api";
 import { Empty } from "../components/ui";
 
 // Labels mirror src/core/beta/report.ts (the renderer can't import Node code).
@@ -143,7 +143,7 @@ function ReportList({ reports, onOpen, onChanged, onError }: { reports: ReportRe
                     {r.status === "exported" && r.exportedName && <div className="small faint">{r.exportedName}</div>}
                     {r.lastError && <div className="small faint">{r.lastError}</div>}
                   </td>
-                  <td className="small">{formatTs(r.updatedAt)}</td>
+                  <td className="small">{formatTime(r.updatedAt)}</td>
                   <td>
                     <div className="row">
                       <button className="btn sm" onClick={() => onOpen(r)}>

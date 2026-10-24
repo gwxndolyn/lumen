@@ -75,7 +75,8 @@ export type AppEvent =
   | { type: "scroll"; direction: "up" | "down" }
   | { type: "shortcut-status"; status: Record<string, { status: string; accelerator: string; reason?: string; alternatives?: string[] }> }
   | { type: "audio-command"; command: "start" | "stop" | "system-off"; micDeviceId: string | null; systemAudio: boolean }
-  | { type: "toast"; level: "info" | "error"; message: string };
+  | { type: "toast"; level: "info" | "error"; message: string }
+  | { type: "workspace"; event: import("../core/workspace/service").WorkspaceEvent };
 
 export interface ParsedProblemView {
   title: string | null;
@@ -264,6 +265,30 @@ export interface LumenApi {
   deleteUserCase(id: string): Promise<boolean>;
   clearQuality(): Promise<void>;
 
+  // Project workspace (every call names its project; the main process re-checks the root)
+  wsProjects(): Promise<WsProject[]>;
+  wsAddProject(): Promise<WsProject | null>;
+  wsOpenProject(id: string): Promise<WsProject>;
+  wsRenameProject(id: string, name: string): Promise<WsProject>;
+  wsRelocateProject(id: string): Promise<WsProject | null>;
+  wsRemoveProject(id: string): Promise<void>;
+  wsSettings(id: string, patch: Record<string, unknown>): Promise<unknown>;
+  wsDashboard(id: string): Promise<WsDashboard>;
+  wsGit(id: string): Promise<import("../core/workspace/git").GitStatus>;
+  wsSearch(id: string, query: string): Promise<{ rel: string; line: number | null; text: string; kind: string }[]>;
+  wsIndex(id: string): Promise<import("../core/workspace/indexer").IndexState>;
+  wsCreateTask(id: string, input: { title?: string; description: string; priority?: number; verificationRequired?: boolean }): Promise<WsTask>;
+  wsEditTask(id: string, taskId: string, patch: Record<string, unknown>): Promise<WsTask>;
+  wsTaskDetail(id: string, taskId: string): Promise<WsTaskDetail>;
+  wsTaskAction(id: string, taskId: string, action: "start" | "pause" | "cancel" | "retry" | "ready" | "backlog" | "delete"): Promise<void>;
+  wsSetPlan(id: string, taskId: string, steps: { title: string; dependsOn: number[] }[]): Promise<void>;
+  wsSetStep(id: string, taskId: string, stepId: string, status: string): Promise<void>;
+  wsDecide(id: string, approvalId: string, decision: "approved" | "denied"): Promise<void>;
+  wsChangeDiff(id: string, changeId: string): Promise<ReturnType<import("../core/workspace/service").WorkspaceService["changeDiff"]>>;
+  wsRevert(id: string, changeId: string): Promise<void>;
+  wsVerify(id: string, input: { argv: string[]; label?: string; taskId?: string | null }): Promise<unknown>;
+  wsCancelVerification(id: string, verificationId: string): Promise<boolean>;
+
   // Hybrid inference (local runtime is contacted on loopback only; nothing is ever downloaded)
   localStatus(): Promise<LocalState & { embeddingIndex: EmbeddingIndexState }>;
   localLoaded(): Promise<LoadedModel[]>;
@@ -311,4 +336,19 @@ export interface MemoryView {
   updatedAt: number;
   lastUsedAt: number | null;
   expiresAt: number | null;
+}
+
+export type WsProject = import("../core/workspace/service").ProjectView;
+export type WsDashboard = ReturnType<import("../core/workspace/service").WorkspaceService["dashboard"]>;
+export type WsTask = import("../core/workspace/store").TaskRecord;
+export interface WsTaskDetail {
+  task: WsTask;
+  steps: import("../core/workspace/store").StepRecord[];
+  events: import("../core/workspace/store").TaskEvent[];
+  approvals: ReturnType<import("../core/workspace/service").WorkspaceService["approvals"]>;
+  changes: ReturnType<import("../core/workspace/service").WorkspaceService["changes"]>;
+  verifications: (import("../core/workspace/store").VerificationRecord & { current: boolean })[];
+  recovery: ReturnType<import("../core/workspace/service").WorkspaceService["recoverySummary"]>;
+  running: boolean;
+  blocker: string | null;
 }

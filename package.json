@@ -28,6 +28,7 @@
     "package:linux": "npm run build && electron-builder --linux --publish never",
     "package:dir": "npm run build && electron-builder --dir --publish never",
     "smoke:packaged": "bash scripts/smoke-packaged.sh",
+    "smoke:workspace": "npm run build && bash scripts/smoke-workspace.sh",
     "release:check": "npm run check && npm run check:secrets && npm run audit:prod && npm run build",
     "check:secrets": "node scripts/check-secrets.mjs",
     "format:all": "prettier --check \"electron/**/*.ts\" \"src/**/*.{ts,tsx}\" \"scripts/**/*.mjs\"",

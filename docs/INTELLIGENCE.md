@@ -61,7 +61,7 @@ I did not add a new wrapper type. The existing types already have a consumer for
 
 Current-information questions also get a no-browsing honesty rule: answer from the sources if they cover it, otherwise say as of when and where to check.
 
-**Not implemented:** a debugging workflow that runs code, and research with web search. Lumen has no tools, and the strategies say so rather than pretend.
+**Not implemented:** a debugging workflow that runs code, and research with web search. The chat assistant has no tools, and the strategies say so rather than pretend. Running code against a real project is the project agent's job (`docs/WORKSPACE.md`), behind approvals.
 
 ## 3. Context selection
 
@@ -115,7 +115,7 @@ The answer footer says these are rule-based checks of the text, not proof of cor
 The structural defences are unchanged:
 - untrusted text appears only inside `<context>` in the user turn, escaped so it can't close the envelope;
 - trusted instructions are built only by Lumen;
-- Lumen exposes no tools to the model, so an injection can't trigger an action;
+- the chat assistant exposes no tools to the model, so an injection can't trigger an action there (the project agent's actions are validated and approval-gated in code);
 - secrets are redacted before sending;
 - sessions are isolated.
 

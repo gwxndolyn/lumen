@@ -26,6 +26,7 @@ import { QualityScreen } from "./screens/Quality";
 import { PlanScreen } from "./screens/Plan";
 import { HelpScreen } from "./screens/Help";
 import { ReportScreen } from "./screens/Report";
+import { WorkspaceScreen } from "./screens/Workspace";
 
 const MODES: { route: string; label: string; sub: string }[] = [
   { route: "interview", label: "Interview", sub: "Copilot" },
@@ -35,6 +36,7 @@ const MODES: { route: string; label: string; sub: string }[] = [
 
 const NAV: { section?: string; route: string; label: string; icon: string }[] = [
   { route: "assistant", label: "Assistant", icon: "◎" },
+  { route: "projects", label: "Projects", icon: "▤" },
   { route: "capture", label: "Screen context", icon: "▣" },
   { route: "knowledge", label: "Knowledge base", icon: "✦" },
   { route: "memory", label: "Project memory", icon: "◆" },
@@ -197,6 +199,8 @@ export function MainWindow() {
         return <HelpScreen />;
       case "report":
         return <ReportScreen />;
+      case "projects":
+        return <WorkspaceScreen />;
       default:
         return <AssistantScreen settings={settings} update={update} live={live} />;
     }

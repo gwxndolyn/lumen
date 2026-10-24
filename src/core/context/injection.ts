@@ -2,8 +2,9 @@
 //
 // Detection here is a heuristic used only to *warn* the user and annotate the context block.
 // The real defence is structural: untrusted content is always placed inside a delimited data
-// block in the user turn, never in the system prompt, and the model has no tools — so even a
-// successful injection cannot trigger privileged actions.
+// block in the user turn, never in the system prompt, and the chat model has no tools — so even a
+// successful injection cannot trigger privileged actions. (The project agent can act, but only
+// through actions validated and approval-gated in code; see core/workspace/agent.ts.)
 
 const PATTERNS: RegExp[] = [
   /ignore (all |any |the )?(previous|prior|above|earlier) (instructions|prompts|rules)/i,

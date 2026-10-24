@@ -57,6 +57,7 @@ const CHECKS = [
   { id: "smoke", label: "End-to-end smoke (Electron)", critical: true, cmd: ["bash", "scripts/smoke.sh"], needsDisplay: true },
   { id: "restart", label: "Restart persistence (two launches)", critical: true, cmd: ["bash", "scripts/smoke-restart.sh"], needsDisplay: true },
   { id: "upgrade", label: "Upgrade from an older schema", critical: true, cmd: ["bash", "scripts/smoke-upgrade.sh"], needsDisplay: true },
+  { id: "workspace", label: "Project workspace across two launches (agent, approval, test run, isolation)", critical: true, cmd: ["bash", "scripts/smoke-workspace.sh"], needsDisplay: true },
   {
     id: "packaged",
     label: "Packaged app smoke",

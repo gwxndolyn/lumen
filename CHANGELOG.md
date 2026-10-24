@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased: project workspace
+- **Projects**: add local folders, see their status, tasks needing you, changes, Git status (read-only) and test history.
+- **Tasks and plans** that survive restarts, with a validated state machine. A task is only *completed* when its steps are done, nothing awaits approval and a test run passed after the last change.
+- **Project agent**: investigates, plans, reads and searches inside the project; proposes edits (you approve the exact diff) and runs commands (pre-approved verification commands, or you approve each). Never reads `.env`, keys or credentials. Never commits, pushes or resets.
+- **Changes**: every agent edit is traced to its task with a diff; revert refuses to overwrite later edits.
+- **Recovery**: after a restart, interrupted tasks are paused with a summary of what was done, what changed on disk since, and what's next.
+- Fixed: Send feedback showed times as elapsed durations instead of clock times.
+
 ## Unreleased: response engine
 Understanding
 - New task types: code generation, code review, refactoring, summary, research, planning, notes. The user's instruction now decides the task ("Write a TypeScript function…" is code generation, not a TypeScript question).

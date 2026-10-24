@@ -7,7 +7,37 @@ import { WebSocketServer } from "ws";
 
 const sse = (res, event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 
+/**
+ * Project-agent stand-in: decides the next action from what Lumen reported back (like a model
+ * would), so the smoke test drives the real loop — plan, run the failing test, read the source,
+ * propose the fix, then finish. It never claims anything happened; Lumen's observations do.
+ */
+function agentAction(prompt) {
+  const a = (thought, action) => JSON.stringify({ thought, action });
+  if (/<plan>\n\(no plan yet\)/.test(prompt))
+    return a("Plan the investigation", {
+      type: "update_plan",
+      steps: [
+        { title: "Reproduce the failure", dependsOn: [] },
+        { title: "Find the root cause", dependsOn: [0] },
+        { title: "Fix and re-test", dependsOn: [1] },
+      ],
+    });
+  if (!/run_command/.test(prompt)) return a("Run the tests to see the failure", { type: "run_command", argv: ["node", "test.js"], reason: "Reproduce the failing test" });
+  if (!/read_file src\/math\.js/.test(prompt)) return a("Read the function under test", { type: "read_file", path: "src/math.js" });
+  if (!/propose_edit/.test(prompt)) return a("add() subtracts; fix it", { type: "propose_edit", path: "src/math.js", content: "exports.add = (a, b) => a + b;\n", reason: "add() used subtraction" });
+  if (/\[todo\]|\[doing\]/.test(prompt)) {
+    const i = (prompt.match(/^(\d+)\. \[(todo|doing)\]/m) ?? [])[1];
+    return a("Record progress", { type: "set_step", stepIndex: Number(i ?? 0), status: "done" });
+  }
+  return a("Fix applied; verification will confirm", { type: "finish", summary: "add() subtracted instead of adding", findings: ["src/math.js: add used `-`"] });
+}
+
 function answerFor(body) {
+  if (/You are Lumen's project agent/.test(JSON.stringify(body.system))) {
+    const last = body.messages.at(-1);
+    return agentAction(typeof last.content === "string" ? last.content : last.content.map((p) => p.text ?? "").join("\n"));
+  }
   const last = body.messages.at(-1);
   const text = typeof last.content === "string" ? last.content : last.content.map((p) => p.text ?? "").join("\n");
   const q = /<question>\n([\s\S]*?)\n<\/question>/.exec(text)?.[1] ?? "";

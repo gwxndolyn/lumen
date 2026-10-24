@@ -90,6 +90,15 @@ Note: vitest and the smoke run need to write to `node_modules/.vite-temp`; under
 
 **Next:** LUM-011 with a key — live-run v1.1.0, especially task-101/103/107, to see whether models follow the new strategies; then decide whether classification misses justify a model-based classifier.
 
+## Prompt 18: project workspace (2026-10-24, uncommitted)
+
+- Premise check: the prompt assumed an existing agent engine/tool registry. None existed (Lumen's chat had no tools by design). With the user's approval, built a minimal approval-gated agent inside a new workspace module rather than a separate framework.
+- Added `src/core/workspace/{boundary,indexer,runner,git,tasks,diff,store,agent,service}.ts`, migration 10, Projects screen, IPC `ws:*`, startup recovery, `scripts/smoke-workspace.sh` (in the release gate). Docs: `docs/WORKSPACE.md`, SECURITY.md section.
+- Verified: `npm run check` 607 passed / 4 skipped; build; `smoke`, `smoke-workspace` (two launches, real test runs), `smoke-restart`, `smoke-upgrade` all PASS.
+- Not verified: a real model driving the agent; Windows.
+
+**Next:** with an API key, run a real model through the agent on a small real repo with a failing test; measure actions per task, approval count, and whether `finish` claims match evidence.
+
 ## How to resume (any session, no chat history needed)
 
 1. `cd ~/Documents/lumen-assistant && git status && git log --oneline -8` — confirm you are on the branch above and the tree is clean.

@@ -45,6 +45,7 @@ import { EmbeddingIndex } from "./inference/embeddings";
 import type { InferenceTargets } from "./chatService";
 import { QualityService } from "./quality/service";
 import { BetaService, recentLogEvents } from "./beta/service";
+import { WorkspaceService } from "./workspace/service";
 import type { BetaReport, InteractionMeta } from "./beta/report";
 import { Entitlements } from "./commerce/entitlements";
 import { loadPublicKey } from "./commerce/license";
@@ -160,6 +161,8 @@ export class AppCore {
   readonly embeddings: EmbeddingIndex;
   readonly quality: QualityService;
   readonly beta: BetaService;
+  /** Project workspace: projects, tasks, the approval-gated agent, changes and verification. */
+  readonly workspace: WorkspaceService;
   readonly entitlements: Entitlements;
   /** In-memory only; cleared on restart, session deletion, "Delete everything" and on request. */
   readonly responseCache = new LruCache<CachedResponse>({ maxEntries: 100, maxBytes: 2_000_000, ttlMs: 10 * 60_000, size: (v) => v.text.length * 2 });
@@ -200,6 +203,32 @@ export class AppCore {
       enabled: () => this.settings.diagnostics.recordUsageEvents,
     });
     const b = deps.beta;
+    this.workspace = new WorkspaceService({
+      store: deps.store,
+      now: this.now,
+      // Agent runs use the user's configured cloud/compatible provider; the dev mock can't drive tools.
+      provider: () => {
+        const p = this.settings.provider.kind === "ollama" ? this.local.provider() : this.providerFor();
+        return p && !p.isMock ? p : null;
+      },
+      model: () => (this.settings.provider.kind === "ollama" ? this.settings.inference.local.model : activeModel(this.settings.provider)),
+      maxTokens: () => Math.min(this.settings.provider.maxTokens, 16_000),
+      emit: (e) => deps.emitApp({ type: "workspace", event: e }),
+      log: deps.log,
+      checkUsage: (model, inputTokens, maxOutputTokens) => this.usage.check({ sessionId: this.activeSessionId, kind: this.settings.provider.kind, model, inputTokens, maxOutputTokens }),
+      recordUsage: (model, usage, ok) =>
+        this.usage.record({
+          kind: this.settings.provider.kind,
+          model,
+          usage,
+          usageBasis: "reported",
+          sessionId: this.activeSessionId,
+          category: "agent",
+          outcome: ok ? "ok" : "error",
+          retries: 0,
+          latencyMs: 0,
+        }),
+    });
     this.beta = new BetaService({
       store: deps.store,
       now: this.now,
@@ -1180,6 +1209,7 @@ export class AppCore {
 
   /** Cancel in-flight answers and wait (bounded) for them to record their final state. */
   async shutdown(timeoutMs = 1500) {
+    void this.workspace.shutdown();
     this.stopDetector();
     this.liveScreen.stop();
     if (this.live && this.live.status !== "stopped") this.stopTranscript();

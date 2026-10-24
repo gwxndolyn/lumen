@@ -331,6 +331,7 @@ export async function runSmokeTest({ app, core, store, windows, capture, shortcu
       "plan",
       "help",
       "report",
+      "projects",
     ];
     const broken: string[] = [];
     for (const r of routes) {
@@ -594,6 +595,124 @@ export async function runSmokeTest({ app, core, store, windows, capture, shortcu
     app.exit(ok ? 0 : 1);
   } catch (err) {
     console.log(`SMOKE FAIL ${(err as Error).stack} ${JSON.stringify({ failures, ...result })}`);
+    app.exit(1);
+  }
+}
+
+/**
+ * Project workspace across two real launches (scripts/smoke-workspace.sh), driven through the
+ * renderer bridge exactly as the UI calls it:
+ * seed   — add two real project folders, create a task in project A, run the agent (Anthropic-wire
+ *          stand-in) until it asks to apply its fix, then quit with that approval pending.
+ * verify — both projects are back; the task is waiting for approval with a recovery summary;
+ *          approving writes the file and the configured test command really runs and passes;
+ *          the task completes on that evidence; project B saw none of it; revert of the change
+ *          is refused after a "user" edit.
+ */
+export async function runWorkspacePhase(opts: { app: Electron.App; core: AppCore; windows: WindowManager; setSecret: (n: "anthropic", v: string) => void }, phase: "seed" | "verify") {
+  const { app, core } = opts;
+  const out = (ok: boolean, data: unknown) => console.log(`WORKSPACE ${phase.toUpperCase()} ${ok ? "PASS" : "FAIL"} ${JSON.stringify(data)}`);
+  const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  try {
+    const win = opts.windows.openMain("/main/projects");
+    await new Promise<void>((resolve) => win.webContents.once("did-finish-load", () => resolve()));
+    await wait(400);
+    const js = <T = unknown>(code: string) => win.webContents.executeJavaScript(code) as Promise<T>;
+    const [rootA, rootB] = (process.env.LUMEN_SMOKE_FOLDERS ?? "").split(path.delimiter);
+    if (phase === "seed") {
+      opts.setSecret("anthropic", "sk-ant-smoke-test-key-000000");
+      core.updateSettings({ onboardingComplete: true, provider: { kind: "anthropic" } });
+      const a = await js<{ id: string; status: string }>("window.lumen.wsAddProject()");
+      const b = await js<{ id: string; status: string }>("window.lumen.wsAddProject()");
+      await js(`window.lumen.wsSettings(${JSON.stringify(a.id)}, { verifyCommands: [{ label: "test", argv: ["node", "test.js"] }] })`);
+      const t = await js<{ id: string }>(
+        `window.lumen.wsCreateTask(${JSON.stringify(a.id)}, { description: "Investigate why this project's tests are failing, fix the root cause, run the tests and show what changed." })`,
+      );
+      await js(`window.lumen.wsTaskAction(${JSON.stringify(a.id)}, ${JSON.stringify(t.id)}, "start")`);
+      let d: { task: { status: string }; approvals: { status: string; kind: string }[]; verifications: { status: string; exitCode: number | null }[] } | null = null;
+      for (let i = 0; i < 100; i++) {
+        d = await js(`window.lumen.wsTaskDetail(${JSON.stringify(a.id)}, ${JSON.stringify(t.id)})`);
+        if (d!.task.status !== "running") break;
+        await wait(100);
+      }
+      const ok =
+        a.status === "available" &&
+        b.status === "available" &&
+        d!.task.status === "waiting_approval" &&
+        d!.approvals.some((x) => x.status === "pending" && x.kind === "edit") &&
+        d!.verifications[0]?.status === "failed" &&
+        fs.readFileSync(path.join(rootA!, "src", "math.js"), "utf8").includes("a - b");
+      out(ok, { a: a.id, b: b.id, task: t.id, status: d!.task.status, firstTest: d!.verifications[0] });
+      app.quit();
+      return;
+    }
+    const projects = await js<{ id: string; name: string; root: string; status: string }[]>("window.lumen.wsProjects()");
+    const a = projects.find((p) => p.root === fs.realpathSync(rootA!));
+    const b = projects.find((p) => p.root === fs.realpathSync(rootB!));
+    const dash = await js<{ tasks: { id: string; status: string }[]; approvals: { id: string }[] }>(`window.lumen.wsDashboard(${JSON.stringify(a!.id)})`);
+    const task = dash.tasks[0]!;
+    const before = await js<{ recovery: { text: string } }>(`window.lumen.wsTaskDetail(${JSON.stringify(a!.id)}, ${JSON.stringify(task.id)})`);
+    await js(`window.lumen.wsDecide(${JSON.stringify(a!.id)}, ${JSON.stringify(dash.approvals[0]!.id)}, "approved")`);
+    let d: { task: { status: string }; changes: { id: string; path: string; taskId: string }[]; verifications: { status: string; current: boolean }[] } | null = null;
+    for (let i = 0; i < 150; i++) {
+      d = await js(`window.lumen.wsTaskDetail(${JSON.stringify(a!.id)}, ${JSON.stringify(task.id)})`);
+      if (!["running", "verifying"].includes(d!.task.status)) break;
+      await wait(100);
+    }
+    const bDash = await js<{ tasks: unknown[]; changes: unknown[] }>(`window.lumen.wsDashboard(${JSON.stringify(b!.id)})`);
+    const bSearch = await js<unknown[]>(`window.lumen.wsSearch(${JSON.stringify(b!.id)}, "exports.add")`);
+    if (process.env.LUMEN_SMOKE_SHOTS) {
+      fs.mkdirSync(process.env.LUMEN_SMOKE_SHOTS, { recursive: true });
+      await js("location.hash = '/main/projects'");
+      await wait(600);
+      await js(`[...document.querySelectorAll('.ws-item')].find((b) => b.innerText.startsWith('project alpha'))?.click()`);
+      await wait(600);
+      fs.writeFileSync(path.join(process.env.LUMEN_SMOKE_SHOTS, "ws-1-projects.png"), (await win.webContents.capturePage()).toPNG());
+      await js(`[...document.querySelectorAll('button')].find((b) => b.innerText.includes('Investigate'))?.click()`);
+      await wait(600);
+      fs.writeFileSync(path.join(process.env.LUMEN_SMOKE_SHOTS, "ws-2-task.png"), (await win.webContents.capturePage()).toPNG());
+      await js(`[...document.querySelectorAll('button')].find((b) => b.innerText.startsWith('Changes'))?.click()`);
+      await wait(400);
+      await js(`[...document.querySelectorAll('button')].find((b) => b.innerText === 'Diff')?.click()`);
+      await wait(400);
+      fs.writeFileSync(path.join(process.env.LUMEN_SMOKE_SHOTS, "ws-3-changes.png"), (await win.webContents.capturePage()).toPNG());
+    }
+    const fixed = fs.readFileSync(path.join(rootA!, "src", "math.js"), "utf8");
+    // A later "user" edit must block reverting the agent's change.
+    fs.appendFileSync(path.join(rootA!, "src", "math.js"), "// reviewed\n");
+    const revert = await js<string>(`window.lumen.wsRevert(${JSON.stringify(a!.id)}, ${JSON.stringify(d!.changes[0]!.id)}).then(() => "reverted", (e) => e.message)`);
+    const stale = await js<{ verifications: { current: boolean }[] }>(`window.lumen.wsTaskDetail(${JSON.stringify(a!.id)}, ${JSON.stringify(task.id)})`);
+    const data = {
+      projects: projects.length,
+      waitingAfterRestart: task.status === "waiting_approval",
+      recovery: before.recovery.text.slice(0, 200),
+      status: d!.task.status,
+      change: d!.changes.map((c) => [c.path, c.taskId === task.id]),
+      test: d!.verifications[0],
+      fixedOnDisk: fixed.includes("a + b"),
+      isolation: { bTasks: bDash.tasks.length, bChanges: bDash.changes.length, bSearch: bSearch.length },
+      revertRefused: /has changed since/.test(revert),
+      userEditKept: fs.readFileSync(path.join(rootA!, "src", "math.js"), "utf8").includes("// reviewed"),
+      staleAfterEdit: stale.verifications[0]?.current === false,
+    };
+    const ok =
+      data.projects === 2 &&
+      data.waitingAfterRestart &&
+      data.status === "completed" &&
+      data.fixedOnDisk &&
+      data.test?.status === "passed" &&
+      data.change.length === 1 &&
+      data.change[0]![1] === true &&
+      data.isolation.bTasks === 0 &&
+      data.isolation.bChanges === 0 &&
+      data.isolation.bSearch === 0 &&
+      data.revertRefused &&
+      data.userEditKept &&
+      data.staleAfterEdit;
+    out(ok, data);
+    app.exit(ok ? 0 : 1);
+  } catch (err) {
+    out(false, { error: (err as Error).message });
     app.exit(1);
   }
 }

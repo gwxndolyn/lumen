@@ -65,7 +65,7 @@ See `docs/autonomous-improvement/backlog.json` LUM-013…015.
 - Keys: OS keychain encryption (`safeStorage`), `secrets.json` 0600, never sent to the renderer,
   redacted in logs and support files.
 - Untrusted context is fenced, injection-shaped text is flagged, and no content can trigger an action
-  (Lumen has no tools / command execution). Benchmark `inj-*` cases.
+  (the chat assistant has no tools; the project agent's commands and edits are approval-gated — SECURITY.md). Benchmark `inj-*` cases.
 - Privacy restriction and provider routing never fall back to another cloud provider silently.
 
 **Remaining risks:** unsigned builds (Gatekeeper/SmartScreen warnings, no auto-update); prompt

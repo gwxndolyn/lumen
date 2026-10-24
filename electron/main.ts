@@ -934,6 +934,124 @@ function registerIpc() {
   });
   handle("quality:activation", () => core.quality.activation());
 
+  // ---- project workspace ----
+  // The renderer passes ids and validated values only. Folders come from the native picker, never
+  // from a string the renderer typed, and every file/command operation is re-checked against the
+  // project's root inside WorkspaceService.
+  const ws = () => core.workspace;
+  const pid = z.string().uuid();
+  // Smoke tests can't drive a native dialog; they queue folders in LUMEN_SMOKE_FOLDERS (honoured
+  // only together with LUMEN_SMOKE_TEST).
+  const smokeFolders = process.env.LUMEN_SMOKE_TEST && process.env.LUMEN_SMOKE_FOLDERS ? process.env.LUMEN_SMOKE_FOLDERS.split(path.delimiter) : null;
+  const pickFolder = async (e: IpcMainInvokeEvent, title: string) => {
+    if (smokeFolders) return smokeFolders.shift() ?? null;
+    const res = await dialog.showOpenDialog(winOf(e), { title, properties: ["openDirectory", "createDirectory"] });
+    return res.canceled || !res.filePaths[0] ? null : res.filePaths[0];
+  };
+  const argvSchema = z.array(z.string().min(1).max(4000)).min(1).max(64);
+  handle("ws:projects", () => ws().listProjects());
+  handle("ws:addProject", async (e) => {
+    const dir = await pickFolder(e, "Add a project folder");
+    return dir ? ws().addProject(dir) : null;
+  });
+  handle("ws:openProject", (_e, projectId) => ws().openProject(pid.parse(projectId)));
+  handle("ws:renameProject", (_e, projectId, name) => ws().renameProject(pid.parse(projectId), str(120).parse(name)));
+  handle("ws:relocateProject", async (e, projectId) => {
+    const dir = await pickFolder(e, "Choose the project's new location");
+    return dir ? ws().relocateProject(pid.parse(projectId), dir) : null;
+  });
+  handle("ws:removeProject", (_e, projectId) => ws().removeProject(pid.parse(projectId)));
+  handle("ws:settings", (_e, projectId, patch) =>
+    ws().updateProjectSettings(
+      pid.parse(projectId),
+      z
+        .object({
+          excludes: z.array(str(300)).max(200).optional(),
+          verifyCommands: z
+            .array(z.object({ label: str(80), argv: argvSchema }))
+            .max(20)
+            .optional(),
+          allowedCommands: z.array(argvSchema).max(50).optional(),
+          editPolicy: z.enum(["ask_each", "ask_once_per_task"]).optional(),
+          commandTimeoutSec: z.number().int().min(5).max(3600).optional(),
+          model: str(120).nullable().optional(),
+          notes: str(20_000).optional(),
+        })
+        .parse(patch),
+    ),
+  );
+  handle("ws:dashboard", (_e, projectId) => ws().dashboard(pid.parse(projectId)));
+  handle("ws:git", (_e, projectId) => ws().git(pid.parse(projectId)));
+  handle("ws:search", (_e, projectId, q) => ws().search(pid.parse(projectId), str(200).parse(q)));
+  handle("ws:index", (_e, projectId) => ws().index(pid.parse(projectId), true).state);
+  handle("ws:createTask", (_e, projectId, input) =>
+    ws().createTask(
+      pid.parse(projectId),
+      z.object({ title: str(200).optional(), description: str(20_000), priority: z.number().int().min(0).max(4).optional(), verificationRequired: z.boolean().optional() }).parse(input),
+    ),
+  );
+  handle("ws:editTask", (_e, projectId, tid, patch) =>
+    ws().editTask(
+      pid.parse(projectId),
+      pid.parse(tid),
+      z.object({ title: str(200).optional(), description: str(20_000).optional(), priority: z.number().int().min(0).max(4).optional(), verificationRequired: z.boolean().optional() }).parse(patch),
+    ),
+  );
+  handle("ws:taskDetail", (_e, projectId, tid) => {
+    const p = pid.parse(projectId);
+    const t = pid.parse(tid);
+    const w = ws();
+    const task = w.task(p, t);
+    return {
+      task,
+      steps: w.steps(p, t),
+      events: w.events(p, t),
+      approvals: w.approvals(p, { taskId: t }),
+      changes: w.changes(p, t),
+      verifications: w.db.listVerifications(p, { taskId: t, limit: 20 }).map((v) => ({ ...v, output: v.output.slice(-8000), current: w.isCurrent(v) })),
+      recovery: w.recoverySummary(p, t),
+      running: w.isRunning(t),
+      blocker: w.completionBlockerFor(task),
+    };
+  });
+  handle("ws:taskAction", (_e, projectId, tid, action) => {
+    const p = pid.parse(projectId);
+    const t = pid.parse(tid);
+    const a = z.enum(["start", "pause", "cancel", "retry", "ready", "backlog", "delete"]).parse(action);
+    if (a === "start") ws().start(p, t);
+    else if (a === "pause") ws().pause(p, t);
+    else if (a === "cancel") ws().cancel(p, t);
+    else if (a === "retry") ws().retry(p, t);
+    else if (a === "delete") {
+      if (ws().isRunning(t)) throw new Error("Stop the task before deleting it.");
+      ws().db.deleteTask(p, t);
+    } else ws().setStatus(p, t, a);
+  });
+  handle("ws:setPlan", (_e, projectId, tid, steps) =>
+    ws().setPlan(
+      pid.parse(projectId),
+      pid.parse(tid),
+      z
+        .array(z.object({ title: str(300).min(1), dependsOn: z.array(z.number().int().min(0)).max(20) }))
+        .max(30)
+        .parse(steps),
+    ),
+  );
+  handle("ws:setStep", (_e, projectId, tid, sid, st) => ws().setStep(pid.parse(projectId), pid.parse(tid), pid.parse(sid), z.enum(["todo", "doing", "done", "skipped", "blocked"]).parse(st)));
+  handle("ws:decide", async (_e, projectId, aid, d) => {
+    await ws().decide(pid.parse(projectId), pid.parse(aid), z.enum(["approved", "denied"]).parse(d));
+  });
+  handle("ws:changeDiff", (_e, projectId, cid) => ws().changeDiff(pid.parse(projectId), pid.parse(cid)));
+  handle("ws:revert", (_e, projectId, cid) => void ws().revertChange(pid.parse(projectId), pid.parse(cid)));
+  handle("ws:verify", (_e, projectId, input) => {
+    const v = z.object({ argv: argvSchema, label: str(80).optional(), taskId: pid.nullable().optional() }).parse(input);
+    // Runs in the background; results arrive as workspace events and in the dashboard.
+    void ws()
+      .verify(pid.parse(projectId), v)
+      .catch((err) => toast("error", (err as Error).message));
+  });
+  handle("ws:cancelVerification", (_e, projectId, vid) => ws().cancelVerification(pid.parse(projectId), pid.parse(vid)));
+
   handle("diagnostics:openLogs", async () => {
     await shell.openPath(path.dirname(logger.file));
   });
@@ -1238,6 +1356,8 @@ function startup() {
   });
   store.setKv("settings", JSON.stringify(core.settings));
   const purged = core.sweep();
+  const recovered = core.workspace.recoverAfterRestart();
+  if (recovered.tasks || recovered.verifications) logger.info("workspace recovered", recovered);
   core.quality.record("app_started", app.isPackaged ? "packaged" : "dev");
   logger.info("app ready", { version: app.getVersion(), platform: process.platform, purged, schema: store.schemaVersion() });
   setInterval(() => core.sweep(), 60_000).unref();
@@ -1274,7 +1394,9 @@ function startup() {
     setTimeout(() => void dialog.showMessageBox({ type: "warning", title: "Lumen recovered your data", message: "Lumen started with a fresh database", detail: notice }), 800);
   }
   const restartPhase = process.env.LUMEN_SMOKE_PHASE;
-  if (process.env.LUMEN_SMOKE_TEST && restartPhase === "upgrade") void import("./smoke.js").then((m) => m.runUpgradeCheck({ app, core, store }));
+  if (process.env.LUMEN_SMOKE_TEST && (restartPhase === "workspace-seed" || restartPhase === "workspace-verify"))
+    void import("./smoke.js").then((m) => m.runWorkspacePhase({ app, core, windows, setSecret: (n, v) => secrets.set(n, v) }, restartPhase === "workspace-seed" ? "seed" : "verify"));
+  else if (process.env.LUMEN_SMOKE_TEST && restartPhase === "upgrade") void import("./smoke.js").then((m) => m.runUpgradeCheck({ app, core, store }));
   else if (process.env.LUMEN_SMOKE_TEST && (restartPhase === "seed" || restartPhase === "verify"))
     void import("./smoke.js").then((m) => m.runRestartPhase({ app, core, store, windows, setSecret: (n, v) => secrets.set(n, v) }, restartPhase));
   else if (process.env.LUMEN_SMOKE_TEST) void import("./smoke.js").then((m) => m.runSmokeTest({ app, core, store, windows, capture, shortcutStatus, shortcuts }));
