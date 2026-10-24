@@ -262,12 +262,19 @@ export function MessageView({ m, onRetry, onCopy }: { m: UiMessage; onRetry?: ()
             </span>
           )}
           {m.meta?.verification && (
-            <span className="faint" title={m.meta.verification.findings.map((f) => f.message).join("\n") || "All automatic checks passed."}>
+            <span
+              className="faint"
+              title={
+                (m.meta.verification.findings.map((f) => f.message).join("\n") || "All automatic answer checks passed.") +
+                "\nThese are rule-based checks of the answer text, not a proof it is correct."
+              }
+            >
               {m.meta.verification.findings.length
                 ? `${m.meta.verification.findings.length} check note${m.meta.verification.findings.length > 1 ? "s" : ""}`
                 : `${m.meta.verification.checksRun} checks ✓`}
             </span>
           )}
+          {m.meta?.verification?.code && <CodeCheckBadge checks={m.meta.verification.code} />}
           {m.meta?.fallback && <span className="badge">answered by {m.meta.fallback}</span>}
           {m.meta?.ttftMs != null && <span>first token {m.meta.ttftMs} ms</span>}
           {m.meta?.costUsd ? <span>{usd(m.meta.costUsd)}</span> : null}
@@ -383,6 +390,25 @@ function FeedbackButton({ messageId }: { messageId: string }) {
           {state !== "idle" && <div className="alert error small">{state}</div>}
         </div>
       )}
+    </span>
+  );
+}
+
+/**
+ * Per-block syntax results. Wording is deliberate: "parses" (never "works" or "tested"), and
+ * languages Lumen can't parse are listed as not checked rather than omitted.
+ */
+function CodeCheckBadge({ checks }: { checks: NonNullable<NonNullable<UiMessage["meta"]>["verification"]>["code"] & object }) {
+  const failed = checks.filter((c) => c.status === "failed");
+  const passed = checks.filter((c) => c.status === "passed");
+  const label = failed.length ? `Syntax error in ${failed.length} code block${failed.length > 1 ? "s" : ""}` : passed.length ? `Code parses (${passed.length}/${checks.length})` : "Code not checked";
+  const title = [
+    ...checks.map((c) => `Block ${c.block + 1} (${c.lang}): ${c.status} — ${c.method}${c.detail ? `: ${c.detail}` : ""}`),
+    "Lumen checks syntax only. It never runs code, so it can't tell whether the code is correct.",
+  ].join("\n");
+  return (
+    <span className={`badge ${failed.length ? "danger" : ""}`} title={title}>
+      {label}
     </span>
   );
 }

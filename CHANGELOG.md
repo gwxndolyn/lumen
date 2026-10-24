@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased: response engine
+Understanding
+- New task types: code generation, code review, refactoring, summary, research, planning, notes. The user's instruction now decides the task ("Write a TypeScript function…" is code generation, not a TypeScript question).
+- Questions about the latest versions, releases or news are flagged; the answer must say Lumen can't browse and how current its knowledge is.
+- A bare "fix", "summarise", "thoughts?" with nothing to refer to now gets one clarifying question.
+- Rules that never change with depth: no invented action-item owners, sources, URLs, dates or code locations.
+
+Context
+- A newer capture of the same window replaces the older one instead of both being sent.
+- Earlier conversations are only included when they share real terms with the question, once per exchange, with the question they answered.
+- Context is fitted to the model's context window; a request that still can't fit is refused before it is sent (all providers, not only local).
+- Fixed: long sources could exceed their per-source budget by a few characters.
+
+Checks (nothing is executed)
+- Code blocks: JavaScript and TypeScript are parsed (TypeScript types are not checked), JSON is validated; other languages are shown as "not checked". Answers show "Code parses" or "Syntax error".
+- Flags action-item owners not in the transcript, links not in your sources, and summaries without citations.
+- More prompt-injection patterns: fake "User:/Assistant:" lines and requests to reveal keys or environment variables.
+
+Measurement
+- Diagnostics shows per-stage timings (plan, retrieve, rank, build, generate, verify) and the task type per request.
+- Benchmark v1.1.0 (77 cases); new intent hold-out sets #4–#6.
+
 ## Unreleased: beta programme
 Privacy fixes
 - Pasted OpenAI project/service keys (`sk-proj-…`, `sk-svcacct-…`) and GitHub fine-grained/app tokens were not masked before context was sent to the AI provider. They are now (regression case `reg-001`).

@@ -180,7 +180,9 @@ export function DiagnosticsScreen() {
                 <tr>
                   <th>Time</th>
                   <th>Model</th>
+                  <th>Task</th>
                   <th>Outcome</th>
+                  <th title="Plan · retrieve · rank · build · generate · verify (ms)">Stages</th>
                   <th>Context prep</th>
                   <th>Sent after</th>
                   <th>First token</th>
@@ -195,7 +197,11 @@ export function DiagnosticsScreen() {
                   <tr key={i}>
                     <td>{formatTime(r.at)}</td>
                     <td>{r.model}</td>
+                    <td>{r.category ?? "—"}</td>
                     <td>{r.outcome === "error" ? `error (${r.errorCode})` : r.outcome}</td>
+                    <td className="mono small" title="plan · retrieve · rank · build · generate · verify">
+                      {r.stages ? [r.stages.plan, r.stages.retrieve, r.stages.rank, r.stages.build, r.stages.generate, r.stages.verify].map((x) => Math.round(x)).join(" · ") : "—"}
+                    </td>
                     <td>{ms(r.contextPrepMs)}</td>
                     <td>{ms(r.requestSentMs ?? null)}</td>
                     <td>{ms(r.ttftMs)}</td>

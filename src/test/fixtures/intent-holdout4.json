@@ -1,0 +1,51 @@
+{
+  "note": "Holdout #4, written 2026-10-24 BEFORE the Prompt 16 classifier change (new categories: code_generation, code_review, refactoring, summarization, research, planning, notes). Never used for tuning; labels are ground truth. Mixed requests are labelled by the user's explicit instruction (the verb), not by topic words. `needsCurrent` marks requests that depend on information newer than a model's training data.",
+  "relations": [
+    { "prior": "tree", "text": "Now do the same for postorder", "expect": "follow_up" },
+    { "prior": "sql", "text": "That's not what I asked, I need the third highest", "expect": "correction" },
+    { "prior": "tree", "text": "Make it iterative instead", "expect": "revise_code" },
+    { "prior": "sql", "text": "tl;dr?", "expect": "simplify" },
+    { "prior": "tree", "text": "How do I set up a Postgres replica?", "expect": "new" },
+    { "prior": "tree", "text": "Why does that visit the left subtree first?", "expect": "follow_up" }
+  ],
+  "ambiguous": [
+    { "text": "fix", "expect": true },
+    { "text": "thoughts?", "expect": true },
+    { "text": "Review the auth middleware for timing attacks", "expect": false },
+    { "text": "summarise", "expect": true }
+  ],
+  "categories": [
+    { "text": "Write a TypeScript function that parses ISO 8601 durations", "expect": "code_generation" },
+    { "text": "Generate a Python script that renames files by their EXIF date", "expect": "code_generation" },
+    { "text": "Implement a retry wrapper with exponential backoff in Go", "expect": "code_generation" },
+    { "text": "Create a bash script that backs up my dotfiles", "expect": "code_generation" },
+    { "text": "Review this diff for race conditions", "expect": "code_review" },
+    { "text": "Can you do a code review of the payment handler below?", "expect": "code_review" },
+    { "text": "Is there anything wrong with this pull request?", "expect": "code_review" },
+    { "text": "Audit this function for SQL injection", "expect": "code_review" },
+    { "text": "Refactor this class to use composition instead of inheritance", "expect": "refactoring" },
+    { "text": "Clean up this function, it's 200 lines long", "expect": "refactoring" },
+    { "text": "Split this React component into smaller ones", "expect": "refactoring" },
+    { "text": "Summarise this document in five bullets", "expect": "summarization" },
+    { "text": "Give me a TL;DR of the attached RFC", "expect": "summarization" },
+    { "text": "Condense these release notes into one paragraph", "expect": "summarization" },
+    { "text": "What is the latest stable version of Kubernetes?", "expect": "research", "needsCurrent": true },
+    { "text": "Has Python 3.14 been released yet?", "expect": "research", "needsCurrent": true },
+    { "text": "Find sources comparing Raft and Paxos performance", "expect": "research" },
+    { "text": "What do recent benchmarks say about Bun vs Node?", "expect": "research", "needsCurrent": true },
+    { "text": "Make a project plan for migrating our auth service over 6 weeks", "expect": "planning" },
+    { "text": "Break this feature into tasks with estimates", "expect": "planning" },
+    { "text": "Draft a roadmap for the next two sprints", "expect": "planning" },
+    { "text": "Take notes on this lecture transcript", "expect": "notes" },
+    { "text": "Turn this transcript into study notes with headings", "expect": "notes" },
+    { "text": "Write up minutes for this call", "expect": "meeting_summary" },
+    { "text": "List the action items from the call and who owns them", "expect": "meeting_summary" },
+    { "text": "Why does my Jest test time out only in CI?", "expect": "debugging" },
+    { "text": "Write unit tests for this parser", "expect": "testing" },
+    { "text": "Explain what this regex does", "expect": "code_explanation" },
+    { "text": "Design a notification service for a million users", "expect": "system_design" },
+    { "text": "What is a monad, in plain terms?", "expect": "general" },
+    { "text": "Explain how TCP congestion control works", "expect": "general" },
+    { "text": "Translate this paragraph into French", "expect": "general" }
+  ]
+}

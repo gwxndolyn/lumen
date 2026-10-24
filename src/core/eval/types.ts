@@ -50,7 +50,8 @@ export const METRIC_DEFINITIONS: Record<Metric, string> = {
 
 export type Fixture =
   | { kind: "note" | "document" | "clipboard" | "selected_text"; title: string; text: string; pinned?: boolean }
-  | { kind: "ocr"; title: string; text: string; confidence?: number; ageMinutes?: number }
+  /** sourceId = which window/display was captured; two captures with the same id are the same screen over time. */
+  | { kind: "ocr"; title: string; text: string; confidence?: number; ageMinutes?: number; sourceId?: string }
   | { kind: "transcript"; title: string; lines: { speaker: string; text: string }[] }
   | { kind: "knowledge"; title: string; text: string }
   | { kind: "memory"; memoryKind: "preference" | "convention" | "architecture" | "decision" | "known_issue" | "task"; text: string }

@@ -59,7 +59,9 @@ export function relevantExcerpt(text: string, query: string, max: number): { tex
   const terms = [...new Set(tokenize(query))];
   const head = Math.min(Math.floor(max * 0.2), 2000);
   const chunks = chunkText(text.slice(head), 800, 0);
-  if (!terms.length || !chunks.length) return { text: `${truncate(text, max)}\n[truncated]`, excerpted: true };
+  // The marker counts against the cap: callers budget on the returned length.
+  const cut = () => ({ text: `${truncate(text, Math.max(0, max - 12))}\n[truncated]`.slice(0, max), excerpted: true });
+  if (!terms.length || !chunks.length) return cut();
   const scored = chunks.map((c, i) => {
     const toks = tokenize(c);
     let s = 0;
@@ -73,7 +75,7 @@ export function relevantExcerpt(text: string, query: string, max: number): { tex
     picked.add(p.i);
     used += p.c.length + 8;
   }
-  if (!picked.size) return { text: `${truncate(text, max)}\n[truncated]`, excerpted: true };
+  if (!picked.size) return cut();
   const parts = [text.slice(0, head).trimEnd()];
   let prev = -1;
   for (const p of scored) {
@@ -83,7 +85,7 @@ export function relevantExcerpt(text: string, query: string, max: number): { tex
     prev = p.i;
   }
   if (prev !== scored.length - 1) parts.push("[…]");
-  return { text: parts.join("\n"), excerpted: true };
+  return { text: parts.join("\n").slice(0, max), excerpted: true };
 }
 
 export function truncate(text: string, max: number): string {

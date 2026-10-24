@@ -81,6 +81,15 @@ Note: vitest and the smoke run need to write to `node_modules/.vite-temp`; under
 
 **Next:** LUM-019 — invite testers, set up the triage workspace, then decide thresholds from two weeks of real reports.
 
+## Prompt 16: response engine (2026-10-24, uncommitted on this branch)
+
+- Audit: the planner, ranking, isolation, routing, verification and benchmark already existed (Prompts 6–9). Defects found by probing: seven product task types fell to "general"; current-info questions had no honesty rule; superseded screen captures were both sent; unrelated history was pulled in on one shared word, and one exchange could arrive twice; no context-window guard for cloud providers; excerpts overshot their cap by 12 chars; no code syntax checks; no stage timings.
+- Changed: instruction-first classifier (+7 categories, `needsCurrentInfo`, bare-command ambiguity), depth-independent strategy invariants, `supersede()`, history as one Q/A per exchange with a two-term gate, window-aware budget + guard, `codeCheck.ts` (parse-only JS/TS/JSON), owner/URL/citation checks, role-play and credential-request injection patterns, per-stage timings in Diagnostics, benchmark v1.1.0 (+13 cases).
+- Evidence: v1.1.0 on the old engine 67/77, on the new 77/77 (10 improved, 0 regressed). Unseen intent holdout #6: 17/23. Six mutation checks each fail their tests. `npm run check` 573 passed / 4 skipped; build, smoke, secrets, audit pass. Details: `docs/INTELLIGENCE.md`.
+- Not verified: anything with a real model (no key here).
+
+**Next:** LUM-011 with a key — live-run v1.1.0, especially task-101/103/107, to see whether models follow the new strategies; then decide whether classification misses justify a model-based classifier.
+
 ## How to resume (any session, no chat history needed)
 
 1. `cd ~/Documents/lumen-assistant && git status && git log --oneline -8` — confirm you are on the branch above and the tree is clean.

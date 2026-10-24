@@ -1,9 +1,9 @@
-import type { ChatEvent, ChatMessage, ChatSendRequest, ErrorCode, Session, Settings } from "../shared/types";
+import type { AnswerVerification, ChatEvent, ChatMessage, ChatSendRequest, ErrorCode, Session, Settings, StageTimings } from "../shared/types";
 import { citedLabels, type ContextEngine } from "./context/engine";
 import { buildPrompt, DEFAULT_BUDGET, type PromptBudget } from "./context/promptBuilder";
 import type { Candidate } from "./context/ranker";
 import { redact } from "./context/sensitivity";
-import { truncate } from "./context/text";
+import { tokenize, truncate } from "./context/text";
 import type { Metrics } from "./metrics";
 import { estimateCostUsd, hasPricing } from "./providers/pricing";
 import { toUserError } from "./errors";
@@ -140,6 +140,15 @@ export class ChatService {
     let contextPrepMs = 0;
     let pendingWaitMs = 0;
     let requestSentMs: number | undefined;
+    // Stage durations (Understand → Retrieve → Rank → Build → Generate → Verify), content-free.
+    const stages: StageTimings = { plan: 0, retrieve: 0, rank: 0, build: 0, generate: 0, verify: 0 };
+    let stageAt = performance.now();
+    const lap = (k: keyof StageTimings) => {
+      const t = performance.now();
+      stages[k] = Math.round((t - stageAt) * 10) / 10;
+      stageAt = t;
+    };
+    let category: string | undefined;
 
     const fail = (pe: ProviderError) => {
       emit({ type: "error", requestId: req.requestId, message: pe.message, code: pe.code, retryable: pe.retryable || pe.code === "refusal", conversationId });
@@ -210,6 +219,7 @@ export class ChatService {
       if (ctrl.signal.aborted) throw new CancelledError();
 
       // ---- understand the turn (deterministic; never blocks chat) ----
+      stageAt = performance.now();
       const priorMessages = store.listMessages(convId).filter((m) => m.id !== userMessageId);
       const screenItems = context.active(session.id).filter((r) => r.source === "screenshot" || r.source === "ocr" || r.source === "selected_text" || r.source === "clipboard");
       let plan: ResponsePlan | null = null;
@@ -229,6 +239,8 @@ export class ChatService {
         this.deps.log?.("warn", "response planning failed; answering without a strategy", { error: (planErr as Error)?.name ?? "Error" });
       }
 
+      lap("plan");
+      category = plan?.task.category;
       // ---- gather candidates (all strictly scoped to this session) ----
       const extra: Candidate[] = [];
       if (session.notes.trim()) {
@@ -271,19 +283,48 @@ export class ChatService {
         }
       }
       if (settings.assistant.useConversationHistory) {
-        for (const hit of store.search(query, session.id, 6, "any")) {
-          if (hit.kind !== "message" || hit.parentId === convId) continue;
-          const m = store.getMessage(hit.itemId);
+        // One passage per earlier exchange: the matched message together with its question or
+        // answer, so the fact (usually in the answer) arrives with what it answered. FTS "any" mode
+        // matches a single common word, which pulled unrelated conversations in ("list" in a Python
+        // question and in a capitals question), so an exchange must share at least two distinctive
+        // terms with the query (one, if the query only has one).
+        const qTerms = new Set(tokenize(query));
+        const need = Math.min(2, qTerms.size);
+        const seenConv = new Set<string>();
+        for (const hit of store.search(query, session.id, 12, "any")) {
+          if (hit.kind !== "message" || hit.parentId === convId || seenConv.has(hit.parentId)) continue;
+          const msgs = store.listMessages(hit.parentId);
+          const i = msgs.findIndex((x) => x.id === hit.itemId);
+          if (i < 0) continue;
+          const q = msgs[i]!.role === "user" ? msgs[i]! : msgs.slice(0, i).findLast((x) => x.role === "user");
+          const a = msgs[i]!.role === "assistant" ? msgs[i]! : msgs.slice(i + 1).find((x) => x.role === "assistant");
+          const text = [q ? `Q: ${q.content}` : "", a && !a.meta.cancelled ? `A: ${a.content}` : ""].filter(Boolean).join("\n");
+          if (!text) continue;
+          if (new Set(tokenize(text).filter((t) => qTerms.has(t))).size < need) continue;
+          seenConv.add(hit.parentId);
+          const anchor = a ?? q!;
           // Found by the full-text index, so it keeps the retrieved floor like knowledge passages.
-          if (m) extra.push({ id: `hist:${m.id}`, kind: "history", title: hit.parentTitle, text: m.content, createdAt: m.createdAt, sourceId: m.id, retrieved: true });
+          extra.push({ id: `hist:${anchor.id}`, kind: "history", title: hit.parentTitle, text, createdAt: anchor.createdAt, sourceId: anchor.id, retrieved: true });
+          if (seenConv.size >= 3) break;
         }
       }
 
+      lap("retrieve");
       const prepared = context.prepare(session.id, query, extra, { sendImages: settings.screen.sendImages && provider.supportsImages });
+      lap("rank");
       contextPrepMs = prepared.prepMs;
       const style = session.ai.style ?? req.style;
       const overrides = this.deps.overrides ?? {};
-      const budget = overrides.budget ?? { ...DEFAULT_BUDGET, maxContextChars: settings.limits.maxContextChars, maxItemChars: Math.min(DEFAULT_BUDGET.maxItemChars, settings.limits.maxContextChars) };
+      // Context budget = the user's limit, shrunk to what the model's window can hold once the
+      // system prompt, history and the answer are reserved. A small-window model gets excerpts of
+      // its sources instead of a request it cannot accept. (3.5 chars per token, as estimateTokens.)
+      // Only when the target is fixed: in local-first/cloud-first the router may still choose the
+      // larger-window target for a big request, so shrinking first would take that choice away.
+      const windowTokens = !targets || targets.policy.mode === "manual" ? capabilitiesOf(provider).contextTokens : null;
+      const reservedTokens = Math.min(settings.provider.maxTokens, (windowTokens ?? 0) / 4) + 2_500 + estimateTokens(question) + Math.ceil(HISTORY_CHARS / 3.5);
+      const windowChars = windowTokens ? Math.max(2_000, Math.floor((windowTokens - reservedTokens) * 3.5)) : Infinity;
+      const maxContextChars = Math.min(settings.limits.maxContextChars, windowChars);
+      const budget = overrides.budget ?? { ...DEFAULT_BUDGET, maxContextChars, maxItemChars: Math.min(DEFAULT_BUDGET.maxItemChars, maxContextChars) };
       const built = buildPrompt(question, prepared.ranked, {
         mode: session.type,
         style,
@@ -318,6 +359,7 @@ export class ChatService {
       if (merged.at(-1)?.role === "user") merged.pop();
 
       const userContent = built.userContent.map((p) => (p.type === "text" ? p : { type: "image" as const, mediaType: p.mediaType, data: p.data }));
+      lap("build");
       const attachments = prepared.ranked.filter((r) => built.included.includes(r.id)).map((r) => `${r.kind}:${r.title}`);
       if (!req.retryOfMessageId) {
         userMessageId = store.addMessage({ conversationId: convId, role: "user", content: req.displayText ?? question, references: [], meta: { attachments, style, origin: req.origin } }).id;
@@ -398,6 +440,18 @@ export class ChatService {
         },
       });
 
+      // Every provider, not just the local runtime: refuse a request that cannot fit the model's
+      // window instead of letting the provider reject it (or silently drop the front of it).
+      const window = capabilitiesOf(active).contextTokens;
+      if (window) {
+        const est = estimateTokens(built.systemBlocks.map((b) => b.text).join("") + JSON.stringify(merged) + built.userContent.map((p) => (p.type === "text" ? p.text : "")).join(""));
+        if (est + Math.min(settings.provider.maxTokens, window / 4) > window)
+          throw new ProviderError(
+            `This request (~${est.toLocaleString()} tokens) is larger than the ${model} context window (${window.toLocaleString()} tokens). Remove some context, start a new conversation, or lower "Max context per question".`,
+            "context_too_large",
+            false,
+          );
+      }
       requestSentMs = Date.now() - started;
       const genReq: GenerateRequest = {
         model: route.model,
@@ -477,6 +531,7 @@ export class ChatService {
           this.deps.responseCache!.set(cacheKey, { text: result.text, model: result.model, stopReason: result.stopReason }, { tag: session.id, costMs: Date.now() - genStarted });
       }
 
+      lap("generate");
       if (!result.text.trim()) {
         throw new ProviderError("The AI returned an empty answer. Try again, or rephrase the question.", "empty_response", true);
       }
@@ -501,7 +556,7 @@ export class ChatService {
       const cited = citedLabels(result.text, built.references);
       const checks =
         overrides.verification === false
-          ? { checksRun: [], findings: [] }
+          ? { checksRun: [], findings: [], code: [] }
           : verifyAnswer({
               answer: result.text,
               references: built.references,
@@ -511,8 +566,11 @@ export class ChatService {
               available: { transcript: prepared.availability.transcript === "live", screen: prepared.availability.screen > 0 },
               hintsOnly: !!plan?.strategy.hintsOnly,
               stopReason: result.stopReason,
+              // references[i] and included[i] are pushed together by buildPrompt.
+              sourceText: Object.fromEntries(built.references.map((r, i) => [r.label, prepared.ranked.find((x) => x.id === built.included[i])?.text ?? ""])),
             });
-      const verification = { checksRun: checks.checksRun.length, findings: checks.findings };
+      lap("verify");
+      const verification: AnswerVerification = { checksRun: checks.checksRun.length, findings: checks.findings, code: checks.code.length ? checks.code : undefined };
       if (checks.findings.length) this.deps.log?.("info", "answer checks flagged", { checks: checks.findings.map((f) => f.check) });
       metrics.recordVerification(
         checks.checksRun.length,
@@ -554,6 +612,8 @@ export class ChatService {
         outputTokens: result.usage.outputTokens,
         estimatedCostUsd: cost,
         outcome: "ok",
+        stages,
+        category,
       });
       if (!servedBy.isMock && servedBy === targets?.cloud) this.deps.onProviderResult?.(true);
       else if (!targets && !servedBy.isMock) this.deps.onProviderResult?.(true);
@@ -625,6 +685,7 @@ export class ChatService {
         estimatedCostUsd: 0,
         outcome: "error",
         errorCode: pe.code,
+        category,
       });
       if (["network", "timeout", "overloaded", "auth", "rate_limited"].includes(pe.code)) this.deps.onProviderResult?.(false, pe.code, pe.message);
       fail(pe);

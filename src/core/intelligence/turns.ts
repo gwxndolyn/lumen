@@ -63,6 +63,11 @@ const SIMPLIFY =
   /^(simplify|simpler|in simple(r)? terms|eli5|explain (it )?like i'?m (five|5)|too (long|complicated|complex)|shorter|tl;?dr|summari[sz]e (that|it|this))\b|\b(simpler|more simply|plain english|less jargon|too (long|complicated|complex|technical)|shorter( please)?)\b/i;
 /** References that only make sense with an antecedent ("fix it", "why?"). */
 const DANGLING = /^(it|this|that|those|them|why|how|and|so|then|what about it|fix it|do it|again|more|same)\??$/i;
+/**
+ * A bare command or reaction with no object ("fix", "summarise", "thoughts?", "help?", "explain
+ * more"): without an earlier turn there is nothing to act on, whatever the punctuation.
+ */
+const BARE = /^(fix|review|refactor|summari[sz]e|explain|optimi[sz]e|rewrite|improve|test|debug|translate|continue|thoughts|help|ideas|explain more|more detail|go on)\s*[?.!]*$/i;
 const ELABORATE =
   /^(why\??|how so\??|explain (that|this|it|more|further)|more (detail|details)|go deeper|elaborate|can you (expand|elaborate)|tell me more|walk me through (it|that|this)|break (it|that) down|in more detail)\b/i;
 const REVISE_VERB = /\b(change|modify|update|rewrite|refactor|fix|optimi[sz]e|simplify|convert|translate|port|make|add|remove|rename|handle|support|use)\b/i;
@@ -89,7 +94,7 @@ export function resolveTurn(text: string, prior: PriorTurn | null, opts: { hasSc
   if (opts.hasScreen && SCREEN_REF.test(t)) return build("screen");
   if (!prior) {
     // Nothing to refer back to: a bare "why?" / "fix it" / one-word input cannot be resolved.
-    const vague = DANGLING.test(t) || (words <= 2 && !lang && !/[a-z]{4,}.*[a-z]{4,}/i.test(t) && !/\?$/.test(t));
+    const vague = DANGLING.test(t) || BARE.test(t) || (words <= 2 && !lang && !/[a-z]{4,}.*[a-z]{4,}/i.test(t) && !/\?$/.test(t));
     return build("new", vague);
   }
 

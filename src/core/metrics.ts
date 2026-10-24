@@ -98,6 +98,23 @@ export class Metrics {
       captureP50Ms: percentile(this.captureDurations, 50),
       cancelP50Ms: percentile(this.cancelDurations, 50),
       cancelMaxMs: this.cancelDurations.length ? Math.max(...this.cancelDurations) : null,
+      /** p50 of each pipeline stage over completed requests (ms). */
+      stagesP50: stageP50(ok),
     };
   }
+}
+
+function stageP50(rows: RequestMetric[]) {
+  const withStages = rows.filter((r) => r.stages);
+  if (!withStages.length) return null;
+  const keys = ["plan", "retrieve", "rank", "build", "generate", "verify"] as const;
+  return Object.fromEntries(
+    keys.map((k) => [
+      k,
+      percentile(
+        withStages.map((r) => r.stages![k]),
+        50,
+      ),
+    ]),
+  ) as Record<(typeof keys)[number], number | null>;
 }

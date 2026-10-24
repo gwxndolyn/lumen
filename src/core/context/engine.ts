@@ -4,7 +4,7 @@ import type { PersistedContextItem, Store } from "../storage/db";
 import { looksLikeInjection } from "./injection";
 import { classify, redact } from "./sensitivity";
 import { contentHash, normalizeText, truncate } from "./text";
-import { rankCandidates, type Candidate, type Ranked } from "./ranker";
+import { rankCandidates, supersede, type Candidate, type Ranked } from "./ranker";
 
 /** The normalized representation of every piece of context Lumen knows about. */
 export interface ContextRecord {
@@ -74,6 +74,8 @@ export interface PreparedContext {
   prepMs: number;
   /** Candidates looked at, before the relevance cut. */
   considered: number;
+  /** Older screen observations replaced by a newer capture of the same source (not sent). */
+  superseded: number;
 }
 
 /**
@@ -365,7 +367,10 @@ export class ContextEngine {
     // Captures with neither an image to send nor any recognized text carry no information.
     const usable = own.filter((c) => c.image || c.text.trim());
     const minScore = opts.minScore ?? 0.6;
-    const ranked = rankCandidates(question, [...usable, ...extra], this.now()).filter((c) => c.explicit || c.pinned || c.score > minScore);
+    // A newer capture of the same window/screen replaces the older one: sending both makes the model
+    // reconcile a state that no longer exists.
+    const { kept, superseded } = supersede([...usable, ...extra]);
+    const ranked = rankCandidates(question, kept, this.now()).filter((c) => c.explicit || c.pinned || c.score > minScore);
     const sanitized = this.config.redactSensitive ? ranked.map((r) => ({ ...r, text: redact(r.text), title: redact(r.title) })) : ranked;
     const count = (pred: (c: Ranked) => boolean) => sanitized.filter(pred).length;
     const availability: SourceAvailability = {
@@ -377,7 +382,7 @@ export class ContextEngine {
       history: count((c) => c.kind === "history"),
       memory: count((c) => c.kind === "memory"),
     };
-    return { ranked: sanitized, availability, prepMs: Math.round((performance.now() - started) * 10) / 10, considered: usable.length + extra.length };
+    return { ranked: sanitized, availability, prepMs: Math.round((performance.now() - started) * 10) / 10, considered: usable.length + extra.length, superseded: superseded.length };
   }
 
   /** Keep each session bounded: evict the oldest unpinned items beyond the cap. */

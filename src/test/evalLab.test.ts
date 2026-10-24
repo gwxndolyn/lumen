@@ -469,7 +469,8 @@ describe("service", () => {
   it("estimates live cost only for cases that would call the provider", () => {
     const { service } = svc();
     const e = service.estimate({ mode: "live", categories: ["provider_failures", "research_factual"] });
-    expect(e.liveCases).toBe(BENCHMARK.filter((c) => c.category === "research_factual").length);
+    // Deterministic-only cases (scripted answers) never call the provider, whatever their category.
+    expect(e.liveCases).toBe(BENCHMARK.filter((c) => c.category === "research_factual" && !c.deterministicOnly).length);
     expect(e.known).toBe(true);
     expect(e.maxUsd).toBeGreaterThan(0);
   });

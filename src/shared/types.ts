@@ -342,7 +342,7 @@ export type ChatEvent =
       stopReason: string;
       servedByFallback: string | null;
       citedLabels: string[];
-      verification: { checksRun: number; findings: { check: string; severity: "warn" | "info"; message: string }[] };
+      verification: AnswerVerification;
       routedFrom?: string;
       /** Served from the in-memory response cache (no provider call). */
       cached?: boolean;
@@ -405,7 +405,7 @@ export interface MessageMeta {
   /** How the response orchestrator understood this turn (deterministic, not a model judgement). */
   intent?: ResponseIntent;
   /** Deterministic post-generation checks (see core/intelligence/verify.ts). */
-  verification?: { checksRun: number; findings: { check: string; severity: "warn" | "info"; message: string }[] };
+  verification?: AnswerVerification;
   /** Set when economy routing chose a different model of the same provider. */
   routedFrom?: string;
   /** Provider kind that produced the answer. */
@@ -610,6 +610,26 @@ export interface LiveScreenState {
   display?: string | null;
 }
 
+/**
+ * Deterministic post-generation checks. `code` lists each code block's syntax check with its real
+ * status — "unavailable" and "skipped" are never shown as passing, and nothing is ever executed.
+ */
+export interface AnswerVerification {
+  checksRun: number;
+  findings: { check: string; severity: "warn" | "info"; message: string }[];
+  code?: { block: number; lang: string; status: "passed" | "failed" | "unavailable" | "skipped"; method: string; detail: string | null }[];
+}
+
+/** Durations of the response pipeline stages for one request (ms), for diagnostics. No content. */
+export interface StageTimings {
+  plan: number;
+  retrieve: number;
+  rank: number;
+  build: number;
+  generate: number;
+  verify: number;
+}
+
 export interface RequestMetric {
   at: number;
   model: string;
@@ -626,6 +646,10 @@ export interface RequestMetric {
   estimatedCostUsd: number;
   outcome: "ok" | "error" | "cancelled";
   errorCode?: ErrorCode;
+  /** Present for requests that reached generation. */
+  stages?: StageTimings;
+  /** Task category the planner chose (no content). */
+  category?: string;
 }
 
 export interface Diagnostics {
@@ -667,6 +691,7 @@ export interface Diagnostics {
     captureP50Ms: number | null;
     cancelP50Ms: number | null;
     cancelMaxMs: number | null;
+    stagesP50?: Record<keyof StageTimings, number | null> | null;
   };
   process: { memoryMb: number; cpuPercent: number };
   storage: { sessions: number; conversations: number; messages: number; transcripts: number; knowledgeDocs: number; contextItems: number };

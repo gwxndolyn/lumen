@@ -1,0 +1,38 @@
+{
+  "note": "Holdout #6, written 2026-10-24 AFTER the final Prompt 16 rule pass, measured once and not used to change any rule. This is the unseen number for the final classifier. Same author as the rules (a real limitation: real user phrasing will differ more).",
+  "relations": [
+    { "prior": "tree", "text": "and the space complexity of that?", "expect": "follow_up" },
+    { "prior": "sql", "text": "redo it with a CTE", "expect": "revise_code" },
+    { "prior": "tree", "text": "explain that like I'm new to this", "expect": "simplify" }
+  ],
+  "ambiguous": [
+    { "text": "optimize", "expect": true },
+    { "text": "ideas?", "expect": true },
+    { "text": "Summarise the RFC attached below", "expect": false }
+  ],
+  "categories": [
+    { "text": "Scaffold a FastAPI service with a health endpoint", "expect": "code_generation" },
+    { "text": "write a function to debounce events in javascript", "expect": "code_generation" },
+    { "text": "Could you take a look at this PR and flag anything risky?", "expect": "code_review" },
+    { "text": "review the following migration for data-loss risks", "expect": "code_review" },
+    { "text": "Simplify this nested if-else chain without changing behaviour", "expect": "refactoring" },
+    { "text": "Reduce duplication between these two handlers", "expect": "refactoring" },
+    { "text": "summarise the attached incident report for execs", "expect": "summarization" },
+    { "text": "key takeaways from this paper?", "expect": "summarization" },
+    { "text": "Is Node 18 still supported?", "expect": "research", "needsCurrent": true },
+    { "text": "what are people currently using instead of Redux?", "expect": "research", "needsCurrent": true },
+    { "text": "Outline a rollout plan for the new billing system", "expect": "planning" },
+    { "text": "break the onboarding redesign into tickets", "expect": "planning" },
+    { "text": "make lecture notes from this transcript", "expect": "notes" },
+    { "text": "What were the decisions in the meeting?", "expect": "meeting_summary" },
+    { "text": "write integration tests for the login flow", "expect": "testing" },
+    { "text": "segfault when I free the buffer twice", "expect": "debugging" },
+    { "text": "Why is my React app rendering twice?", "expect": "debugging" },
+    { "text": "what does this awk command do?", "expect": "code_explanation" },
+    { "text": "Design a rate limiter for a public API", "expect": "system_design" },
+    { "text": "How do I index a JSONB column in Postgres?", "expect": "database_sql" },
+    { "text": "Longest increasing subsequence in O(n log n)", "expect": "algorithm" },
+    { "text": "what is eventual consistency", "expect": "general" },
+    { "text": "Write a haiku about Mondays", "expect": "general" }
+  ]
+}

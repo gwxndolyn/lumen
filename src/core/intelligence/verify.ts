@@ -4,9 +4,22 @@
 
 import type { ContextReference } from "../../shared/types";
 import type { TaskCategory } from "./classify";
+import { checkCodeBlocks, type CodeCheck } from "./codeCheck";
 
 export type CheckId =
-  "unclosed_code_fence" | "unknown_citation" | "claims_execution" | "claims_unavailable_source" | "missing_requested_language" | "missing_code" | "repetition" | "too_long_for_depth" | "truncated";
+  | "unclosed_code_fence"
+  | "unknown_citation"
+  | "claims_execution"
+  | "claims_unavailable_source"
+  | "missing_requested_language"
+  | "missing_code"
+  | "repetition"
+  | "too_long_for_depth"
+  | "truncated"
+  | "code_syntax"
+  | "invented_owner"
+  | "uncited_summary"
+  | "fabricated_url";
 
 export interface Finding {
   check: CheckId;
@@ -25,11 +38,15 @@ export interface VerifyInput {
   available: { transcript: boolean; screen: boolean };
   hintsOnly: boolean;
   stopReason: string;
+  /** Text of the sources that were sent (by label), for grounding checks. */
+  sourceText?: Record<string, string>;
 }
 
 export interface VerifyResult {
   findings: Finding[];
   checksRun: CheckId[];
+  /** Per-block syntax results (passed / failed / unavailable / skipped). Never "executed". */
+  code: CodeCheck[];
 }
 
 const FENCE_ALIASES: Record<string, string[]> = {
@@ -123,5 +140,45 @@ export function verifyAnswer(i: VerifyInput): VerifyResult {
     .filter(Boolean).length;
   run("too_long_for_depth", words > WORD_LIMIT[i.depth], { severity: "info", message: `Longer than usual for a ${i.depth} answer (${words} words).` });
 
-  return { findings, checksRun };
+  // Syntax: deterministic parse of each code block (nothing is run). Only failures become findings;
+  // "unavailable" is reported per block so the UI can say a language was not checked.
+  const code = checkCodeBlocks(i.answer);
+  const bad = code.filter((c) => c.status === "failed");
+  if (code.some((c) => c.status === "passed" || c.status === "failed"))
+    run("code_syntax", bad.length > 0, { severity: "warn", message: `Code block ${bad.map((b) => b.block + 1).join(", ")} does not parse: ${bad[0]?.detail ?? ""}`.slice(0, 240) });
+
+  // Notes and summaries: an action-item owner or deadline must appear in the sources.
+  const sources = Object.values(i.sourceText ?? {})
+    .join("\n")
+    .toLowerCase();
+  if ((i.category === "meeting_summary" || i.category === "notes") && sources) {
+    // "Owner: Alice", "owner — Alice", "Alice (owner)", "assigned to Alice". Names must start upper-case.
+    const owners = [
+      ...[...i.answer.matchAll(/\b(?:owner|assigned to|assignee|responsible)\s*[:\-–—]?\s*([A-Z][a-z]+(?: [A-Z][a-z]+)?)\b/gi)].map((m) => m[1]!),
+      ...[...i.answer.matchAll(/\b([A-Z][a-z]+)\s*\((?:owner|assignee)\)/g)].map((m) => m[1]!),
+    ].filter((n) => /^[A-Z]/.test(n) && !/^(Not|None|Tbd|Unknown|Unassigned|Unclear|Someone|Nobody|Stated)$/i.test(n.split(" ")[0]!));
+    const invented = [...new Set(owners.filter((o) => !sources.includes(o.toLowerCase())))];
+    run("invented_owner", invented.length > 0, {
+      severity: "warn",
+      message: `Names ${invented.join(", ")} as an owner, but ${invented.length === 1 ? "that name does" : "those names do"} not appear in the sources.`,
+    });
+  }
+  // A summary of supplied material should point at it.
+  if ((i.category === "summarization" || i.category === "notes" || i.category === "meeting_summary") && i.references.length) {
+    run("uncited_summary", cited.length === 0 && !/no (source|transcript|document)|not (included|provided|available)/i.test(i.answer), {
+      severity: "info",
+      message: "This summary does not cite its sources, so its points can't be traced back to them.",
+    });
+  }
+  // Lumen has no browsing: a URL that isn't in the sources was produced from memory.
+  const urls = [...new Set([...i.answer.matchAll(/https?:\/\/[^\s)\]>"']+/g)].map((m) => m[0].replace(/[.,;:]+$/, "")))];
+  if (urls.length && i.category === "research") {
+    const unknownUrls = urls.filter((u) => !sources.includes(u.toLowerCase()));
+    run("fabricated_url", unknownUrls.length > 0, {
+      severity: "warn",
+      message: `Links to ${unknownUrls.length === 1 ? "a page" : `${unknownUrls.length} pages`} that are not in your sources. Lumen can't browse, so ${unknownUrls.length === 1 ? "it was" : "they were"} written from memory and may not exist.`,
+    });
+  }
+
+  return { findings, checksRun, code };
 }

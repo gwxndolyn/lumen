@@ -81,9 +81,14 @@ export function planResponse(input: PlanInput): ResponsePlan {
   try {
     task = classifyTask(classifyText, { sessionType: input.sessionType, codeInContext: input.codeInContext });
   } catch {
-    task = { category: "general", confidence: 0 };
+    task = { category: "general", confidence: 0, needsCurrentInfo: false };
   }
-  const strategy = buildStrategy(turn, task.category, prefs, { depth: depthFor(input.style, input.depth, p.depth), hasWorkflow: input.hasWorkflow });
+  const strategy = buildStrategy(turn, task.category, prefs, {
+    depth: depthFor(input.style, input.depth, p.depth),
+    hasWorkflow: input.hasWorkflow,
+    // A follow-up inherits "current info" from the question it refers to.
+    needsCurrentInfo: task.needsCurrentInfo,
+  });
   return {
     turn,
     task,

@@ -132,7 +132,16 @@ function setupCase(c: EvalCase, provider: AIProvider | null, baseSettings: Setti
         core.addText(f.kind, f.title, f.text, { pinned: f.pinned });
         break;
       case "ocr": {
-        const rec = core.engine.ingest({ sessionId: session.id, source: "ocr", title: f.title, text: f.text, confidence: f.confidence ?? 0.95, permission: "screen", ocr: "done" });
+        const rec = core.engine.ingest({
+          sessionId: session.id,
+          source: "ocr",
+          sourceId: f.sourceId,
+          title: f.title,
+          text: f.text,
+          confidence: f.confidence ?? 0.95,
+          permission: "screen",
+          ocr: "done",
+        });
         if (f.ageMinutes) Object.assign(rec, { createdAt: clock.t - f.ageMinutes * 60_000 });
         break;
       }

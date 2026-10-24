@@ -79,6 +79,26 @@ export function rankCandidates(query: string, candidates: Candidate[], now = Dat
   return ranked.sort((a, b2) => b2.score - a.score);
 }
 
+/** Screen-derived kinds: a newer capture of the same source replaces what an older one showed. */
+const TRANSIENT: ReadonlySet<ContextSource> = new Set(["screenshot", "ocr"]);
+
+/**
+ * Split out transient observations superseded by a newer one of the same origin (same `sourceId`,
+ * e.g. two captures of the same window). Pinned items are never superseded: the user kept them on
+ * purpose. Returns the ids dropped so the caller can report them.
+ */
+export function supersede(candidates: Candidate[]): { kept: Candidate[]; superseded: string[] } {
+  const newest = new Map<string, number>();
+  for (const c of candidates) if (TRANSIENT.has(c.kind) && c.sourceId && !c.pinned) newest.set(c.sourceId, Math.max(newest.get(c.sourceId) ?? 0, c.createdAt));
+  const superseded: string[] = [];
+  const kept = candidates.filter((c) => {
+    const drop = TRANSIENT.has(c.kind) && !!c.sourceId && !c.pinned && c.createdAt < (newest.get(c.sourceId) ?? 0);
+    if (drop) superseded.push(c.id);
+    return !drop;
+  });
+  return { kept, superseded };
+}
+
 /** Drop candidates whose normalized text is identical (keeps the pinned / most recent one). */
 export function dedupe(candidates: Candidate[]): Candidate[] {
   const seen = new Map<string, Candidate>();

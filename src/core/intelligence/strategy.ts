@@ -113,8 +113,50 @@ const CATEGORY_RULE: Record<TaskCategory, Record<Depth, string>> = {
   },
   meeting_summary: {
     quick: "Meeting summary: 3 bullets from the transcript only.",
-    balanced: "Meeting summary from the transcript only: summary, decisions, action items (owner if stated), open questions. Cite transcript lines.",
+    balanced:
+      "Meeting summary from the transcript only: summary, decisions, action items, open questions. Cite transcript lines. An action item's owner and deadline are listed only if someone in the transcript stated them; otherwise write “owner: not stated”. Separate what was said from what you infer.",
     deep: "Meeting summary from the transcript only: summary, discussion points, decisions, action items, open questions and suggested follow-ups, with citations.",
+  },
+  code_generation: {
+    quick: "Code generation: the code, with the imports it needs, then one line on how to use it. State any assumption about inputs in one line.",
+    balanced:
+      "Code generation: restate the requirements you are implementing in one line (language, inputs, outputs, constraints). Follow conventions visible in the context or project memory (cite them). Give complete code with imports, then how to integrate or call it, then assumptions and limitations.",
+    deep: "Code generation: requirements and constraints; design choices and why; complete code with imports following the project's conventions (cite them); integration steps; error handling; tests (reasoned, not run); assumptions and limitations.",
+  },
+  code_review: {
+    quick: "Code review: list the most important concrete defects only, each with where it is and the fix.",
+    balanced:
+      "Code review of the supplied code only. Order findings by impact: correctness, security, data integrity, then maintainability. For each: location (line or function, only if it is visible in the code), what goes wrong and when, and the fix. Put defects you can show in a section “Confirmed issues” and things that depend on unseen code in “Possible concerns”. No style nitpicks unless asked. If you find nothing serious, say so.",
+    deep: "Code review of the supplied code only: “Confirmed issues” (location, failing input or scenario, fix), “Possible concerns” (what you would need to see to confirm), then maintainability and test gaps. Order by impact (correctness, security, data integrity first). Never invent file names or line numbers that are not in the code.",
+  },
+  refactoring: {
+    quick: "Refactoring: the refactored code, then one line on what changed. Keep behaviour identical.",
+    balanced: "Refactoring: keep external behaviour identical. Show the refactored code, then a short list of what changed and why, and anything whose behaviour you could not preserve or verify.",
+    deep: "Refactoring: identify the problems in the current structure, the target structure, the refactored code (behaviour preserved), a list of changes, how to verify behaviour is unchanged (tests to run), and risks.",
+  },
+  summarization: {
+    quick: "Summary: the main point in 1–3 sentences, from the supplied material only.",
+    balanced:
+      "Summary of the supplied material only (cite it): the key points, keeping important numbers, names and qualifications. Do not add facts that are not in the source. Match any length or format the user asked for. If no source material is in <context>, say what is missing instead of summarising.",
+    deep: "Summary of the supplied material only (cite it): overview, key points with their qualifications, numbers and names preserved, open questions or caveats the source states. No facts that are not in the source. If no source is in <context>, say so.",
+  },
+  research: {
+    quick: "Research question: answer briefly, marking what comes from the supplied sources (cited) and what is general knowledge.",
+    balanced:
+      "Research question. Lumen has no web access: only sources in <context> are retrieved evidence. Cite them for every claim they support. Anything else is your general knowledge — label it “General knowledge:” and say it may be out of date. Never invent sources, URLs or citations. If the evidence is insufficient, say so and say what would settle it.",
+    deep: "Research question. Only sources in <context> are evidence (cite them); label everything else “General knowledge:” with its likely age. Compare the evidence, note disagreements and gaps, and say what source would settle open points. Never invent sources, URLs or citations.",
+  },
+  planning: {
+    quick: "Planning: a short ordered list of steps or milestones.",
+    balanced:
+      "Planning: goal and assumptions, then milestones with the tasks in each, dependencies and the main risk. Only state durations, owners or dates the user gave; otherwise mark them “to estimate” or “owner: TBD”.",
+    deep: "Planning: goal, scope and assumptions; phases with tasks, dependencies and acceptance criteria; risks and mitigations; open decisions. Never invent owners, dates or estimates — use “TBD” unless the user supplied them.",
+  },
+  notes: {
+    quick: "Notes: the key points as bullets, from the supplied material only.",
+    balanced:
+      "Notes from the supplied material only: headings by topic, concise bullets that keep the original meaning, key terms defined. Mark anything you infer as “Inference:”. If the material is unclear or incomplete, say where instead of filling gaps.",
+    deep: "Notes from the supplied material only: headings, bullets, definitions, examples given in the source, and a short list of questions the material leaves open. Mark inferences “Inference:”; never add content the source does not contain.",
   },
   // Also the fallback when the rules could not classify the request, so it tells the model to pick
   // the right shape itself rather than forcing a generic answer onto a technical question.
@@ -146,7 +188,25 @@ export interface Strategy {
 
 const WANTS_SOLUTION = /\b(solution|solve|code|implement|write|show me|full answer|give me the answer)\b/i;
 
-export function buildStrategy(turn: ResolvedTurn, category: TaskCategory, prefs: Preferences, opts: { depth?: Depth; hasWorkflow: boolean }): Strategy {
+/**
+ * Rules that hold at every depth. Depth changes how much is written, never whether facts may be
+ * invented, so these are applied on top of the depth-specific template.
+ */
+const INVARIANT_RULE: Partial<Record<TaskCategory, string>> = {
+  meeting_summary: "Only list an owner or deadline for an action item if someone in the transcript stated it; otherwise write “owner: not stated”. Never invent who said or agreed to something.",
+  notes: "Use only what the source material says; mark anything you infer “Inference:”. Do not fill gaps in the material with invented content.",
+  summarization: "Use only facts in the supplied material and cite it. If no source material is in <context>, say what is missing instead of summarising.",
+  research: "Lumen has no web access: only sources in <context> are evidence. Never invent sources, URLs or citations; label anything else “General knowledge:”.",
+  planning: "Never invent owners, dates or estimates the user did not give; use “TBD”.",
+  code_review: "Only report locations (line numbers, function names) that are visible in the supplied code. Distinguish confirmed defects from possible concerns.",
+  refactoring: "Keep external behaviour identical; say explicitly if any behaviour could change.",
+};
+
+/** Lumen has no web or search tool, so current-information requests get an explicit honesty rule. */
+const CURRENT_INFO_RULE =
+  "This question may depend on information newer than your training data, and Lumen cannot browse the web. Answer from the sources in <context> if they cover it (cite them). Otherwise give what you know, say as of roughly when, and tell the user to check an up-to-date source (name the kind of source, e.g. the project's release page). Never present possibly outdated facts as current.";
+
+export function buildStrategy(turn: ResolvedTurn, category: TaskCategory, prefs: Preferences, opts: { depth?: Depth; hasWorkflow: boolean; needsCurrentInfo?: boolean }): Strategy {
   const depth = opts.depth ?? prefs.depth;
   const lines: string[] = [];
   const relationRule = RELATION_RULE[turn.relation];
@@ -169,6 +229,10 @@ export function buildStrategy(turn: ResolvedTurn, category: TaskCategory, prefs:
         : CATEGORY_RULE[category][depth],
     );
   }
+  // Invariants apply with or without a mode workflow, and whatever the depth or hints setting.
+  const invariant = INVARIANT_RULE[category];
+  if (invariant) lines.push(invariant);
+  if (opts.needsCurrentInfo) lines.push(CURRENT_INFO_RULE);
   lines.push(DEPTH_RULE[depth]);
   if (CODE_CATEGORIES.has(category) && !opts.hasWorkflow) lines.push("Separate facts taken from the context (cited) from assumptions you introduce (prefix them “Assumption:”).");
   return {

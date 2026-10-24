@@ -7,7 +7,7 @@ import { resolveTurn, type PriorTurn } from "./turns";
 export interface IntentFixture {
   relations: { prior: string | null; text: string; expect: string; hasScreen?: boolean }[];
   ambiguous: { text: string; expect: boolean }[];
-  categories: { text: string; expect: string }[];
+  categories: { text: string; expect: string; needsCurrent?: boolean }[];
 }
 
 export const PRIORS: Record<string, PriorTurn> = {
@@ -45,5 +45,7 @@ export function evaluateIntent(f: IntentFixture) {
   const relations = score(f.relations.map((r) => ({ text: r.text, expected: r.expect, got: resolveTurn(r.text, r.prior ? PRIORS[r.prior]! : null, { hasScreen: !!r.hasScreen }).relation })));
   const ambiguous = score(f.ambiguous.map((r) => ({ text: r.text, expected: String(r.expect), got: String(resolveTurn(r.text, null, { hasScreen: false }).ambiguous) })));
   const categories = score(f.categories.map((r) => ({ text: r.text, expected: r.expect, got: classifyTask(r.text).category })));
-  return { relations, ambiguous, categories };
+  // "Needs current information" is scored on every category item (absent label = false).
+  const currentInfo = score(f.categories.map((r) => ({ text: r.text, expected: String(!!r.needsCurrent), got: String(classifyTask(r.text).needsCurrentInfo) })));
+  return { relations, ambiguous, categories, currentInfo };
 }

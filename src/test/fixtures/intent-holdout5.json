@@ -1,0 +1,45 @@
+{
+  "note": "Holdout #5, written 2026-10-24 AFTER the first Prompt 16 rule pass and BEFORE the second (fixes for test-writing, standup/current-info, ambiguity). Not used for tuning. Same author as the rules, so phrasings were deliberately varied (questions, imperatives, lowercase, typos). Labels are ground truth under the Prompt 16 taxonomy.",
+  "relations": [
+    { "prior": "sql", "text": "ok and if two people tie for second?", "expect": "follow_up" },
+    { "prior": "tree", "text": "convert it to java", "expect": "revise_code" },
+    { "prior": "tree", "text": "Nope, I said n-ary tree", "expect": "correction" },
+    { "prior": "sql", "text": "What's the best way to learn Rust?", "expect": "new" }
+  ],
+  "ambiguous": [
+    { "text": "review", "expect": true },
+    { "text": "help?", "expect": true },
+    { "text": "Refactor the billing module to remove the global state", "expect": false },
+    { "text": "explain more", "expect": true }
+  ],
+  "categories": [
+    { "text": "could you write me a small python cli that converts csv to json", "expect": "code_generation" },
+    { "text": "I need a Kotlin data class for a user profile with validation", "expect": "code_generation" },
+    { "text": "build an express middleware that logs request durations", "expect": "code_generation" },
+    { "text": "please review my changes to the cache layer", "expect": "code_review" },
+    { "text": "Check this handler for security problems", "expect": "code_review" },
+    { "text": "what's wrong with this code? it compiles but feels off", "expect": "code_review" },
+    { "text": "this function is a mess, can you restructure it", "expect": "refactoring" },
+    { "text": "extract the validation logic into its own module", "expect": "refactoring" },
+    { "text": "give me the gist of this article", "expect": "summarization" },
+    { "text": "Summarize the key decisions in this design doc", "expect": "summarization" },
+    { "text": "what changed in the newest TypeScript release?", "expect": "research", "needsCurrent": true },
+    { "text": "Is left-pad still maintained?", "expect": "research", "needsCurrent": true },
+    { "text": "what does the literature say about pair programming productivity", "expect": "research" },
+    { "text": "plan out the steps to move our CI from Jenkins to GitHub Actions", "expect": "planning" },
+    { "text": "Create a migration plan for splitting the monolith", "expect": "planning" },
+    { "text": "make notes on this chapter about B-trees", "expect": "notes" },
+    { "text": "turn the lecture into notes I can revise from", "expect": "notes" },
+    { "text": "who is doing what after today's sync?", "expect": "meeting_summary" },
+    { "text": "recap the meeting for people who missed it", "expect": "meeting_summary" },
+    { "text": "Write tests covering the edge cases of this date parser", "expect": "testing" },
+    { "text": "what test cases would you add for a rate limiter?", "expect": "testing" },
+    { "text": "my docker container exits immediately with code 137", "expect": "debugging" },
+    { "text": "why does this query time out on large tables?", "expect": "debugging" },
+    { "text": "explain what this shell script does line by line", "expect": "code_explanation" },
+    { "text": "How would you design a URL shortener?", "expect": "system_design" },
+    { "text": "Write a SQL query that lists users who never logged in", "expect": "database_sql" },
+    { "text": "what's the difference between a process and a thread", "expect": "general" },
+    { "text": "summarize the plot of The Pragmatic Programmer's first chapter", "expect": "summarization" }
+  ]
+}
